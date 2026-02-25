@@ -1,0 +1,17 @@
+venv/
+.env
+tmp_display/
+resources/
+*.pyc
+ok_images/
+nok_images/
+*.txt
+diag_nok/
+diag_ok/
+front_ok/
+front_nok/
+side_ok/
+side_nok/
+Especial_case/
+paths_config.py
+*.pt
