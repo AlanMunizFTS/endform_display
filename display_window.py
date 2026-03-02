@@ -2447,10 +2447,10 @@ class DisplayWindow:
             if img is None:
                 continue
 
-            # Defensive validation (just in case)
+            # Normalize input image size for display tiles.
             if img.shape[0] != img_size or img.shape[1] != img_size:
-                print(f"Warning: {img_path} is not {img_size}x{img_size}")
-                continue
+                interpolation = cv2.INTER_AREA if (img.shape[0] > img_size or img.shape[1] > img_size) else cv2.INTER_LINEAR
+                img = cv2.resize(img, (img_size, img_size), interpolation=interpolation)
 
             row = idx // cols
             col = idx % cols
