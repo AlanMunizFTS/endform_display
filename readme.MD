@@ -53,3 +53,18 @@ Deletes files from classification folders using image names from DB (`img_result
 - Connection success/failure for SSH and DB is logged to `log.txt`.
 - Hard lock behavior for cleanup: by default, max deletions = DB row count (`N`).
 - Target folders: `side_ok`, `side_nok`, `front_ok`, `front_nok`, `diag_ok`, `diag_nok`.
+
+## Configuration new lap
+-- GIT BASH --
+- git fetch --all
+- git branch -r
+- git checkout -b feature/nueva-funcionalidad origin/feature/nueva-funcionalidad
+
+-- PROJECT --
+- .env (make sure you have the achieve)
+
+--TERMINAL--
+- venv\scripts\activate
+- python -m venv venv   
+- pip install -r requirements.txt 
+ 
