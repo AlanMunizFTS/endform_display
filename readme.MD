@@ -81,3 +81,5 @@ pass: admin123
 - Database: postgres 
 - User: postgres 
 - Password: MartinreaFT$2023#
+
+python utilities\import_local_images_to_db.pyimport_local_images_to_db
