@@ -67,4 +67,17 @@ Deletes files from classification folders using image names from DB (`img_result
 - venv\scripts\activate
 - python -m venv venv   
 - pip install -r requirements.txt 
- 
+
+## database form
+
+--LOGIN--
+user: admin@endform.com
+pass: admin123
+
+--FORM--
+- Server Name: local-postgres 
+- Host name/address: postgres
+- Port: 5432
+- Database: postgres 
+- User: postgres 
+- Password: MartinreaFT$2023#
