@@ -25,6 +25,20 @@ Required keys:
 - Run all unittests: `.\venv\Scripts\python.exe -m unittest`
 - View logs: `Get-Content log.txt -Tail 200`
 
+## Database UI (pgAdmin)
+
+- Start services: `docker compose up -d postgres pgadmin`
+- Open browser: `http://localhost:5050`
+- Login in pgAdmin:
+  - Email: `PGADMIN_DEFAULT_EMAIL` from `.env` (default: `admin@endform.com`)
+  - Password: `PGADMIN_DEFAULT_PASSWORD` from `.env` (default: `admin123`)
+- Add server in pgAdmin:
+  - Host: `postgres`
+  - Port: `5432`
+  - Username: `DB_USER` from `.env`
+  - Password: `DB_PASSWORD` from `.env`
+  - Database: `DB_NAME` from `.env`
+
 ## DB Folder Cleanup (side/front/diag ok/nok)
 
 Deletes files from classification folders using image names from DB (`img_results`).

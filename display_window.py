@@ -177,6 +177,7 @@ class DisplayWindow:
         self.refresh_interval = refresh_interval  # Seconds between updates
         self.last_refresh_time = 0
         self.sftp_client = sftp_client  # SFTP client to upload images
+        self.remote_controls_enabled = bool(sftp_client)
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
         self.filename_mapping = filename_mapping or {}  # Mapping of short names to original names
@@ -409,7 +410,12 @@ class DisplayWindow:
                     return
 
             # START/STOP button - only in normal mode
-            if self.start_stop_button_rect and not self.historic_mode and not self.show_no_images_dialog:
+            if (
+                self.remote_controls_enabled
+                and self.start_stop_button_rect
+                and not self.historic_mode
+                and not self.show_no_images_dialog
+            ):
                 bx, by, bw, bh = self.start_stop_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     if self.remote_requested:
@@ -908,10 +914,13 @@ class DisplayWindow:
     
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         """Inicia la descarga continua de imágenes históricas en background al arrancar la app"""
+        # Local-only mode: there is no SFTP download process; just ensure local folder exists.
         if not self.sftp_client:
-            print("⚠ No hay conexión SFTP para descargar históricas")
+            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+            self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
+            print("Local-only mode: background historic SFTP download is disabled")
             return
-        
+
         if not self.sftp_credentials:
             print("✗ Error: No se pasaron credenciales SFTP para multiprocessing")
             return
@@ -2569,10 +2578,14 @@ class DisplayWindow:
 
         # Normal mode: only HISTORIC button
         if not self.historic_mode:
-            canvas = self.draw_trigger_status(canvas)
-            canvas = self.draw_camera_status(canvas)
+            if self.remote_controls_enabled:
+                canvas = self.draw_trigger_status(canvas)
+                canvas = self.draw_camera_status(canvas)
             canvas = self.draw_historic_button(canvas)
-            canvas = self.draw_start_stop_button(canvas)
+            if self.remote_controls_enabled:
+                canvas = self.draw_start_stop_button(canvas)
+            else:
+                self.start_stop_button_rect = None
             canvas = self.draw_exit_button(canvas)
             
             # Draw no images dialog if needed
