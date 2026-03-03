@@ -47,6 +47,17 @@ def _get_required_env(name):
     return value
 
 
+def _get_optional_env(name):
+    load_env_file()
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    return value
+
+
 def _get_required_int_env(name):
     raw_value = _get_required_env(name)
     try:
@@ -64,6 +75,43 @@ def get_sftp_settings():
         "port": _get_required_int_env("SFTP_PORT"),
         "username": _get_required_env("SFTP_USERNAME"),
         "password": _get_required_env("SFTP_PASSWORD"),
+    }
+
+
+def is_sftp_enabled():
+    """Return whether SFTP mode is explicitly enabled by environment flag."""
+    load_env_file()
+    raw_value = os.getenv("APP_SFTP_ENABLED")
+    if raw_value is None:
+        return False
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_optional_sftp_settings():
+    """Return validated SFTP settings when enabled and complete, else None."""
+    if not is_sftp_enabled():
+        return None
+
+    hostname = _get_optional_env("SFTP_HOST")
+    port_raw = _get_optional_env("SFTP_PORT")
+    username = _get_optional_env("SFTP_USERNAME")
+    password = _get_optional_env("SFTP_PASSWORD")
+
+    if not all([hostname, port_raw, username, password]):
+        return None
+
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Environment variable SFTP_PORT must be an integer. Got: {port_raw!r}"
+        ) from exc
+
+    return {
+        "hostname": hostname,
+        "port": port,
+        "username": username,
+        "password": password,
     }
 
 
