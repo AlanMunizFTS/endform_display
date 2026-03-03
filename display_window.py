@@ -4,7 +4,8 @@ import numpy as np
 import os
 import re
 from collections import OrderedDict
-from multiprocessing import Process
+from collections import defaultdict
+from multiprocessing import Event, Process
 from db import PostgresDB, get_db_connection
 from file_manager import FileManager
 from utilities.log import get_logger, install_print_logger
@@ -18,15 +19,157 @@ from paths_config import (
 
 
 # Standalone worker kept for compatibility with SFTP mode.
-def _download_images_background_worker(hostname, port, username, password, remote_dir, historic_temp_dir, check_interval=30, verbose=False):
-    """Background historic downloader. In local-only mode this worker is not used."""
+def _sleep_with_stop(stop_event, seconds):
+    """Sleep in short intervals so stop_event can interrupt promptly."""
+    import time
+
+    if seconds <= 0:
+        return
+
+    end_time = time.monotonic() + seconds
+    while time.monotonic() < end_time:
+        if stop_event is not None and stop_event.is_set():
+            return
+        time.sleep(0.2)
+
+
+def _download_images_background_worker(
+    hostname,
+    port,
+    username,
+    password,
+    remote_dir,
+    historic_temp_dir,
+    check_interval=30,
+    reconnect_interval=10,
+    stop_event=None,
+    verbose=False,
+):
+    """Download remote historic images continuously, with reconnect on failures."""
+    import paramiko
+
     install_print_logger(reset=False)
     logger = get_logger()
-    logger.info(
-        "[HIST_SYNC_SSH] Background downloader skipped (local-only mode)",
-        allow_repeat=True,
-    )
-    return
+    file_manager = FileManager()
+
+    image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
+    ssh_client = None
+    sftp_client = None
+
+    file_manager.makedirs(historic_temp_dir, exist_ok=True)
+
+    def close_connections():
+        nonlocal sftp_client, ssh_client
+        try:
+            if sftp_client:
+                sftp_client.close()
+        except Exception:
+            pass
+        try:
+            if ssh_client:
+                ssh_client.close()
+        except Exception:
+            pass
+        sftp_client = None
+        ssh_client = None
+
+    logger.info("[HIST_SYNC_SSH] Historic worker started", allow_repeat=True)
+    try:
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                break
+
+            if sftp_client is None:
+                try:
+                    logger.info(
+                        f"[HIST_SYNC_SSH] Connecting to {hostname}:{port} as {username}",
+                        allow_repeat=True,
+                    )
+                    ssh_client = paramiko.SSHClient()
+                    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh_client.connect(
+                        hostname=hostname,
+                        port=port,
+                        username=username,
+                        password=password,
+                        timeout=10,
+                    )
+                    sftp_client = ssh_client.open_sftp()
+                    logger.info("[HIST_SYNC_SSH] Connection successful", allow_repeat=True)
+                except Exception as e:
+                    logger.error(
+                        f"[HIST_SYNC_SSH] Connection failed: {e}",
+                        allow_repeat=True,
+                    )
+                    close_connections()
+                    _sleep_with_stop(stop_event, reconnect_interval)
+                    continue
+
+            try:
+                existing_local = (
+                    set(file_manager.listdir(historic_temp_dir))
+                    if file_manager.exists(historic_temp_dir)
+                    else set()
+                )
+
+                file_manager.sftp_chdir(sftp_client, remote_dir)
+                remote_files = file_manager.sftp_listdir(sftp_client)
+
+                all_remote_images = [
+                    f for f in remote_files if f.lower().endswith(image_extensions)
+                ]
+                all_remote_images = [f for f in all_remote_images if f.startswith("11861")]
+
+                jsn_groups = defaultdict(list)
+                for img in all_remote_images:
+                    jsn = img.split("_")[0] if "_" in img else img
+                    jsn_groups[jsn].append(img)
+
+                sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
+                excluded_jsns = set(sorted_jsns[:2]) if len(sorted_jsns) >= 2 else set()
+
+                filtered_images = [
+                    img
+                    for img in all_remote_images
+                    if (img.split("_")[0] if "_" in img else img) not in excluded_jsns
+                ]
+
+                images_to_download = [
+                    img for img in filtered_images if img not in existing_local
+                ]
+
+                downloaded_count = 0
+                for img in images_to_download:
+                    if stop_event is not None and stop_event.is_set():
+                        break
+                    local_file = file_manager.join(historic_temp_dir, img)
+                    file_manager.sftp_get(sftp_client, img, local_file)
+                    downloaded_count += 1
+
+                if downloaded_count:
+                    logger.info(
+                        f"[HIST_SYNC_SSH] Downloaded {downloaded_count} new historic images",
+                        allow_repeat=True,
+                    )
+
+                _sleep_with_stop(stop_event, check_interval)
+
+            except FileNotFoundError:
+                logger.warn(
+                    f"[HIST_SYNC_SSH] Remote historic folder not found: {remote_dir}",
+                    allow_repeat=True,
+                )
+                _sleep_with_stop(stop_event, check_interval)
+            except Exception as e:
+                logger.error(
+                    f"[HIST_SYNC_SSH] Sync error: {e}",
+                    allow_repeat=True,
+                )
+                close_connections()
+                _sleep_with_stop(stop_event, reconnect_interval)
+    finally:
+        close_connections()
+        logger.info("[HIST_SYNC_SSH] Historic worker stopped", allow_repeat=True)
 
 class DisplayWindow:
     def __init__(
@@ -65,6 +208,7 @@ class DisplayWindow:
         self.temp_results = {}  # Dictionary for temporary changes {img_name: new_value}
         self.db = get_db_connection()
         self.download_process = None  # Process for background download
+        self.download_stop_event = None
         self.historic_db_registered = False  # Tracks whether visible historic images were registered in DB.
         self.search_button_rect = None  # Search button rect
         self.search_input_rect = None  # Search input field rect
@@ -842,47 +986,53 @@ class DisplayWindow:
         self.exit_historic_mode()
 
     def start_historic_download_on_startup(self, local_path, check_interval=30):
-        """Start historic sync/downloader. Local-only mode just ensures the folder exists."""
-        # Local-only mode: there is no SFTP download process; just ensure local folder exists.
-        if not self.sftp_client:
-            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-            self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
-            print("Local-only mode: background historic SFTP download is disabled")
-            return
+        """Start historic sync/downloader process when SFTP credentials are available."""
+        historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+        self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
 
         if not self.sftp_credentials:
-            print("Error: missing SFTP credentials for multiprocessing")
+            print("SFTP historic downloader disabled: missing credentials")
             return
-        
+
+        hostname = self.sftp_credentials.get("hostname")
+        port = self.sftp_credentials.get("port")
+        username = self.sftp_credentials.get("username")
+        password = self.sftp_credentials.get("password")
+        if not all([hostname, port, username, password]):
+            print("SFTP historic downloader disabled: incomplete credentials")
+            return
+         
         # Verificar si ya hay un proceso activo
         if self.download_process and self.download_process.is_alive():
             print("Background download process is already running")
             return
-        
+         
         try:
-            # Create temp folder for historic
-            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-            self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
-            
-            # Obtener credenciales
-            hostname = self.sftp_credentials.get('hostname')
-            port = self.sftp_credentials.get('port')
-            username = self.sftp_credentials.get('username')
-            password = self.sftp_credentials.get('password')
-            
-            
             # Iniciar descarga continua en proceso separado (BACKGROUND)
+            self.download_stop_event = Event()
             self.download_process = Process(
                 target=_download_images_background_worker,
-                args=(hostname, port, username, password, self.remote_hist_dir, historic_temp_dir, check_interval)
+                args=(
+                    hostname,
+                    port,
+                    username,
+                    password,
+                    self.remote_hist_dir,
+                    historic_temp_dir,
+                    check_interval,
+                    10,
+                    self.download_stop_event,
+                ),
             )
             self.download_process.daemon = True  # Proceso daemon se cierra cuando la app termina
             self.download_process.start()
-                
+                 
         except Exception as e:
             print(f"Error starting background download: {e}")
             import traceback
             traceback.print_exc()
+            self.download_process = None
+            self.download_stop_event = None
     
     def download_historic_batch(self, local_path, max_images=7):
         """Return currently selected historic batch from local cache."""
@@ -2379,7 +2529,32 @@ class DisplayWindow:
         
     def close(self):
         """Close the display window"""
-        cv2.destroyWindow(self.window_name)
+        if self.download_stop_event is not None:
+            try:
+                self.download_stop_event.set()
+            except Exception:
+                pass
+
+        if self.download_process is not None:
+            try:
+                self.download_process.join(timeout=2)
+            except Exception:
+                pass
+
+            try:
+                if self.download_process.is_alive():
+                    self.download_process.terminate()
+                    self.download_process.join(timeout=1)
+            except Exception:
+                pass
+
+        self.download_process = None
+        self.download_stop_event = None
+
+        try:
+            cv2.destroyWindow(self.window_name)
+        except Exception:
+            pass
         
     def set_color(self, color):
         """Change display color - color in BGR format (Blue, Green, Red)"""
