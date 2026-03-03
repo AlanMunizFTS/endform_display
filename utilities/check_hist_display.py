@@ -1,5 +1,6 @@
 import paramiko
 from settings import get_sftp_settings
+from paths_config import REMOTE_HIST_DISPLAY_DIR
 
 # ===== CONFIGURA AQUÍ TUS VARIABLES =====
 _sftp_settings = get_sftp_settings()
@@ -7,7 +8,7 @@ hostname = _sftp_settings["hostname"]
 port = _sftp_settings["port"]
 username = _sftp_settings["username"]
 password = _sftp_settings["password"]
-remote_hist_path = "/media/ssd/hist_display"
+remote_hist_path = REMOTE_HIST_DISPLAY_DIR
 # ========================================
 
 print("Conectando al servidor SFTP...")

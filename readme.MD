@@ -5,15 +5,34 @@
 This branch reads DB/SFTP credentials from `.env` through `settings.py`.
 
 Required keys:
-- `SFTP_HOST`
-- `SFTP_PORT`
-- `SFTP_USERNAME`
-- `SFTP_PASSWORD`
 - `DB_HOST`
 - `DB_PORT`
 - `DB_NAME`
 - `DB_USER`
 - `DB_PASSWORD`
+
+Optional SFTP keys (only required when enabled):
+- `APP_SFTP_ENABLED` (`1`, `true`, `yes`, `on` to enable; default disabled)
+- `SFTP_HOST`
+- `SFTP_PORT`
+- `SFTP_USERNAME`
+- `SFTP_PASSWORD`
+
+## SFTP Mode (Hybrid Fallback)
+
+- `APP_SFTP_ENABLED` disabled or missing:
+  - App runs local-only mode.
+- `APP_SFTP_ENABLED` enabled with incomplete SFTP credentials:
+  - App runs local-only mode (no startup crash).
+- `APP_SFTP_ENABLED` enabled with valid credentials:
+  - App tries SFTP at startup.
+  - If SFTP is down/unreachable, app continues in local mode and retries every 10 seconds.
+  - When SFTP reconnects, remote live tasks resume automatically.
+
+Expected logs include:
+- `[LOCAL] Running in local-only mode (SFTP disabled)`
+- `[SSH] Initial SFTP connection failed, running local-only fallback`
+- `[SSH] Reconnected successfully`
 
 ## Quick Commands
 

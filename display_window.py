@@ -12,6 +12,7 @@ from utilities.log import get_logger, install_print_logger
 from settings import get_sftp_settings
 from paths_config import (
     HISTORIC_SUBDIR_NAME,
+    REMOTE_HIST_DISPLAY_DIR,
     STATUS_SYNC_DIRS,
     SYNC_IMAGES_BASE_DIR,
     TMP_DISPLAY_DIR,
@@ -193,7 +194,7 @@ class DisplayWindow:
         self.prev_button_rect = None  # Previous arrow button
         self.save_changes_button_rect = None  # SAVE button to save changes
         self.image_paths = []  # Image paths
-        self.remote_hist_dir = "/media/ssd/hist_display"  # Remote folder for history
+        self.remote_hist_dir = REMOTE_HIST_DISPLAY_DIR  # Remote folder for history
         self.refresh_interval = refresh_interval  # Seconds between updates
         self.last_refresh_time = 0
         self.sftp_client = None  # SFTP client to upload images
@@ -2826,7 +2827,7 @@ def check_historic_images():
     port = sftp_settings["port"]
     username = sftp_settings["username"]
     password = sftp_settings["password"]
-    remote_hist_dir = "/media/ssd/hist_display"
+    remote_hist_dir = REMOTE_HIST_DISPLAY_DIR
     local_hist_dir = file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
 
     print("\n" + "="*70)
