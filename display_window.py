@@ -199,27 +199,6 @@ class DisplayWindow:
         bx, by, bw, bh = rect
         return bx <= x <= bx + bw and by <= y <= by + bh
     
-    def _apply_hover_color(self, base_color, is_hovered):
-        """Apply hover effect to a color by brightening it"""
-        if not is_hovered:
-            return base_color
-        # Brighten the color by increasing each channel by 40 (capped at 255)
-        b, g, r = base_color
-        return (
-            min(b + 40, 255),
-            min(g + 40, 255),
-            min(r + 40, 255)
-        )
-    
-    def _apply_pressed_color(self, base_color):
-        """Apply pressed effect to a color by darkening it"""
-        b, g, r = base_color
-        return (
-            max(b - 60, 0),
-            max(g - 60, 0),
-            max(r - 60, 0)
-        )
-    
     def _scale_rect(self, rect, scale_factor):
         """Scale a rectangle (x, y, w, h) by a factor from its center"""
         if rect is None:
@@ -425,18 +404,6 @@ class DisplayWindow:
     def enter_historic_mode(self):
         self._require_controller().enter_historic_mode()
 
-    def _custom_sort_key(self, filename):
-        """Helper function to sort by type: side -> front -> diag"""
-        lower_name = filename.lower()
-        if 'side' in lower_name:
-            return (0, filename)
-        elif 'front' in lower_name:
-            return (1, filename)
-        elif 'diag' in lower_name:
-            return (2, filename)
-        else:
-            return (3, filename)
-    
     def exit_historic_mode(self):
         self._require_controller().exit_historic_mode()
     
@@ -1493,51 +1460,6 @@ class DisplayWindow:
         text_y_btn = button_y_draw + (button_height_draw + text_size_btn[1]) // 2
         cv2.putText(canvas, ok_text, (text_x_btn, text_y_btn), font, font_scale_button, (255, 255, 255), 2)
 
-        return canvas
-    
-    def draw_save_changes_button(self, canvas):
-        """Draw SAVE button on canvas"""
-        button_width = 180
-        button_height = 60
-        margin = 30
-        margin_top = 30
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.0
-        thickness = 2
-        
-        # SAVE button (lower right corner)
-        x_save = self.width - button_width - margin
-        y_save = self.height - button_height - margin_top
-        
-        self.save_changes_button_rect = (x_save, y_save, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.save_changes_button_rect)
-        is_pressed = is_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.save_changes_button_rect, scale_factor)
-        x_draw, y_draw, w_draw, h_draw = scaled_rect
-        
-        button_color = (132, 36, 2)
-        border_color = (0, 0, 0)
-        border_width = 2
-        
-        cv2.rectangle(canvas, (x_draw, y_draw), (x_draw + w_draw, y_draw + h_draw), 
-                     button_color, -1)  # Color #022484
-        cv2.rectangle(canvas, (x_draw, y_draw), (x_draw + w_draw, y_draw + h_draw), 
-                     border_color, border_width)
-        
-        text_save = "SAVE"
-        text_size_save = cv2.getTextSize(text_save, font, font_scale, thickness)[0]
-        text_x_save = x_draw + (w_draw - text_size_save[0]) // 2
-        text_y_save = y_draw + (h_draw + text_size_save[1]) // 2
-        
-        cv2.putText(canvas, text_save, (text_x_save, text_y_save), font, font_scale, 
-                   (255, 255, 255), thickness)
-        
         return canvas
     
     def draw_next_button(self, canvas):
