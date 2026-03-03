@@ -53,8 +53,8 @@ class DisplayWindow:
         self.remote_hist_dir = "/media/ssd/hist_display"  # Remote folder for history
         self.refresh_interval = refresh_interval  # Seconds between updates
         self.last_refresh_time = 0
-        self.sftp_client = sftp_client  # SFTP client to upload images
-        self.remote_controls_enabled = bool(sftp_client)
+        self.sftp_client = None  # SFTP client to upload images
+        self.remote_controls_enabled = False
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
         self.filename_mapping = filename_mapping or {}  # Mapping of short names to original names
@@ -125,6 +125,19 @@ class DisplayWindow:
         self._historic_index_last_scan = 0.0
         self.historic_index_rescan_interval = 1.5
         self._historic_jsn_cache = []
+        self.set_sftp_client(sftp_client)
+
+    def set_sftp_client(self, sftp_client):
+        """Update active SFTP client and dependent UI/control state."""
+        self.sftp_client = sftp_client
+        self.remote_controls_enabled = bool(self.sftp_client)
+
+        if not self.remote_controls_enabled:
+            self.remote_action_request = None
+            self.remote_requested = False
+            self.trigger_active = False
+            if hasattr(self, "connected_cameras"):
+                self.connected_cameras = set()
 
     def _extract_camera_label(self, img_path):
         """Extract camera label (Cam_1..Cam_7) from filename if present."""
