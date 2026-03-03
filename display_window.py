@@ -10,6 +10,13 @@ from main_controller import check_historic_images as controller_check_historic_i
 from paths_config import REMOTE_HIST_DISPLAY_DIR
 
 class DisplayWindow:
+    CAMERA_ICON_PATH = "./resources/camara.png"
+    TRASH_ICON_PATH = "./resources/trash.png"
+    BACKGROUND_IMAGE_PATH = "./resources/base_screen.png"
+    DEFAULT_TILE_SIZE = 360
+    DEFAULT_TILE_PADDING = 96
+    DEFAULT_TOTAL_CAMERAS = 7
+
     def __init__(
         self,
         width=800,
@@ -80,7 +87,7 @@ class DisplayWindow:
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
         self.connected_cameras = set()  # Unique connected cameras in normal view
-        self.total_cameras = 7
+        self.total_cameras = self.DEFAULT_TOTAL_CAMERAS
         self.camera_icon = None
         self.camera_icon_size = None
         self._camera_icon_warned = False
@@ -982,7 +989,7 @@ class DisplayWindow:
     def _load_camera_icon(self, size):
         if self.camera_icon is not None and self.camera_icon_size == size:
             return
-        icon_path = "./resources/camara.png"
+        icon_path = self.CAMERA_ICON_PATH
         if not self.file_manager.exists(icon_path):
             self.camera_icon = None
             self.camera_icon_size = size
@@ -1012,7 +1019,7 @@ class DisplayWindow:
     def _load_trash_icon(self, size):
         if self.trash_icon is not None and self.trash_icon_size == size:
             return
-        icon_path = "./resources/trash.png"
+        icon_path = self.TRASH_ICON_PATH
         if not self.file_manager.exists(icon_path):
             self.trash_icon = None
             self.trash_icon_size = size
@@ -1745,7 +1752,7 @@ class DisplayWindow:
 
     def _get_background_canvas(self):
         """Return a writable background canvas using a cached resized template."""
-        background_path = "./resources/base_screen.png"
+        background_path = self.BACKGROUND_IMAGE_PATH
         target_size = (self.width, self.height)
 
         if self.file_manager.exists(background_path):
@@ -1796,9 +1803,12 @@ class DisplayWindow:
             self._image_cache.popitem(last=False)
         return img
 
-    def show_image_grid(self, image_paths, cols=4, rows=2,
-        img_size=360, padding=96):
+    def show_image_grid(self, image_paths, cols=4, rows=2, img_size=None, padding=None):
         """Show images without scaling, with fixed padding"""
+        if img_size is None:
+            img_size = self.DEFAULT_TILE_SIZE
+        if padding is None:
+            padding = self.DEFAULT_TILE_PADDING
         canvas = self._get_background_canvas()
 
         total_width = cols * img_size + (cols - 1) * padding
