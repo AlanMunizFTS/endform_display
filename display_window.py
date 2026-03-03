@@ -1,7 +1,6 @@
 
 import cv2
 import numpy as np
-import os
 import re
 from collections import OrderedDict
 from multiprocessing import Event, Process
@@ -90,8 +89,6 @@ class DisplayWindow:
         self._trash_icon_warned = False
         # Shift right-aligned status text/icon left (pixels)
         self.right_info_shift = 140
-        self.connected_cameras = set()  # Unique connected cameras in normal view
-        self.total_cameras = 7
         self.info_icon_rect = None  # Info icon rect (top right in historic mode)
         self.show_piece_date_dialog = False  # Show piece date dialog
         self.piece_date_dialog_close_rect = None  # Close button rect for date dialog
@@ -236,7 +233,7 @@ class DisplayWindow:
         new_y = int(center_y - new_h / 2)
         return (new_x, new_y, new_w, new_h)
 
-    def mouse_callback(self, event, x, y, flags, param):
+    def mouse_callback(self, event, x, y, flags, _param):
         """Callback to handle mouse events"""
         # Track mouse position and button state
         self.mouse_x = x
