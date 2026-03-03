@@ -4,173 +4,11 @@ import numpy as np
 import os
 import re
 from collections import OrderedDict
-from collections import defaultdict
 from multiprocessing import Event, Process
-from db import PostgresDB, get_db_connection
+from db import get_db_connection
 from file_manager import FileManager
-from utilities.log import get_logger, install_print_logger
-from settings import get_sftp_settings
-from paths_config import (
-    HISTORIC_SUBDIR_NAME,
-    REMOTE_HIST_DISPLAY_DIR,
-    STATUS_SYNC_DIRS,
-    SYNC_IMAGES_BASE_DIR,
-    TMP_DISPLAY_DIR,
-)
-
-
-# Standalone worker kept for compatibility with SFTP mode.
-def _sleep_with_stop(stop_event, seconds):
-    """Sleep in short intervals so stop_event can interrupt promptly."""
-    import time
-
-    if seconds <= 0:
-        return
-
-    end_time = time.monotonic() + seconds
-    while time.monotonic() < end_time:
-        if stop_event is not None and stop_event.is_set():
-            return
-        time.sleep(0.2)
-
-
-def _download_images_background_worker(
-    hostname,
-    port,
-    username,
-    password,
-    remote_dir,
-    historic_temp_dir,
-    check_interval=30,
-    reconnect_interval=10,
-    stop_event=None,
-    verbose=False,
-):
-    """Download remote historic images continuously, with reconnect on failures."""
-    import paramiko
-
-    install_print_logger(reset=False)
-    logger = get_logger()
-    file_manager = FileManager()
-
-    image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
-    ssh_client = None
-    sftp_client = None
-
-    file_manager.makedirs(historic_temp_dir, exist_ok=True)
-
-    def close_connections():
-        nonlocal sftp_client, ssh_client
-        try:
-            if sftp_client:
-                sftp_client.close()
-        except Exception:
-            pass
-        try:
-            if ssh_client:
-                ssh_client.close()
-        except Exception:
-            pass
-        sftp_client = None
-        ssh_client = None
-
-    logger.info("[HIST_SYNC_SSH] Historic worker started", allow_repeat=True)
-    try:
-        while True:
-            if stop_event is not None and stop_event.is_set():
-                break
-
-            if sftp_client is None:
-                try:
-                    logger.info(
-                        f"[HIST_SYNC_SSH] Connecting to {hostname}:{port} as {username}",
-                        allow_repeat=True,
-                    )
-                    ssh_client = paramiko.SSHClient()
-                    ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                    ssh_client.connect(
-                        hostname=hostname,
-                        port=port,
-                        username=username,
-                        password=password,
-                        timeout=10,
-                    )
-                    sftp_client = ssh_client.open_sftp()
-                    logger.info("[HIST_SYNC_SSH] Connection successful", allow_repeat=True)
-                except Exception as e:
-                    logger.error(
-                        f"[HIST_SYNC_SSH] Connection failed: {e}",
-                        allow_repeat=True,
-                    )
-                    close_connections()
-                    _sleep_with_stop(stop_event, reconnect_interval)
-                    continue
-
-            try:
-                existing_local = (
-                    set(file_manager.listdir(historic_temp_dir))
-                    if file_manager.exists(historic_temp_dir)
-                    else set()
-                )
-
-                file_manager.sftp_chdir(sftp_client, remote_dir)
-                remote_files = file_manager.sftp_listdir(sftp_client)
-
-                all_remote_images = [
-                    f for f in remote_files if f.lower().endswith(image_extensions)
-                ]
-                all_remote_images = [f for f in all_remote_images if f.startswith("11861")]
-
-                jsn_groups = defaultdict(list)
-                for img in all_remote_images:
-                    jsn = img.split("_")[0] if "_" in img else img
-                    jsn_groups[jsn].append(img)
-
-                sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
-                excluded_jsns = set(sorted_jsns[:2]) if len(sorted_jsns) >= 2 else set()
-
-                filtered_images = [
-                    img
-                    for img in all_remote_images
-                    if (img.split("_")[0] if "_" in img else img) not in excluded_jsns
-                ]
-
-                images_to_download = [
-                    img for img in filtered_images if img not in existing_local
-                ]
-
-                downloaded_count = 0
-                for img in images_to_download:
-                    if stop_event is not None and stop_event.is_set():
-                        break
-                    local_file = file_manager.join(historic_temp_dir, img)
-                    file_manager.sftp_get(sftp_client, img, local_file)
-                    downloaded_count += 1
-
-                if downloaded_count:
-                    logger.info(
-                        f"[HIST_SYNC_SSH] Downloaded {downloaded_count} new historic images",
-                        allow_repeat=True,
-                    )
-
-                _sleep_with_stop(stop_event, check_interval)
-
-            except FileNotFoundError:
-                logger.warn(
-                    f"[HIST_SYNC_SSH] Remote historic folder not found: {remote_dir}",
-                    allow_repeat=True,
-                )
-                _sleep_with_stop(stop_event, check_interval)
-            except Exception as e:
-                logger.error(
-                    f"[HIST_SYNC_SSH] Sync error: {e}",
-                    allow_repeat=True,
-                )
-                close_connections()
-                _sleep_with_stop(stop_event, reconnect_interval)
-    finally:
-        close_connections()
-        logger.info("[HIST_SYNC_SSH] Historic worker stopped", allow_repeat=True)
+from main_controller import check_historic_images as controller_check_historic_images
+from paths_config import REMOTE_HIST_DISPLAY_DIR
 
 class DisplayWindow:
     def __init__(
@@ -183,6 +21,8 @@ class DisplayWindow:
         filename_mapping=None,
         sftp_credentials=None,
         file_manager=None,
+        controller=None,
+        action_handler=None,
     ):
         self.width = width
         self.height = height
@@ -201,6 +41,8 @@ class DisplayWindow:
         self.remote_controls_enabled = False
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
+        self.controller = controller
+        self.action_handler = action_handler
         self.filename_mapping = filename_mapping or {}  # Mapping of short names to original names
         self.historic_mode = False  # Indicates if we are in historic mode
         self.historic_offset = 0  # Offset to navigate through historic batches
@@ -284,6 +126,35 @@ class DisplayWindow:
             if hasattr(self, "connected_cameras"):
                 self.connected_cameras = set()
 
+    def set_controller(self, controller):
+        self.controller = controller
+        if controller is not None:
+            handler = getattr(controller, "handle_ui_action", None)
+            if callable(handler):
+                self.action_handler = handler
+
+    def set_action_handler(self, action_handler):
+        self.action_handler = action_handler
+
+    def _emit_action(self, action, **payload):
+        if not callable(self.action_handler):
+            return
+        try:
+            self.action_handler(action, **payload)
+        except Exception as exc:
+            print(f"Error dispatching UI action '{action}': {exc}")
+
+    def _require_controller(self):
+        if self.controller is not None:
+            return self.controller
+        from main_controller import MainController
+
+        self.controller = MainController(
+            display=self,
+            sftp_credentials=self.sftp_credentials,
+        )
+        return self.controller
+
     def _extract_camera_label(self, img_path):
         """Extract camera label (Cam_1..Cam_7) from filename if present."""
         filename = self.file_manager.basename(img_path).lower()
@@ -314,28 +185,9 @@ class DisplayWindow:
         cv2.putText(canvas, label_text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
     
     def _get_piece_date(self):
-        """Get the date of the current historic piece from the first image."""
-        if not self.historic_images or self.historic_offset >= len(self.historic_images):
-            return "N/A"
-        
+        """Delegate piece date resolution to controller business logic."""
         try:
-            batch = self.historic_images[self.historic_offset]
-            if not batch:
-                return "N/A"
-            
-            # Get the first image filename
-            first_image = batch[0]
-            historic_dir = self.file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-            image_path = self.file_manager.join(historic_dir, first_image)
-            
-            # Get file modification time
-            if self.file_manager.exists(image_path):
-                import datetime
-                mtime = self.file_manager.getmtime(image_path)
-                dt = datetime.datetime.fromtimestamp(mtime)
-                return dt.strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                return "N/A"
+            return self._require_controller().get_piece_date()
         except Exception as e:
             print(f"Error getting piece date: {e}")
             return "N/A"
@@ -396,14 +248,14 @@ class DisplayWindow:
             if self.show_piece_date_dialog and self.piece_date_dialog_close_rect:
                 bx, by, bw, bh = self.piece_date_dialog_close_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.show_piece_date_dialog = False
+                    self._emit_action("close_piece_date_dialog")
                 return  # Exit early to prevent other clicks
             
             # No images dialog OK button (highest priority)
             if self.show_no_images_dialog and self.no_images_ok_button_rect:
                 bx, by, bw, bh = self.no_images_ok_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.show_no_images_dialog = False
+                    self._emit_action("dismiss_no_images_dialog")
                 return  # Exit early to prevent other clicks
 
             # Delete-piece confirmation buttons (high priority)
@@ -412,15 +264,14 @@ class DisplayWindow:
                 if self.delete_confirm_button_rect:
                     bx, by, bw, bh = self.delete_confirm_button_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self.show_delete_confirm = False
-                        self.perform_delete_current_piece()
+                        self._emit_action("confirm_delete")
                         return
 
                 # Cancel button
                 if self.delete_cancel_button_rect:
                     bx, by, bw, bh = self.delete_cancel_button_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self.show_delete_confirm = False
+                        self._emit_action("cancel_delete_confirm")
                         return
                 # If dialog is shown, don't process other clicks
                 return
@@ -431,15 +282,14 @@ class DisplayWindow:
                 if self.reset_confirm_button_rect:
                     bx, by, bw, bh = self.reset_confirm_button_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self.show_reset_confirm = False
-                        self.perform_reset()
+                        self._emit_action("confirm_reset")
                         return
                 
                 # Cancel button
                 if self.reset_cancel_button_rect:
                     bx, by, bw, bh = self.reset_cancel_button_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self.show_reset_confirm = False
+                        self._emit_action("cancel_reset_confirm")
                         return
                 # If dialog is shown, don't process other clicks
                 return
@@ -448,14 +298,14 @@ class DisplayWindow:
             if self.save_button_rect and not self.historic_mode and not self.show_no_images_dialog:
                 bx, by, bw, bh = self.save_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.enter_historic_mode()
+                    self._emit_action("enter_historic_mode")
                     return
 
             # EXIT button - only in normal mode
             if self.exit_button_rect and not self.historic_mode and not self.show_no_images_dialog:
                 bx, by, bw, bh = self.exit_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.exit_requested = True
+                    self._emit_action("request_exit")
                     return
 
             # START/STOP button - only in normal mode
@@ -468,77 +318,65 @@ class DisplayWindow:
                 bx, by, bw, bh = self.start_stop_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     if self.remote_requested:
-                        self.remote_action_request = "stop"
-                        self.remote_requested = False
+                        self._emit_action("request_remote_stop")
                     else:
-                        self.remote_action_request = "start"
-                        self.remote_requested = True
-                    self.trigger_active = False
-                    self.connected_cameras = set()
+                        self._emit_action("request_remote_start")
                     return
             
             # BACK button - exit historic mode
             if self.back_button_rect and self.historic_mode:
                 bx, by, bw, bh = self.back_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.exit_historic_mode()
+                    self._emit_action("exit_historic_mode")
             
             # INFO icon - show piece date (historic mode)
             if self.info_icon_rect and self.historic_mode:
                 bx, by, bw, bh = self.info_icon_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.show_piece_date_dialog = True
+                    self._emit_action("open_piece_date_dialog")
                     return
             
             # NEXT ARROW button (right) - advance in historic
             if self.next_button_rect and self.historic_mode:
                 bx, by, bw, bh = self.next_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.next_historic_batch()
+                    self._emit_action("next_historic_batch")
             
             # PREVIOUS ARROW button (left) - go back in historic
             if self.prev_button_rect and self.historic_mode:
                 bx, by, bw, bh = self.prev_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.prev_historic_batch()
+                    self._emit_action("prev_historic_batch")
             
             # Search button - in historic mode
             if self.search_button_rect and self.historic_mode:
                 bx, by, bw, bh = self.search_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.perform_jsn_search()
+                    self._emit_action("search_submit")
             
             # RESET button - in historic mode
             if self.reset_button_rect and self.historic_mode and not self.show_reset_confirm and not self.show_delete_confirm:
                 bx, by, bw, bh = self.reset_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.show_reset_confirm = True
-                    self.show_delete_confirm = False
+                    self._emit_action("open_reset_confirm")
 
             # TRASH button - in historic mode
             if self.trash_button_rect and self.historic_mode and not self.show_reset_confirm and not self.show_delete_confirm:
                 bx, by, bw, bh = self.trash_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.show_delete_confirm = True
-                    self.show_reset_confirm = False
+                    self._emit_action("open_delete_confirm")
 
             # SYNC button - in historic mode
             if self.sync_button_rect and self.historic_mode and not self.show_reset_confirm and not self.show_delete_confirm:
                 bx, by, bw, bh = self.sync_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.sync_images_by_status()
-                    self.sync_message = "Dataset correctly saved"
-                    import time
-                    self.sync_message_time = time.time()
+                    self._emit_action("sync_images_by_status")
             
             # Search input field - in historic mode
             if self.search_input_rect and self.historic_mode:
                 bx, by, bw, bh = self.search_input_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    self.search_active = True
-                    # Collect available JSNs when activating search
-                    self.collect_available_jsns()
-                    self.update_suggestions()
+                    self._emit_action("search_focus")
                     return
             
             # Suggestion items - in historic mode
@@ -547,11 +385,7 @@ class DisplayWindow:
                 for idx, (rect, jsn_value) in enumerate(self.suggestion_rects):
                     bx, by, bw, bh = rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        # Select this JSN
-                        self.search_jsn = jsn_value[:21]
-                        self.perform_jsn_search()
-                        self.search_active = False
-                        self.filtered_suggestions = []
+                        self._emit_action("search_select_suggestion", jsn=jsn_value[:21])
                         clicked_on_suggestion = True
                         break
             
@@ -571,8 +405,7 @@ class DisplayWindow:
                 
                 # If clicked outside, close suggestions
                 if not clicked_on_search:
-                    self.search_active = False
-                    self.filtered_suggestions = []
+                    self._emit_action("search_blur")
             
             # Result buttons - in historic mode
             if self.historic_mode and self.result_buttons:
@@ -582,120 +415,18 @@ class DisplayWindow:
                     is_hovered = self._is_point_in_rect(x, y, rect)
                     
                     if is_hovered:
-                        # Change value from OK to NOK (toggle)
-                        new_value = "NOK" if result_value == "OK" else "OK"
-                        # Save directly to database
-                        self._update_result_in_db(img_name, new_value)
-                        # Also save in temp_results to avoid redundant queries
-                        self.temp_results[img_name] = new_value
+                        self._emit_action(
+                            "toggle_result",
+                            img_name=img_name,
+                            result_value=result_value,
+                        )
                         break
     
     def _load_historic_index(self, force_rescan=False):
-        """Load grouped historic images, using cache when folder mtime is unchanged."""
-        import time
-        from collections import defaultdict
-
-        local_historic_dir = self.file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-        if not self.file_manager.exists(local_historic_dir):
-            self._historic_index_cache = []
-            self._historic_jsn_cache = []
-            self._historic_index_mtime = None
-            self._historic_index_last_scan = time.monotonic()
-            return []
-
-        current_mtime = None
-        try:
-            current_mtime = self.file_manager.getmtime(local_historic_dir)
-        except Exception:
-            pass
-
-        use_cache = False
-        if not force_rescan and self._historic_index_cache is not None:
-            if current_mtime is not None and current_mtime == self._historic_index_mtime:
-                use_cache = True
-            elif (
-                current_mtime is None
-                and (time.monotonic() - self._historic_index_last_scan) < self.historic_index_rescan_interval
-            ):
-                use_cache = True
-
-        if use_cache:
-            return self._historic_index_cache
-
-        image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
-        files = self.file_manager.listdir(local_historic_dir)
-        images_with_jsn = [
-            name
-            for name in files
-            if name.lower().endswith(image_extensions) and name.startswith("11861")
-        ]
-
-        jsn_groups = defaultdict(list)
-        for img in images_with_jsn:
-            jsn = img.split("_")[0]
-            jsn_groups[jsn].append(img)
-
-        sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
-        historic_images = []
-        for jsn in sorted_jsns:
-            group_images = jsn_groups[jsn]
-            group_images.sort(key=self._custom_sort_key)
-            historic_images.append(group_images)
-
-        self._historic_index_cache = historic_images
-        self._historic_jsn_cache = sorted_jsns
-        self._historic_index_mtime = current_mtime
-        self._historic_index_last_scan = time.monotonic()
-
-        # Directory content changed; register new DB rows lazily per visible batch.
-        self.historic_db_registered = False
-        return historic_images
+        return self._require_controller()._load_historic_index(force_rescan=force_rescan)
 
     def enter_historic_mode(self):
-        """Activate historic mode and load list of images grouped by JSN from local directory."""
-        # Preserve current JSN so background downloads don't move the view.
-        current_jsn = None
-        fallback_offset = self.historic_offset
-        if self.historic_mode and self.historic_images:
-            try:
-                current_batch = self.historic_images[self.historic_offset]
-                if current_batch:
-                    current_jsn = current_batch[0].split("_")[0] if "_" in current_batch[0] else current_batch[0]
-            except Exception:
-                current_jsn = None
-
-        try:
-            self.historic_images = self._load_historic_index(force_rescan=False)
-
-            if not self.historic_images:
-                if not self.historic_mode:
-                    self.show_no_images_dialog = True
-                return
-
-            # Activate historic mode only if not already active.
-            if not self.historic_mode:
-                self.historic_mode = True
-                self.historic_offset = 0
-            else:
-                # If already in historic, keep the same JSN visible after refresh.
-                if current_jsn:
-                    found_idx = None
-                    for idx, batch in enumerate(self.historic_images):
-                        if not batch:
-                            continue
-                        batch_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
-                        if batch_jsn == current_jsn:
-                            found_idx = idx
-                            break
-                    if found_idx is not None:
-                        self.historic_offset = found_idx
-                    else:
-                        self.historic_offset = min(fallback_offset, len(self.historic_images) - 1)
-                else:
-                    self.historic_offset = min(fallback_offset, len(self.historic_images) - 1)
-
-        except Exception as e:
-            print(f"Error entering historic: {e}")
+        self._require_controller().enter_historic_mode()
 
     def _custom_sort_key(self, filename):
         """Helper function to sort by type: side -> front -> diag"""
@@ -710,528 +441,69 @@ class DisplayWindow:
             return (3, filename)
     
     def exit_historic_mode(self):
-        """Exit historic mode"""
-        self.historic_mode = False
-        self.historic_offset = 0
-        self.historic_images = []
-        self.search_jsn = ""
-        self.search_active = False
-        self.filtered_suggestions = []
-        self.selected_suggestion_idx = -1
-        self.show_reset_confirm = False
-        self.show_delete_confirm = False
-        self.show_piece_date_dialog = False
+        self._require_controller().exit_historic_mode()
     
     def next_historic_batch(self):
-        """Advance to next batch of historic images"""
-        if not self.historic_images:
-            return
-        
-        total_batches = len(self.historic_images)  # Each group is a batch
-        self.historic_offset = (self.historic_offset + 1) % total_batches
+        self._require_controller().next_historic_batch()
     
     def prev_historic_batch(self):
-        """Go back to previous batch of historic images"""
-        if not self.historic_images:
-            return
-        
-        # Don't allow going back if already at first batch
-        if self.historic_offset == 0:
-            return
-        
-        total_batches = len(self.historic_images)  # Each group is a batch
-        self.historic_offset = self.historic_offset - 1
+        self._require_controller().prev_historic_batch()
     
     def collect_available_jsns(self):
-        """Collect all available JSN numbers from historic images"""
-        if not self.historic_images:
-            self.available_jsns = []
-            return
-
-        if self._historic_jsn_cache:
-            self.available_jsns = list(self._historic_jsn_cache)
-            return
-
-        jsn_set = set()
-        for batch in self.historic_images:
-            if batch and len(batch) > 0:
-                jsn = batch[0].split('_')[0] if '_' in batch[0] else ''
-                if jsn:
-                    jsn_set.add(jsn)
-        
-        # Sort JSNs in descending order (most recent first)
-        self.available_jsns = sorted(list(jsn_set), reverse=True)
+        self._require_controller().collect_available_jsns()
     
     def update_suggestions(self):
-        """Update filtered suggestions based on current input"""
-        if not self.search_jsn:
-            # Show all JSNs if input is empty
-            self.filtered_suggestions = self.available_jsns[:10]  # Limit to 10
-        else:
-            # Filter JSNs that contain the input anywhere in the string
-            self.filtered_suggestions = [jsn for jsn in self.available_jsns if self.search_jsn in jsn][:10]
-        
-        self.selected_suggestion_idx = -1
+        self._require_controller().update_suggestions()
     
     def perform_jsn_search(self):
-        """Search for a specific JSN and jump to that batch."""
-        if not self.search_jsn.strip():
-            print("No JSN entered for search")
-            return
-
-        search_term = self.search_jsn.strip()
-
-        # Search for JSN in historic_images
-        for idx, batch in enumerate(self.historic_images):
-            jsn = batch[0].split("_")[0] if "_" in batch[0] else ""
-            if jsn == search_term:
-                self.historic_offset = idx
-                print(f"JSN {search_term} found at position {idx}")
-                self.search_active = False
-                self.filtered_suggestions = []
-                self.search_jsn = ""
-                return
-
-        print(f"JSN {search_term} not found in historic images")
-        self.search_active = False
-        self.filtered_suggestions = []
-        self.search_jsn = ""
+        self._require_controller().perform_jsn_search()
 
     def _get_current_historic_jsn(self):
-        """Return JSN for the current historic batch, or None if unavailable."""
-        if not self.historic_images:
-            return None
-        if self.historic_offset < 0 or self.historic_offset >= len(self.historic_images):
-            return None
-        batch = self.historic_images[self.historic_offset]
-        if not batch:
-            return None
-        first = batch[0]
-        return first.split('_')[0] if '_' in first else first
+        return self._require_controller()._get_current_historic_jsn()
 
     def perform_delete_current_piece(self):
-        """Delete current historic piece (local + remote hist_display + DB records)."""
-        jsn = self._get_current_historic_jsn()
-        if not jsn:
-            print("No historic piece selected for deletion")
-            return
-
-        print("\n" + "="*70)
-        print(f"STARTING PIECE DELETE (JSN {jsn})")
-        print("="*70)
-
-        image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
-        local_historic_dir = self.file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-
-        # 1. Delete local historic files for JSN
-        local_deleted = 0
-        local_candidates = []
-        if self.file_manager.exists(local_historic_dir):
-            try:
-                for name in self.file_manager.listdir(local_historic_dir):
-                    if name.startswith(jsn) and name.lower().endswith(image_extensions):
-                        local_candidates.append(self.file_manager.join(local_historic_dir, name))
-                for path in local_candidates:
-                    try:
-                        self.file_manager.remove(path)
-                        local_deleted += 1
-                    except Exception as e:
-                        print(f"Error deleting local file {path}: {e}")
-                print(f"Local delete: {local_deleted}/{len(local_candidates)}")
-            except Exception as e:
-                print(f"Error reading local historic folder: {e}")
-        else:
-            print("Local historic folder does not exist")
-
-        # 2. Delete remote hist_display files for JSN
-        remote_deleted = 0
-        if self.sftp_client:
-            try:
-                self.file_manager.sftp_chdir(self.sftp_client, self.remote_hist_dir)
-                remote_files = self.file_manager.sftp_listdir(self.sftp_client)
-                remote_candidates = [f for f in remote_files if f.startswith(jsn) and f.lower().endswith(image_extensions)]
-                for remote_file in remote_candidates:
-                    try:
-                        file_path = f"{self.remote_hist_dir}/{remote_file}"
-                        self.file_manager.sftp_remove(self.sftp_client, file_path)
-                        remote_deleted += 1
-                    except Exception as e:
-                        print(f"Error deleting remote file {remote_file}: {e}")
-                print(f"Remote delete: {remote_deleted}/{len(remote_candidates)}")
-            except Exception as e:
-                print(f"Error accessing remote historic folder: {e}")
-        else:
-            print("No SFTP connection available")
-
-        # 3. Delete DB records for JSN
-        if self.db:
-            try:
-                query_delete = "DELETE FROM img_results WHERE img_name LIKE %s"
-                affected_rows = self.db.execute(query_delete, (f"{jsn}%",))
-                print(f"Deleted {affected_rows} database records")
-            except Exception as e:
-                print(f"Error clearing database records: {e}")
-        else:
-            print("No database connection available")
-
-        # 4. Clear temp results for this JSN
-        if self.temp_results:
-            self.temp_results = {k: v for k, v in self.temp_results.items() if not k.startswith(jsn)}
-        self._db_registered_images = {name for name in self._db_registered_images if not name.startswith(jsn)}
-        if self._db_result_cache:
-            self._db_result_cache = {
-                k: v for k, v in self._db_result_cache.items() if not k.startswith(jsn)
-            }
-        for path in local_candidates:
-            self._image_cache.pop(path, None)
-
-        self.historic_db_registered = False
-        self._historic_index_cache = None
-        self._historic_index_mtime = None
-        self._historic_jsn_cache = []
-
-        # Refresh historic list or exit if none left
-        remaining_images = []
-        if self.file_manager.exists(local_historic_dir):
-            remaining_images = [
-                f for f in self.file_manager.listdir(local_historic_dir)
-                if f.lower().endswith(image_extensions) and f.startswith("11861")
-            ]
-
-        if not remaining_images:
-            self.historic_images = []
-            self.historic_offset = 0
-            self.available_jsns = []
-            self.filtered_suggestions = []
-            self.exit_historic_mode()
-            self.show_no_images_dialog = True
-        else:
-            self.enter_historic_mode()
-
-        print("="*70)
-        print("PIECE DELETE COMPLETED")
-        print("="*70 + "\n")
+        self._require_controller().perform_delete_current_piece()
 
     def perform_reset(self):
-        """Reset everything: delete local historic folder, remote hist_display folder, and database records"""
-        print("\n" + "="*70)
-        print("STARTING COMPLETE RESET")
-        print("="*70)
-
-        # 1. Delete local historic folder
-        local_historic_dir = self.file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-        if self.file_manager.exists(local_historic_dir):
-            try:
-                self.file_manager.rmtree(local_historic_dir)
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-                print("Local historic folder cleared")
-            except Exception as e:
-                print(f"Error clearing local historic folder: {e}")
-        else:
-            print("Local historic folder does not exist")
-
-        # 2. Delete remote hist_display folder contents
-        if self.sftp_client:
-            try:
-                self.file_manager.sftp_chdir(self.sftp_client, self.remote_hist_dir)
-                remote_files = self.file_manager.sftp_listdir(self.sftp_client)
-
-                if remote_files:
-                    print(f"Deleting {len(remote_files)} files from remote server...")
-                    deleted_count = 0
-                    for remote_file in remote_files:
-                        try:
-                            file_path = f"{self.remote_hist_dir}/{remote_file}"
-                            self.file_manager.sftp_remove(self.sftp_client, file_path)
-                            deleted_count += 1
-                        except Exception as e:
-                            print(f"Error deleting {remote_file}: {e}")
-                    print(f"Deleted {deleted_count}/{len(remote_files)} remote files")
-                else:
-                    print("Remote folder is already empty")
-            except Exception as e:
-                print(f"Error accessing remote folder: {e}")
-        else:
-            print("No SFTP connection available")
-
-        # 3. Delete all records from database
-        if self.db:
-            try:
-                query_delete = "DELETE FROM img_results"
-                affected_rows = self.db.execute(query_delete)
-                print(f"Deleted {affected_rows} records from database")
-            except Exception as e:
-                print(f"Error clearing database: {e}")
-        else:
-            print("No database connection available")
-
-        # 4. Clear internal variables
-        self.historic_images = []
-        self.historic_offset = 0
-        self.temp_results = {}
-        self.available_jsns = []
-        self.filtered_suggestions = []
-        self.historic_db_registered = False
-        self._db_registered_images.clear()
-        self._historic_index_cache = None
-        self._historic_index_mtime = None
-        self._historic_jsn_cache = []
-        self._db_result_cache.clear()
-        self._image_cache.clear()
-
-        print("="*70)
-        print("RESET COMPLETED SUCCESSFULLY")
-        print("="*70 + "\n")
-
-        # Exit historic mode
-        self.exit_historic_mode()
+        self._require_controller().perform_reset()
 
     def start_historic_download_on_startup(self, local_path, check_interval=30):
-        """Start historic sync/downloader process when SFTP credentials are available."""
-        historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-        self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
+        import main_controller as _main_controller
 
-        if not self.sftp_credentials:
-            print("SFTP historic downloader disabled: missing credentials")
-            return
-
-        hostname = self.sftp_credentials.get("hostname")
-        port = self.sftp_credentials.get("port")
-        username = self.sftp_credentials.get("username")
-        password = self.sftp_credentials.get("password")
-        if not all([hostname, port, username, password]):
-            print("SFTP historic downloader disabled: incomplete credentials")
-            return
-         
-        # Verificar si ya hay un proceso activo
-        if self.download_process and self.download_process.is_alive():
-            print("Background download process is already running")
-            return
-         
-        try:
-            # Iniciar descarga continua en proceso separado (BACKGROUND)
-            self.download_stop_event = Event()
-            self.download_process = Process(
-                target=_download_images_background_worker,
-                args=(
-                    hostname,
-                    port,
-                    username,
-                    password,
-                    self.remote_hist_dir,
-                    historic_temp_dir,
-                    check_interval,
-                    10,
-                    self.download_stop_event,
-                ),
-            )
-            self.download_process.daemon = True  # Proceso daemon se cierra cuando la app termina
-            self.download_process.start()
-                 
-        except Exception as e:
-            print(f"Error starting background download: {e}")
-            import traceback
-            traceback.print_exc()
-            self.download_process = None
-            self.download_stop_event = None
+        # Keep compatibility with tests that patch display_window.Event/Process.
+        _main_controller.Event = Event
+        _main_controller.Process = Process
+        self._require_controller().start_historic_download_on_startup(
+            local_path=local_path,
+            check_interval=check_interval,
+        )
     
     def download_historic_batch(self, local_path, max_images=7):
-        """Return currently selected historic batch from local cache."""
-        if not self.historic_images:
-            return []
-        
-        try:
-            # Temp folder for historic
-            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-            
-            # Obtener grupo actual para mostrar (ya ordenado por tipo)
-            batch_images = self.historic_images[self.historic_offset]
-            
-            # Retornar rutas locales del grupo actual (EN VIVO - sin esperar descarga)
-            downloaded_files = []
-            for img in batch_images:
-                local_file = self.file_manager.join(historic_temp_dir, img)
-                if self.file_manager.exists(local_file):
-                    downloaded_files.append(local_file)
-
-            # Register only the visible batch to avoid large blocking scans.
-            self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
-            
-            return downloaded_files
-            
-        except Exception as e:
-            print(f"Error reading historic batch: {e}")
-            return []
+        return self._require_controller().download_historic_batch(
+            local_path=local_path,
+            max_images=max_images,
+        )
     
     def _register_local_images_in_db(self, historic_dir, image_names=None):
-        """Register given local images in DB (or all from folder when image_names is None)."""
-        try:
-            # Check DB connection
-            if not self.db:
-                return
-            
-            if not self.file_manager.exists(historic_dir):
-                return
-            
-            if image_names is None:
-                image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
-                local_images = [
-                    f for f in self.file_manager.listdir(historic_dir)
-                    if f.lower().endswith(image_extensions)
-                ]
-            else:
-                local_images = list(image_names)
-            
-            if not local_images:
-                return
-
-            pending = [img for img in local_images if img not in self._db_registered_images]
-            if not pending:
-                return
-
-            # Fetch existing rows in one query.
-            existing_rows = self.db.fetch(
-                "SELECT img_name FROM img_results WHERE img_name = ANY(%s)",
-                (pending,),
-            )
-            existing = {row["img_name"] for row in existing_rows} if existing_rows else set()
-
-            images_to_insert = [img for img in pending if img not in existing]
-            if images_to_insert:
-                query_insert = "INSERT INTO img_results (img_name) VALUES (%s)"
-                for img_name in images_to_insert:
-                    try:
-                        self.db.execute(query_insert, (img_name,))
-                    except Exception as e:
-                        print(f"Error inserting {img_name}: {e}")
-
-            self._db_registered_images.update(pending)
-            self.historic_db_registered = True
-            
-        except Exception as e:
-            print(f"General error registering images in DB: {e}")
+        self._require_controller()._register_local_images_in_db(
+            historic_dir=historic_dir,
+            image_names=image_names,
+        )
     
     def _update_result_in_db(self, img_name, new_value):
-        """Update the result value in database"""
-        try:
-            query_update = "UPDATE img_results SET result = %s WHERE img_name = %s"
-            self.db.execute(query_update, (new_value, img_name))
-            self._db_result_cache[img_name] = new_value
-        except Exception as e:
-            print(f"Error updating result: {e}")
+        self._require_controller()._update_result_in_db(img_name=img_name, new_value=new_value)
+
+    def get_result_for_image(self, img_name):
+        return self._require_controller().get_result_for_image(img_name)
     
     def save_temp_results_to_db(self):
-        """Save all temporary changes to database."""
-        if not self.temp_results:
-            print("No changes to save")
-            return
-
-        print(f"\n{'='*60}")
-        print("SAVING CHANGES TO DATABASE")
-        print(f"{'='*60}")
-        print(f"Total changes: {len(self.temp_results)}")
-
-        success_count = 0
-        failed_count = 0
-
-        for img_name, new_value in self.temp_results.items():
-            try:
-                self._update_result_in_db(img_name, new_value)
-                success_count += 1
-            except Exception as e:
-                failed_count += 1
-                print(f"Error saving {img_name}: {e}")
-
-        print(f"{'='*60}")
-        print(f"{success_count} changes saved successfully")
-        if failed_count > 0:
-            print(f"{failed_count} changes failed")
-        print(f"{'='*60}\n")
-
-        self.temp_results.clear()
-        print("Temporary changes cleared")
+        self._require_controller().save_temp_results_to_db()
 
     def sync_images_by_status(self, historic_dir=None, base_dir=None):
-        """
-        Sync images from the historic folder into position/status folders based on DB status.
-
-        - Creates side_ok/side_nok, front_ok/front_nok, diag_ok/diag_nok if missing.
-        - Reads img_name and result from img_results.
-        - Extracts position (side/front/diag) from filename.
-        - Copies images from historic_dir into the folder that matches position + status (OK/NOK).
-        - If an image exists in the wrong status folder for that position, it is removed.
-        """
-        historic_dir = historic_dir or self.file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-        base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
-
-        position_dirs = {
-            position: {
-                status: self.file_manager.join(base_dir, folder_name)
-                for status, folder_name in statuses.items()
-            }
-            for position, statuses in STATUS_SYNC_DIRS.items()
-        }
-
-        for dirs in position_dirs.values():
-            for path in dirs.values():
-                self.file_manager.makedirs(path, exist_ok=True)
-
-        if not self.db:
-            print("No database connection available")
-            return
-
-        if not self.file_manager.exists(historic_dir):
-            print(f"Historic folder not found: {historic_dir}")
-            return
-
-        try:
-            rows = self.db.fetch("SELECT img_name, result FROM img_results")
-        except Exception as e:
-            print(f"Error fetching image results: {e}")
-            return
-
-        if not rows:
-            print("No image results found in database")
-            return
-
-        for row in rows:
-            img_name = row.get("img_name") or row.get("name")
-            status = row.get("result")
-
-            if not img_name or status is None:
-                continue
-
-            status = str(status).strip().upper()
-            if status not in ("OK", "NOK"):
-                continue
-
-            match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
-            if not match:
-                continue
-            position = match.group(1).lower()
-
-            source_path = self.file_manager.join(historic_dir, img_name)
-            if not self.file_manager.exists(source_path):
-                continue
-
-            target_dir = position_dirs[position][status]
-            other_status = "NOK" if status == "OK" else "OK"
-            other_dir = position_dirs[position][other_status]
-
-            target_path = self.file_manager.join(target_dir, img_name)
-            other_path = self.file_manager.join(other_dir, img_name)
-
-            if self.file_manager.exists(other_path):
-                try:
-                    self.file_manager.remove(other_path)
-                except Exception as e:
-                    print(f"Error removing from wrong folder: {other_path} -> {e}")
-
-            if not self.file_manager.exists(target_path):
-                try:
-                    self.file_manager.copy2(source_path, target_path)
-                except Exception as e:
-                    print(f"Error copying {img_name} to {target_dir}: {e}")
+        self._require_controller().sync_images_by_status(
+            historic_dir=historic_dir,
+            base_dir=base_dir,
+        )
     
     def draw_historic_button(self, canvas):
         """Draw historic button on canvas (visual only)"""
@@ -2491,31 +1763,22 @@ class DisplayWindow:
             # Handle keyboard input when search is active
             if self.search_active and key != -1:
                 if key == 27:  # ESC key
-                    self.search_active = False
-                    self.filtered_suggestions = []
+                    self._emit_action("search_cancel")
                     return True
                 elif key == 13:  # ENTER key
-                    # If a suggestion is selected, use it
-                    if self.selected_suggestion_idx >= 0 and self.selected_suggestion_idx < len(self.filtered_suggestions):
-                        self.search_jsn = self.filtered_suggestions[self.selected_suggestion_idx][:21]
-                    self.perform_jsn_search()
+                    self._emit_action("search_submit")
                     return True
                 elif key == 8:  # BACKSPACE key
-                    self.search_jsn = self.search_jsn[:-1]
-                    self.update_suggestions()
+                    self._emit_action("search_backspace")
                     return True
                 elif key == 0 or key == 2490368:  # UP arrow key
-                    if self.filtered_suggestions:
-                        self.selected_suggestion_idx = max(-1, self.selected_suggestion_idx - 1)
+                    self._emit_action("search_move_up")
                     return True
                 elif key == 1 or key == 2621440:  # DOWN arrow key
-                    if self.filtered_suggestions:
-                        self.selected_suggestion_idx = min(len(self.filtered_suggestions) - 1, self.selected_suggestion_idx + 1)
+                    self._emit_action("search_move_down")
                     return True
                 elif 48 <= key <= 57:  # Only numeric characters (0-9)
-                    if len(self.search_jsn) < 21:
-                        self.search_jsn += chr(key)
-                        self.update_suggestions()
+                    self._emit_action("search_append_digit", digit=chr(key))
                     return True
             
             # Check if it's time to update
@@ -2675,29 +1938,7 @@ class DisplayWindow:
             if self.historic_mode:
                 # Extract filename from path
                 img_filename = self.file_manager.basename(img_path)
-                
-                # First check if there's a temporary change, if not query DB
-                if img_filename in self.temp_results:
-                    result_text = self.temp_results[img_filename]
-                else:
-                    cached_result = self._db_result_cache.get(img_filename)
-                    if cached_result is not None:
-                        result_text = cached_result
-                    else:
-                        # Query result from DB once, then cache it.
-                        try:
-                            query = "SELECT result FROM img_results WHERE img_name = %s"
-                            result = self.db.fetch(query, (img_filename,))
-                            
-                            if result and len(result) > 0:
-                                result_value = result[0]['result']
-                                result_text = str(result_value) if result_value is not None else "N/A"
-                            else:
-                                result_text = "N/A"
-                        except Exception as e:
-                            result_text = "Error"
-                            print(f"Error querying result for {img_filename}: {e}")
-                        self._db_result_cache[img_filename] = result_text
+                result_text = self.get_result_for_image(img_filename)
                 
                 # Dibujar etiqueta debajo de la imagen
                 font = cv2.FONT_HERSHEY_SIMPLEX
@@ -2818,77 +2059,7 @@ class DisplayWindow:
 
 
 def check_historic_images():
-    """Function to check how many images are in remote vs local historic."""
-    import paramiko
-    file_manager = FileManager()
-
-    sftp_settings = get_sftp_settings()
-    hostname = sftp_settings["hostname"]
-    port = sftp_settings["port"]
-    username = sftp_settings["username"]
-    password = sftp_settings["password"]
-    remote_hist_dir = REMOTE_HIST_DISPLAY_DIR
-    local_hist_dir = file_manager.join(str(TMP_DISPLAY_DIR), HISTORIC_SUBDIR_NAME)
-
-    print("\n" + "="*70)
-    print("HISTORIC IMAGES VERIFICATION")
-    print("="*70)
-
-    try:
-        print("Connecting to SFTP server...")
-        ssh_client = paramiko.SSHClient()
-        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh_client.connect(hostname=hostname, port=port, username=username, password=password, timeout=10)
-        sftp_client = ssh_client.open_sftp()
-        print("Connection successful\n")
-
-        image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
-
-        try:
-            file_manager.sftp_chdir(sftp_client, remote_hist_dir)
-            remote_files = file_manager.sftp_listdir(sftp_client)
-            remote_images = [f for f in remote_files if f.lower().endswith(image_extensions)]
-            remote_count = len(remote_images)
-        except FileNotFoundError:
-            remote_count = 0
-            print(f"Remote folder {remote_hist_dir} does not exist")
-
-        if file_manager.exists(local_hist_dir):
-            local_files = file_manager.listdir(local_hist_dir)
-            local_images = [f for f in local_files if f.lower().endswith(image_extensions)]
-            local_count = len(local_images)
-        else:
-            local_count = 0
-            print(f"Local folder {local_hist_dir} does not exist")
-
-        print("RESULTS:")
-        print("="*70)
-        print(f"Images on remote server ({remote_hist_dir}):")
-        print(f"   Total: {remote_count} files")
-        print(f"\nImages in local folder ({local_hist_dir}):")
-        print(f"   Total: {local_count} files")
-        print(f"\nPending images to download: {max(0, remote_count - local_count)}")
-
-        if local_count == remote_count and remote_count > 0:
-            print("\nSYNCHRONIZED - All images are downloaded")
-        elif local_count > remote_count:
-            print("\nATTENTION - More local images than remote")
-        elif remote_count > local_count:
-            print("\nNEW IMAGES AVAILABLE - Open historic mode to download them")
-        else:
-            print("\nNo images in any location")
-
-        print("="*70)
-
-        sftp_client.close()
-        ssh_client.close()
-
-    except paramiko.AuthenticationException:
-        print("Error: Authentication failed")
-    except paramiko.SSHException as e:
-        print(f"SSH Error: {str(e)}")
-    except Exception as e:
-        print(f"Error: {str(e)}")
+    controller_check_historic_images()
 
 
 if __name__ == "__main__":
