@@ -1,6 +1,11 @@
 import time
 
-from paths_config import TMP_DISPLAY_DIR
+from paths_config import (
+    REMOTE_HIST_DISPLAY_DIR,
+    REMOTE_TEST_DISPLAY_DIR,
+    TMP_DISPLAY_DIR,
+)
+from settings import get_optional_sftp_settings
 from utilities.log import get_logger, install_print_logger
 
 
@@ -103,13 +108,70 @@ def _download_live_images_local(file_manager, local_path, rotation_state, logger
         return []
 
 
+def _download_live_images_remote(
+    app,
+    remote_path,
+    local_path,
+    remote_hist_dir,
+    rotation_state,
+    logger,
+    max_images=7,
+):
+    if not app or not app.sftp_client:
+        return []
+
+    app.file_manager.makedirs(local_path, exist_ok=True)
+    downloaded_files = []
+
+    try:
+        files = app.list_remote_files(remote_path)
+        images = [f for f in files if f.lower().endswith(IMAGE_EXTENSIONS)]
+
+        images.sort(reverse=True)
+
+        total_batches = (len(images) + max_images - 1) // max_images
+        current_offset = rotation_state.get("current_offset", 0)
+        if total_batches > 0:
+            current_offset %= total_batches
+        else:
+            current_offset = 0
+
+        start_idx = current_offset * max_images
+        end_idx = start_idx + max_images
+        selected_images = images[start_idx:end_idx]
+        selected_images.sort(key=_display_sort_key)
+
+        rotation_state["current_offset"] = (
+            (current_offset + 1) % total_batches if total_batches > 0 else 0
+        )
+
+        app.ensure_remote_dir(remote_hist_dir)
+
+        for img_name in selected_images:
+            local_file = app.file_manager.join(local_path, img_name)
+            remote_img_path = app.join_remote_path(remote_path, img_name)
+            remote_hist_path = app.join_remote_path(remote_hist_dir, img_name)
+            app.download_file(remote_img_path, local_file)
+            app.upload_file(local_file, remote_hist_path)
+            downloaded_files.append(local_file)
+
+        return downloaded_files
+
+    except Exception as e:
+        logger.error(f"[SSH] Error downloading live images: {e}", allow_repeat=True)
+        return []
+
+
 def main():
     install_print_logger(reset=True)
     logger = get_logger()
 
     from display_window import DisplayWindow
+    from sftp_app import SFTPApp
 
     temp_dir = str(TMP_DISPLAY_DIR)
+    remote_path = REMOTE_TEST_DISPLAY_DIR
+    remote_hist_dir = REMOTE_HIST_DISPLAY_DIR
     live_rotation_state = {
         "current_offset": 0,
         "cached_images": None,
@@ -120,7 +182,40 @@ def main():
         "last_rotation_ts": 0.0,
         "current_batch_catalog_version": -1,
     }
-    logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
+    live_rotation_state_remote = {"current_offset": 0}
+    sftp_app = None
+    sftp_credentials = None
+    sftp_connected = False
+
+    try:
+        sftp_credentials = get_optional_sftp_settings()
+    except Exception as e:
+        logger.error(
+            f"[SSH] Invalid SFTP settings, running local-only: {e}",
+            allow_repeat=True,
+        )
+        sftp_credentials = None
+
+    if sftp_credentials:
+        sftp_app = SFTPApp(
+            sftp_credentials["hostname"],
+            sftp_credentials["port"],
+            sftp_credentials["username"],
+            sftp_credentials["password"],
+        )
+        sftp_connected = sftp_app.connect_sftp()
+        if sftp_connected:
+            logger.info(
+                "[SSH] Running with SFTP enabled (remote + local fallback)",
+                allow_repeat=True,
+            )
+        else:
+            logger.warn(
+                "[SSH] Initial SFTP connection failed, running local-only fallback",
+                allow_repeat=True,
+            )
+    else:
+        logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
 
     try:
         display = DisplayWindow(
@@ -128,13 +223,16 @@ def main():
             height=1080,
             window_name="Display Imagenes",
             refresh_interval=0.25,
+            sftp_client=sftp_app.sftp_client if sftp_connected and sftp_app else None,
+            sftp_credentials=sftp_credentials,
         )
         logger.info("[DB] DisplayWindow initialized successfully", allow_repeat=True)
     except Exception as e:
         logger.error(f"[DB] Failed to initialize DisplayWindow: {e}", allow_repeat=True)
+        if sftp_app:
+            sftp_app.disconnect_sftp()
         return
 
-    # In local-only mode this just ensures the folder exists.
     display.start_historic_download_on_startup(temp_dir, check_interval=10)
 
     try:
@@ -145,13 +243,31 @@ def main():
             if display.historic_mode:
                 images = display.download_historic_batch(temp_dir, max_images=7)
             else:
-                images = _download_live_images_local(
-                    display.file_manager,
-                    temp_dir,
-                    live_rotation_state,
-                    logger,
-                    max_images=7,
-                )
+                images = []
+                if sftp_connected and sftp_app:
+                    images = _download_live_images_remote(
+                        sftp_app,
+                        remote_path,
+                        temp_dir,
+                        remote_hist_dir,
+                        live_rotation_state_remote,
+                        logger,
+                        max_images=7,
+                    )
+                    if not images:
+                        logger.info(
+                            "[LOCAL] Falling back to local live images",
+                            allow_repeat=True,
+                        )
+
+                if not images:
+                    images = _download_live_images_local(
+                        display.file_manager,
+                        temp_dir,
+                        live_rotation_state,
+                        logger,
+                        max_images=7,
+                    )
 
             display.image_paths = images
             display.show_image_grid(images, cols=4, rows=2)
@@ -159,6 +275,8 @@ def main():
         pass
     finally:
         display.close()
+        if sftp_app:
+            sftp_app.disconnect_sftp()
 
 
 if __name__ == "__main__":
