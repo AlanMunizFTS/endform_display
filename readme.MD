@@ -1,5 +1,16 @@
 # EndForm Display
 
+## Architecture (SOLID Split)
+
+- `main.py`
+  - Bootstrap only: logger/env/config wiring and object composition.
+- `main_controller.py`
+  - Business/orchestration layer: SFTP lifecycle, reconnect policy, remote process control, live/historic flow, DB status updates, sync/reset/delete actions.
+  - Holds runtime constants in `ControllerConfig` (camera IDs, image extensions, intervals, limits, remote command).
+- `display_window.py`
+  - View layer: rendering + input capture.
+  - Emits user actions to `MainController` and delegates business operations through thin compatibility wrappers.
+
 ## Environment Setup
 
 This branch reads DB/SFTP credentials from `.env` through `settings.py`.

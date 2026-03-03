@@ -2,6 +2,7 @@
 
 ## Entry Points
 - `main.py` - production app entrypoint (`main()`).
+- `main_controller.py` - runtime business/orchestration controller used by `main.py`.
 - `utilities/check_hist_display.py` - manual SFTP historic-folder inspection script.
 - `display_window.py` (module `__main__`) - manual sync helper invocation.
 - `utilities/db_folder_cleanup.py` - DB-driven cleanup utility for classified folders.
@@ -10,11 +11,18 @@
 
 ## Core Modules
 - `main.py`
-  - Orchestrates SFTP connection, UI lifecycle, remote process control, and refresh loop.
-  - Loads SFTP credentials from `settings.py`.
+  - Bootstrap/composition only.
+  - Loads SFTP credentials from `settings.py` and wires `DisplayWindow` + `MainController`.
+- `main_controller.py`
+  - Owns runtime/business logic:
+    - SFTP connect/reconnect lifecycle.
+    - Remote process start/stop and remote event handling.
+    - Live image rotation and fallback policy.
+    - Historic indexing/search/delete/reset/sync and DB writes.
+  - Exposes `ControllerConfig` for static runtime constants.
 - `display_window.py`
-  - Contains almost all UI behavior plus historic mode, DB writes, and folder sync.
-  - Starts a dedicated background SFTP downloader process for historic cache.
+  - UI layer only (render + interaction capture).
+  - Delegates business actions to `MainController` via action bridge/wrapper methods.
 - `sftp_app.py`
   - Handles SSH/SFTP connect/disconnect, remote process streaming, and live image downloads.
   - Emits explicit connection success/failure logs.
@@ -50,11 +58,12 @@
 
 ## Quick Task Routing
 - UI/button/render changes: `display_window.py`.
-- Remote process start/stop behavior: `main.py` + `sftp_app.py`.
-- Live image selection/rotation: `sftp_app.py` (`download_images`).
+- Runtime/business behavior: `main_controller.py`.
+- Remote process start/stop behavior: `main_controller.py` + `sftp_app.py`.
+- Live image selection/rotation policy in app runtime: `main_controller.py`.
 - Local/SFTP file operation wrappers: `file_manager.py`.
-- Historic grouping/search/delete/reset: `display_window.py`.
-- DB/query behavior: `display_window.py` + `db.py`.
+- Historic grouping/search/delete/reset: `main_controller.py`.
+- DB/query behavior: `main_controller.py` + `db.py`.
 - Credential/env loading behavior: `settings.py` + `.env`.
 - Logging behavior: `utilities/log.py`.
 - Utility scripts: `utilities/check_hist_display.py`, `utilities/db_folder_cleanup.py`.

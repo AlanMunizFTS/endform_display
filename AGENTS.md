@@ -9,14 +9,15 @@ This repository runs an OpenCV display app that:
 
 ## Fast Navigation (Read This First)
 Open these files first, in this order:
-1. `main.py` - app entrypoint and runtime loop.
-2. `display_window.py` - UI state, mouse actions, historic mode, DB interactions, sync logic.
-3. `sftp_app.py` - SSH/SFTP connection, remote process lifecycle, image download behavior.
-4. `file_manager.py` - shared local/SFTP file I/O adapter used by display and SFTP flows.
-5. `settings.py` - `.env` loader and validated DB/SFTP settings.
-6. `paths_config.py` - canonical path constants.
-7. `db.py` and `utilities/log.py` - DB and logging helpers.
-8. `REPO_MAP.md` - canonical condensed repo map. Use this first for navigation.
+1. `main.py` - app bootstrap/entrypoint.
+2. `main_controller.py` - runtime business/orchestration bridge.
+3. `display_window.py` - UI rendering + interaction capture.
+4. `sftp_app.py` - SSH/SFTP connection, remote process lifecycle, image download behavior.
+5. `file_manager.py` - shared local/SFTP file I/O adapter used by display and SFTP flows.
+6. `settings.py` - `.env` loader and validated DB/SFTP settings.
+7. `paths_config.py` - canonical path constants.
+8. `db.py` and `utilities/log.py` - DB and logging helpers.
+9. `REPO_MAP.md` - canonical condensed repo map. Use this first for navigation.
 
 If you only need orientation, do not recurse the image folders.
 
@@ -24,8 +25,8 @@ If you only need orientation, do not recurse the image folders.
 Use `REPO_MAP.md` as the single source of truth for structure, file routing, and scan priorities.
 
 ## Runtime Flow
-1. `main.py` connects to SFTP via `SFTPApp`.
-2. It creates `DisplayWindow` and starts background historic download.
+1. `main.py` loads env/config and wires `DisplayWindow` + `MainController`.
+2. `MainController` manages SFTP connection via `SFTPApp` and runtime loop.
 3. Normal mode:
    - Pulls a rotating batch from remote `/media/ssd/test_display`.
    - Mirrors each downloaded image to remote `/media/ssd/hist_display`.
@@ -39,15 +40,15 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
 - Change UI layout, buttons, dialogs, draw logic:
   - `display_window.py` (`draw_*`, `mouse_callback`, `show_image_grid`).
 - Change remote command start/stop behavior:
-  - `main.py` (`start_remote_process`, `stop_remote_process`) and `sftp_app.py`.
+  - `main_controller.py` (`start_remote_process`, `stop_remote_process`) and `sftp_app.py`.
 - Change image selection/rotation policy in live view:
-  - `sftp_app.py:330` (`download_images`).
+  - `main_controller.py` (live image rotation/download helpers).
 - Change local/SFTP file I/O wrappers (no business rules):
   - `file_manager.py`.
 - Change historic filtering/grouping/search behavior:
-  - `display_window.py` (`enter_historic_mode`, `collect_available_jsns`, `perform_jsn_search`).
+  - `main_controller.py` (`enter_historic_mode`, `collect_available_jsns`, `perform_jsn_search`).
 - Change DB schema usage or SQL:
-  - `display_window.py` DB helpers + `db.py`.
+  - `main_controller.py` DB helpers + `db.py`.
 - Change path constants:
   - `paths_config.py`, then replace remaining hardcoded path literals in other modules.
 - Validate classified folders against DB/historic (read-only):
