@@ -1,11 +1,9 @@
 venv/
 .env
 tmp_display/
-resources/
 *.pyc
 ok_images/
 nok_images/
-*.txt
 diag_nok/
 diag_ok/
 front_ok/
@@ -14,3 +12,4 @@ side_ok/
 side_nok/
 Especial_case/
 *.pt
+log.txt
