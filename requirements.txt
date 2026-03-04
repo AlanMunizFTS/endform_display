@@ -1,7 +1,10 @@
-# Core runtime dependencies for this app (Python 3.12.0).
+#Python 3.12.0. (especifically)
+#Docker Engine v29.2.0
+
 numpy==1.26.4
 opencv-python==4.10.0.84
 paramiko==3.5.1
 psycopg2-binary==2.9.9
 
 # Optional utility stack (`utilities/results.py`) is intentionally excluded.
+

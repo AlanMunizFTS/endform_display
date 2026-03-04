@@ -2,6 +2,7 @@
 import cv2
 import numpy as np
 import re
+import time
 from collections import OrderedDict
 from multiprocessing import Event, Process
 from db import get_db_connection
@@ -55,7 +56,17 @@ class DisplayWindow:
         self.historic_images = []  # Complete list of historic images
         self.result_buttons = []  # List of result buttons [(rect, img_name, result_value), ...]
         self.temp_results = {}  # Dictionary for temporary changes {img_name: new_value}
-        self.db = get_db_connection()
+        self.db = None
+        self.db_blocking = False
+        self.db_block_message = ""
+        self.db_block_detail = ""
+        try:
+            self.set_db_connection(get_db_connection())
+        except Exception as exc:
+            self.set_db_blocked(
+                "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
+            )
+            self.db_block_detail = str(exc)
         self.download_process = None  # Process for background download
         self.download_stop_event = None
         self.historic_db_registered = False  # Tracks whether visible historic images were registered in DB.
@@ -122,6 +133,22 @@ class DisplayWindow:
         self.historic_index_rescan_interval = 1.5
         self._historic_jsn_cache = []
         self.set_sftp_client(sftp_client)
+
+    def set_db_connection(self, db_client):
+        """Set active DB client and release any DB blocking overlay."""
+        self.db = db_client
+        self.db_blocking = False
+        self.db_block_message = ""
+        self.db_block_detail = ""
+
+    def set_db_blocked(self, message):
+        """Enable blocking overlay while waiting for DB connectivity."""
+        self.db = None
+        self.db_blocking = True
+        self.db_block_message = (
+            message
+            or "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
+        )
 
     def set_sftp_client(self, sftp_client):
         """Update active SFTP client and dependent UI/control state."""
@@ -232,6 +259,9 @@ class DisplayWindow:
         self.mouse_button_down = (flags & cv2.EVENT_FLAG_LBUTTON) != 0
         
         if event == cv2.EVENT_LBUTTONDOWN:
+            if self.db_blocking:
+                return
+
             # Piece date dialog close button (highest priority)
             if self.show_piece_date_dialog and self.piece_date_dialog_close_rect:
                 bx, by, bw, bh = self.piece_date_dialog_close_rect
@@ -1214,8 +1244,6 @@ class DisplayWindow:
 
     def draw_sync_message(self, canvas):
         """Draw completion/error message after syncing dataset."""
-        import time
-
         if not self.sync_message or self.show_reset_confirm or self.show_delete_confirm:
             return canvas
 
@@ -1290,6 +1318,78 @@ class DisplayWindow:
         cv2.putText(canvas, line1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
         if line2:
             cv2.putText(canvas, line2, (text_x, text_y + 50), font, font_scale, (0, 0, 0), thickness)
+
+        return canvas
+
+    def draw_db_block_dialog(self, canvas):
+        """Draw blocking dialog shown while PostgreSQL is unavailable."""
+        if not self.db_blocking:
+            return canvas
+
+        dialog_width = 950
+        dialog_height = 320
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.62, canvas, 0.38, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (240, 240, 240),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        icon_x = dialog_x + 80
+        icon_y = dialog_y + 78
+        cv2.circle(canvas, (icon_x, icon_y), 34, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), 34, (0, 0, 0), 2)
+        cv2.putText(canvas, "!", (icon_x - 11, icon_y + 15), font, 1.8, (255, 255, 255), 4)
+
+        cv2.putText(
+            canvas,
+            "Database connection required",
+            (dialog_x + 135, dialog_y + 88),
+            font,
+            1.1,
+            (0, 0, 0),
+            3,
+        )
+
+        message = (
+            self.db_block_message
+            or "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
+        )
+        cv2.putText(canvas, message, (dialog_x + 45, dialog_y + 160), font, 0.85, (20, 20, 20), 2)
+        cv2.putText(
+            canvas,
+            "User actions are locked until DB connection is restored.",
+            (dialog_x + 45, dialog_y + 205),
+            font,
+            0.8,
+            (20, 20, 20),
+            2,
+        )
+        cv2.putText(
+            canvas,
+            "Auto-reconnect is running...",
+            (dialog_x + 45, dialog_y + 248),
+            font,
+            0.8,
+            (20, 20, 20),
+            2,
+        )
 
         return canvas
     
@@ -1820,6 +1920,11 @@ class DisplayWindow:
                 key_ex = cv2.waitKey(100)
             key = (key_ex & 0xFF) if key_ex != -1 else -1
 
+            if self.db_blocking:
+                if time.time() - self.last_refresh_time >= self.refresh_interval:
+                    return True
+                continue
+
             left_arrow_keys = {2424832, 81}
             right_arrow_keys = {2555904, 83}
             up_arrow_keys = {2490368, 82}
@@ -2137,6 +2242,8 @@ class DisplayWindow:
             canvas = self.draw_sync_progress(canvas)
         else:
             canvas = self.draw_sync_message(canvas)
+        if self.db_blocking:
+            canvas = self.draw_db_block_dialog(canvas)
 
         self.image = canvas
         return self.show()  # Muestra el display y retorna True para actualizar

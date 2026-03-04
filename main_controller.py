@@ -412,6 +412,7 @@ class ControllerConfig:
     live_rescan_interval_sec: float = 2.0
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
+    db_reconnect_interval_sec: float = 3.0
     max_images: int = 7
     remote_command: str = (
         "sh -lc 'echo $$; "
@@ -455,6 +456,8 @@ class MainController:
 
         self.sftp_connected = False
         self.next_reconnect_ts = 0.0
+        self.db_connected = False
+        self.next_db_reconnect_ts = 0.0
         self.remote_process = None
         self.remote_pid = None
         self.stop_event = None
@@ -483,12 +486,17 @@ class MainController:
             self.display.controller = self
 
         if getattr(self.display, "db", None) is None:
-            from db import get_db_connection
-
-            self.display.db = get_db_connection()
+            self._mark_db_unavailable("startup-no-connection")
+        else:
+            self.db_connected = True
+            if hasattr(self.display, "set_db_connection"):
+                self.display.set_db_connection(self.display.db)
 
     def initialize(self):
-        self._register_historic_local_dir_on_startup()
+        if not self.db_connected:
+            self.try_connect_db("startup")
+        if self.db_connected:
+            self._register_historic_local_dir_on_startup()
 
         if self.sftp_credentials is not None and self.sftp_app is None:
             self.sftp_app = SFTPApp(
@@ -517,8 +525,53 @@ class MainController:
             self.logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
             self.display.set_sftp_client(None)
 
+    def _db_block_message(self):
+        return "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
+
+    def _mark_db_unavailable(self, reason, exc=None):
+        self.db_connected = False
+        if getattr(self.display, "db", None) is not None:
+            try:
+                self.display.db.close()
+            except Exception:
+                pass
+        if hasattr(self.display, "set_db_blocked"):
+            self.display.set_db_blocked(self._db_block_message())
+        else:
+            self.display.db = None
+
+        self.next_db_reconnect_ts = time.monotonic() + self.config.db_reconnect_interval_sec
+        if exc is not None:
+            self.logger.error(f"[DB] Connection unavailable ({reason}): {exc}")
+        else:
+            self.logger.warn(f"[DB] Connection unavailable ({reason})")
+
+    def try_connect_db(self, reason):
+        if self.db_connected and getattr(self.display, "db", None) is not None:
+            return True
+        if time.monotonic() < self.next_db_reconnect_ts:
+            return False
+
+        try:
+            from db import get_db_connection
+
+            db_client = get_db_connection()
+            if hasattr(self.display, "set_db_connection"):
+                self.display.set_db_connection(db_client)
+            else:
+                self.display.db = db_client
+            self.db_connected = True
+            self.next_db_reconnect_ts = 0.0
+            self.logger.info("[DB] Reconnected successfully", allow_repeat=True)
+            return True
+        except Exception as exc:
+            self._mark_db_unavailable(reason, exc=exc)
+            return False
+
     def _register_historic_local_dir_on_startup(self):
         if self.historic_bootstrap_loading or self.historic_bootstrap_complete:
+            return
+        if not self.db_connected:
             return
 
         historic_dir = str(HISTORIC_LOCAL_DIR)
@@ -527,6 +580,7 @@ class MainController:
 
         def _bootstrap_worker():
             worker_db = None
+            completed = False
             try:
                 from db import get_db_connection
 
@@ -537,6 +591,7 @@ class MainController:
                     track_registered=False,
                 )
                 self.logger.info("[DB] Historic startup bootstrap completed", allow_repeat=True)
+                completed = True
             except Exception as exc:
                 self.logger.error(
                     f"[DB] Historic startup bootstrap failed: {exc}",
@@ -549,7 +604,8 @@ class MainController:
                     except Exception:
                         pass
                 self.historic_bootstrap_loading = False
-                self.historic_bootstrap_complete = True
+                if completed:
+                    self.historic_bootstrap_complete = True
 
         self.historic_bootstrap_thread = Thread(
             target=_bootstrap_worker,
@@ -1671,6 +1727,9 @@ class MainController:
     def handle_ui_action(self, action, **payload):
         d = self.display
 
+        if not self.db_connected:
+            return
+
         if action == "enter_historic_mode":
             self.enter_historic_mode()
         elif action == "exit_historic_mode":
@@ -1755,6 +1814,19 @@ class MainController:
         self.initialize()
         try:
             while True:
+                if not self.db_connected:
+                    self.try_connect_db("runtime-loop")
+                    self.display.image_paths = []
+                    self.display.show_image_grid(
+                        [],
+                        cols=self.config.display_cols,
+                        rows=self.config.display_rows,
+                    )
+                    continue
+
+                if not self.historic_bootstrap_loading and not self.historic_bootstrap_complete:
+                    self._register_historic_local_dir_on_startup()
+
                 if self.display.remote_action_request:
                     action = self.display.remote_action_request
                     self.display.remote_action_request = None

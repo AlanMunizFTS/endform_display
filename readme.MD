@@ -120,18 +120,14 @@ Deletes files from classification folders using image names from DB (`img_result
 - Target folders: `side_ok`, `side_nok`, `front_ok`, `front_nok`, `diag_ok`, `diag_nok`.
 
 ## Configuration new lap
--- GIT BASH --
-- git fetch --all
-- git branch -r
-- git checkout -b feature/nueva-funcionalidad origin/feature/nueva-funcionalidad
-
 -- PROJECT --
 - .env (make sure you have the achieve)
 
 --TERMINAL--
-- venv\scripts\activate
-- py -3.12 -m venv venv
-- pip install -r requirements.txt 
+py --version
+py -m venv venv
+venv\scripts\activate
+pip install -r requirements.txt 
 
 ## database form
 
@@ -139,7 +135,7 @@ Deletes files from classification folders using image names from DB (`img_result
 user: admin@endform.com
 pass: admin123
 
---FORM--
+--FORM-- (OPTIONAL)
 - Server Name: local-postgres 
 - Host name/address: postgres
 - Port: 5432
