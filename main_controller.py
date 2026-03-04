@@ -479,6 +479,7 @@ class MainController:
         self.historic_bootstrap_complete = False
         self.historic_bootstrap_thread = None
         self.sync_worker_thread = None
+        self.reset_worker_thread = None
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -624,9 +625,14 @@ class MainController:
         d.sync_stage = str(stage)
         d.sync_progress = max(0, min(100, int(percent)))
 
+    def _set_reset_progress(self, stage, percent):
+        d = self.display
+        d.reset_stage = str(stage)
+        d.reset_progress = max(0, min(100, int(percent)))
+
     def start_sync_images_by_status_async(self, historic_dir=None, base_dir=None):
         d = self.display
-        if d.sync_in_progress:
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
             return
 
         d.sync_in_progress = True
@@ -711,6 +717,66 @@ class MainController:
             daemon=True,
         )
         self.sync_worker_thread.start()
+
+    def start_reset_async(self):
+        d = self.display
+        if getattr(d, "reset_in_progress", False) or getattr(d, "sync_in_progress", False):
+            return
+
+        d.reset_in_progress = True
+        d.reset_progress = 0
+        d.reset_stage = "Preparing reset..."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _reset_worker():
+            worker_db = None
+            try:
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _reset_progress_cb(done, total, stage):
+                    if total <= 0:
+                        phase_percent = 0
+                        stage_text = stage
+                    else:
+                        phase_percent = int((done / total) * 100)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_reset_progress(stage_text, phase_percent)
+
+                result = self.perform_reset(
+                    db_client=worker_db,
+                    progress_callback=_reset_progress_cb,
+                )
+
+                if result.get("ok", False):
+                    d.sync_message = "Reset completed successfully"
+                    d.sync_message_is_error = False
+                else:
+                    error_text = result.get("error", "Reset failed")
+                    d.sync_message = f"Reset completed with issues: {error_text}"
+                    d.sync_message_is_error = True
+            except Exception as exc:
+                d.sync_message = f"Reset failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(f"[RESET] Reset failed: {exc}", allow_repeat=True)
+            finally:
+                d.reset_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.reset_worker_thread = Thread(
+            target=_reset_worker,
+            name="dataset-reset-worker",
+            daemon=True,
+        )
+        self.reset_worker_thread.start()
 
     def handle_disconnect(self, reason):
         self.logger.warn(f"[SSH] Disconnected ({reason}), switching to local fallback", allow_repeat=True)
@@ -1141,55 +1207,116 @@ class MainController:
         print("PIECE DELETE COMPLETED")
         print("=" * 70 + "\n")
 
-    def perform_reset(self):
+    def perform_reset(self, db_client=None, progress_callback=None):
         d = self.display
+        db = db_client or d.db
         print("\n" + "=" * 70)
         print("STARTING COMPLETE RESET")
         print("=" * 70)
 
         local_historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        errors = []
+
+        local_entries = []
         if self.file_manager.exists(local_historic_dir):
             try:
-                self.file_manager.rmtree(local_historic_dir)
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-                print("Local historic folder cleared")
+                local_entries = list(self.file_manager.listdir(local_historic_dir))
             except Exception as exc:
-                print(f"Error clearing local historic folder: {exc}")
-        else:
-            print("Local historic folder does not exist")
+                errors.append(f"Unable to scan local historic folder: {exc}")
+                print(f"Error scanning local historic folder: {exc}")
+                local_entries = []
 
+        remote_files = []
         if d.sftp_client:
             try:
                 self.file_manager.sftp_chdir(d.sftp_client, self.config.remote_hist_dir)
-                remote_files = self.file_manager.sftp_listdir(d.sftp_client)
-
-                if remote_files:
-                    print(f"Deleting {len(remote_files)} files from remote server...")
-                    deleted_count = 0
-                    for remote_file in remote_files:
-                        try:
-                            file_path = f"{self.config.remote_hist_dir}/{remote_file}"
-                            self.file_manager.sftp_remove(d.sftp_client, file_path)
-                            deleted_count += 1
-                        except Exception as exc:
-                            print(f"Error deleting {remote_file}: {exc}")
-                    print(f"Deleted {deleted_count}/{len(remote_files)} remote files")
-                else:
-                    print("Remote folder is already empty")
+                remote_files = list(self.file_manager.sftp_listdir(d.sftp_client))
             except Exception as exc:
+                errors.append(f"Unable to access remote folder: {exc}")
                 print(f"Error accessing remote folder: {exc}")
+                remote_files = []
+
+        local_steps = max(1, len(local_entries))
+        remote_steps = max(1, len(remote_files))
+        db_steps = 1
+        final_steps = 1
+        total_steps = local_steps + remote_steps + db_steps + final_steps
+        completed_steps = 0
+
+        def _advance(stage):
+            nonlocal completed_steps
+            completed_steps += 1
+            if callable(progress_callback):
+                progress_callback(completed_steps, total_steps, stage)
+
+        if callable(progress_callback):
+            progress_callback(0, total_steps, "Preparing reset")
+
+        if self.file_manager.exists(local_historic_dir):
+            if local_entries:
+                for idx, entry_name in enumerate(local_entries, start=1):
+                    entry_path = self.file_manager.join(local_historic_dir, entry_name)
+                    try:
+                        if self.file_manager.is_dir(entry_path):
+                            self.file_manager.rmtree(entry_path)
+                        else:
+                            self.file_manager.remove(entry_path)
+                    except Exception as exc:
+                        errors.append(f"Error removing local file '{entry_name}': {exc}")
+                        print(f"Error removing local entry {entry_name}: {exc}")
+                    _advance(f"Clearing local historic folder ({idx}/{len(local_entries)})")
+                print("Local historic folder cleared")
+            else:
+                print("Local historic folder is already empty")
+                _advance("Local historic folder is already empty")
+            try:
+                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
+            except Exception as exc:
+                errors.append(f"Error recreating local historic folder: {exc}")
+                print(f"Error recreating local historic folder: {exc}")
+        else:
+            try:
+                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
+                print("Local historic folder did not exist and was created")
+            except Exception as exc:
+                errors.append(f"Error creating local historic folder: {exc}")
+                print(f"Error creating local historic folder: {exc}")
+            _advance("Preparing local historic folder")
+
+        if d.sftp_client:
+            if remote_files:
+                print(f"Deleting {len(remote_files)} files from remote server...")
+                deleted_count = 0
+                for idx, remote_file in enumerate(remote_files, start=1):
+                    try:
+                        file_path = f"{self.config.remote_hist_dir}/{remote_file}"
+                        self.file_manager.sftp_remove(d.sftp_client, file_path)
+                        deleted_count += 1
+                    except Exception as exc:
+                        errors.append(f"Error deleting remote file '{remote_file}': {exc}")
+                        print(f"Error deleting {remote_file}: {exc}")
+                    _advance(f"Clearing remote historic folder ({idx}/{len(remote_files)})")
+                print(f"Deleted {deleted_count}/{len(remote_files)} remote files")
+            else:
+                print("Remote folder is already empty")
+                _advance("Remote historic folder is already empty")
         else:
             print("No SFTP connection available")
+            _advance("Remote reset skipped (no SFTP connection)")
 
-        if d.db:
+        if db:
             try:
                 query_delete = "DELETE FROM img_results"
-                affected_rows = d.db.execute(query_delete)
+                affected_rows = db.execute(query_delete)
                 print(f"Deleted {affected_rows} records from database")
             except Exception as exc:
+                errors.append(f"Error clearing database: {exc}")
                 print(f"Error clearing database: {exc}")
         else:
-            print("No database connection available")
+            message = "No database connection available"
+            errors.append(message)
+            print(message)
+        _advance("Resetting database")
 
         d.historic_images = []
         d.historic_offset = 0
@@ -1203,12 +1330,21 @@ class MainController:
         d._historic_jsn_cache = []
         d._db_result_cache.clear()
         d._image_cache.clear()
+        _advance("Finalizing reset")
 
         print("=" * 70)
-        print("RESET COMPLETED SUCCESSFULLY")
+        if errors:
+            print("RESET COMPLETED WITH ISSUES")
+        else:
+            print("RESET COMPLETED SUCCESSFULLY")
         print("=" * 70 + "\n")
 
         self.exit_historic_mode()
+        if callable(progress_callback):
+            progress_callback(total_steps, total_steps, "Completed")
+        if errors:
+            return {"ok": False, "error": errors[0], "errors": errors}
+        return {"ok": True}
 
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         d = self.display
@@ -1755,7 +1891,7 @@ class MainController:
             d.show_reset_confirm = False
         elif action == "confirm_reset":
             d.show_reset_confirm = False
-            self.perform_reset()
+            self.start_reset_async()
         elif action == "open_delete_confirm":
             d.show_delete_confirm = True
             d.show_reset_confirm = False

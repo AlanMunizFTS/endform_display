@@ -100,6 +100,9 @@ class DisplayWindow:
         self.sync_in_progress = False
         self.sync_progress = 0
         self.sync_stage = ""
+        self.reset_in_progress = False
+        self.reset_progress = 0
+        self.reset_stage = ""
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
         self.connected_cameras = set()  # Unique connected cameras in normal view
@@ -313,8 +316,8 @@ class DisplayWindow:
                 # If dialog is shown, don't process other clicks
                 return
 
-            # Block UI interactions while dataset sync is running.
-            if self.sync_in_progress:
+            # Block UI interactions while long-running operations are active.
+            if self.sync_in_progress or self.reset_in_progress:
                 return
             
             # HISTORIC button - only to activate historic mode
@@ -476,7 +479,7 @@ class DisplayWindow:
         self._require_controller().perform_delete_current_piece()
 
     def perform_reset(self):
-        self._require_controller().perform_reset()
+        self._require_controller().start_reset_async()
 
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         import main_controller as _main_controller
@@ -1321,6 +1324,99 @@ class DisplayWindow:
 
         return canvas
 
+    def draw_reset_progress(self, canvas):
+        """Draw modal loading screen with progress while resetting dataset."""
+        if not self.reset_in_progress:
+            return canvas
+
+        dialog_width = 760
+        dialog_height = 250
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.58, canvas, 0.42, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (245, 245, 245),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        title = "Resetting Dataset"
+        title_scale = 1.1
+        title_thickness = 3
+        cv2.putText(
+            canvas,
+            title,
+            (dialog_x + 35, dialog_y + 58),
+            font,
+            title_scale,
+            (0, 0, 0),
+            title_thickness,
+        )
+
+        stage_text = self.reset_stage or "Working..."
+        stage_scale = 0.85
+        stage_thickness = 2
+        cv2.putText(
+            canvas,
+            stage_text,
+            (dialog_x + 35, dialog_y + 100),
+            font,
+            stage_scale,
+            (40, 40, 40),
+            stage_thickness,
+        )
+
+        bar_x = dialog_x + 35
+        bar_y = dialog_y + 135
+        bar_w = dialog_width - 70
+        bar_h = 34
+        progress = max(0, min(100, int(self.reset_progress)))
+        fill_w = int((bar_w * progress) / 100)
+
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (220, 220, 220), -1)
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), 2)
+        if fill_w > 0:
+            cv2.rectangle(
+                canvas,
+                (bar_x + 2, bar_y + 2),
+                (bar_x + fill_w - 2, bar_y + bar_h - 2),
+                (67, 125, 22),
+                -1,
+            )
+
+        pct_text = f"{progress}%"
+        pct_size = cv2.getTextSize(pct_text, font, 0.9, 2)[0]
+        pct_x = bar_x + (bar_w - pct_size[0]) // 2
+        pct_y = bar_y + bar_h - 8
+        cv2.putText(canvas, pct_text, (pct_x, pct_y), font, 0.9, (255, 255, 255), 2)
+
+        helper_text = "Please wait until reset finishes."
+        cv2.putText(
+            canvas,
+            helper_text,
+            (dialog_x + 35, dialog_y + 205),
+            font,
+            0.7,
+            (30, 30, 30),
+            2,
+        )
+
+        return canvas
+
     def draw_db_block_dialog(self, canvas):
         """Draw blocking dialog shown while PostgreSQL is unavailable."""
         if not self.db_blocking:
@@ -1957,6 +2053,7 @@ class DisplayWindow:
                 and self.historic_mode
                 and not self.search_active
                 and not self.sync_in_progress
+                and not self.reset_in_progress
             ):
                 if key_ex in left_arrow_keys:
                     self._emit_action("prev_historic_batch")
@@ -2240,6 +2337,8 @@ class DisplayWindow:
             canvas = self.draw_no_images_dialog(canvas)
         if self.sync_in_progress:
             canvas = self.draw_sync_progress(canvas)
+        elif self.reset_in_progress:
+            canvas = self.draw_reset_progress(canvas)
         else:
             canvas = self.draw_sync_message(canvas)
         if self.db_blocking:
