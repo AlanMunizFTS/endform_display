@@ -6,9 +6,13 @@
   - Bootstrap only: logger/env/config wiring and object composition.
 - `main_controller.py`
   - Business/orchestration layer: SFTP lifecycle, reconnect policy, remote process control, live/historic flow, DB status updates, sync/reset/delete actions.
+  - Runs startup historic DB bootstrap in background and gates historic entry until bootstrap completes.
+  - Runs dataset sync asynchronously with progress updates and post-sync verification.
   - Holds runtime constants in `ControllerConfig` (camera IDs, image extensions, intervals, limits, remote command).
 - `display_window.py`
   - View layer: rendering + input capture.
+  - Shows sync progress modal (loader + percentage/stage) and completion/verification result message.
+  - Supports historic navigation with keyboard left/right arrows.
   - Emits user actions to `MainController` and delegates business operations through thin compatibility wrappers.
 
 ## Environment Setup
@@ -54,6 +58,26 @@ Expected logs include:
 - Existing DB rows are not modified by this bootstrap step.
 - The app window opens immediately; historic mode is blocked until bootstrap completes.
 - If the user tries to enter historic mode while bootstrap is running, the UI shows a loading message.
+
+## Dataset Sync Loader and Verification
+
+- Pressing `SYNC` starts an asynchronous sync job (UI remains responsive).
+- A loading modal is shown with:
+  - Progress bar (`0-100%`)
+  - Current stage text (`Saving dataset`, `Verifying classification`, `Completed`)
+  - Current counter (`x/y`) while processing.
+- During this sync, UI interactions are blocked by the modal until completion.
+- After sync completes, the app verifies classification consistency using the same core logic as `tests/test_sync_images_by_status.py`.
+- Completion messages:
+  - Success: `Dataset completed and verified`
+  - Verification issues: `Dataset completed but verification failed (N issues)`
+  - Runtime failure: `Dataset sync failed: ...`
+
+## Historic Keyboard Navigation
+
+- In historic mode (when search input is not active), use keyboard arrows:
+  - `Left Arrow`: previous historic batch
+  - `Right Arrow`: next historic batch
 
 ## Quick Commands
 

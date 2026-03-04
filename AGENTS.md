@@ -36,13 +36,18 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
    - Mirrors each downloaded image to remote `/media/ssd/hist_display`.
 5. Historic mode:
    - Reads local historic cache, groups by JSN, allows search/navigation.
+   - Supports left/right keyboard arrows for previous/next historic batch.
    - Lets user assign/toggle `OK/NOK` and persists to Postgres.
 6. Sync action:
    - Reads `img_results`, routes files into `*_ok` / `*_nok`, and removes mismatches.
+   - Runs asynchronously with modal loader/progress and then verifies consistency using logic aligned with `tests/test_sync_images_by_status.py`.
+   - Shows completion message indicating verified success or verification issues.
 
 ## Task-to-File Routing
 - Change UI layout, buttons, dialogs, draw logic:
   - `display_window.py` (`draw_*`, `mouse_callback`, `show_image_grid`).
+- Change keyboard shortcuts (historic arrows, search keys):
+  - `display_window.py` (`show` key loop).
 - Change remote command start/stop behavior:
   - `main_controller.py` (`start_remote_process`, `stop_remote_process`) and `sftp_app.py`.
 - Change image selection/rotation policy in live view:

@@ -17,6 +17,7 @@
   - Owns runtime/business logic:
     - Startup bootstrap: starts a background scan of local historic cache (`HISTORIC_LOCAL_DIR`) and inserts missing `img_results` rows with default `result='OK'`.
     - Historic-mode gate: blocks entering historic mode while startup bootstrap is running and shows a loading message when requested.
+    - Async dataset sync: runs `sync_images_by_status` in background with stage/progress updates and end-of-run verification against DB/folder consistency checks (aligned with `tests/test_sync_images_by_status.py`).
     - SFTP connect/reconnect lifecycle.
     - Remote process start/stop and remote event handling.
     - Live image rotation and fallback policy.
@@ -24,6 +25,8 @@
   - Exposes `ControllerConfig` for static runtime constants.
 - `display_window.py`
   - UI layer only (render + interaction capture).
+  - Shows modal sync loader with percentage/stage and completion/verification result dialogs.
+  - Supports historic keyboard navigation using left/right arrows.
   - Delegates business actions to `MainController` via action bridge/wrapper methods.
 - `sftp_app.py`
   - Handles SSH/SFTP connect/disconnect, remote process streaming, and live image downloads.
@@ -60,6 +63,7 @@
 
 ## Quick Task Routing
 - UI/button/render changes: `display_window.py`.
+- Keyboard shortcuts for historic navigation and search key handling: `display_window.py` (`show()` key loop).
 - Runtime/business behavior: `main_controller.py`.
 - Remote process start/stop behavior: `main_controller.py` + `sftp_app.py`.
 - Live image selection/rotation policy in app runtime: `main_controller.py`.
