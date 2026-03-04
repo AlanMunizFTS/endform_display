@@ -47,11 +47,13 @@ Expected logs include:
 
 ## Startup Historic DB Bootstrap
 
-- On app startup, `MainController.initialize()` scans local `HISTORIC_LOCAL_DIR` (`tmp_display/historic`).
+- On app startup, `MainController.initialize()` starts a background bootstrap for local `HISTORIC_LOCAL_DIR` (`tmp_display/historic`).
 - For each local image filename not present in `img_results`, the app inserts a new row with:
   - `img_name = <filename>`
   - `result = 'OK'`
 - Existing DB rows are not modified by this bootstrap step.
+- The app window opens immediately; historic mode is blocked until bootstrap completes.
+- If the user tries to enter historic mode while bootstrap is running, the UI shows a loading message.
 
 ## Quick Commands
 

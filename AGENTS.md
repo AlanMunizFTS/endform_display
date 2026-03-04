@@ -27,8 +27,9 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
 ## Runtime Flow
 1. `main.py` loads env/config and wires `DisplayWindow` + `MainController`.
 2. `MainController` bootstraps DB from local historic cache:
-   - Scans `HISTORIC_LOCAL_DIR` on startup.
+   - Starts a background scan of `HISTORIC_LOCAL_DIR` on startup.
    - Inserts missing `img_results.img_name` rows with default `result='OK'`.
+   - Blocks historic-mode entry until bootstrap finishes and shows a loading message if the operator tries early.
 3. `MainController` manages SFTP connection via `SFTPApp` and runtime loop.
 4. Normal mode:
    - Pulls a rotating batch from remote `/media/ssd/test_display`.

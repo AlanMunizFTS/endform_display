@@ -3,6 +3,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from multiprocessing import Event, Process, Queue
+from threading import Thread
 
 from file_manager import FileManager
 from paths_config import (
@@ -471,6 +472,9 @@ class MainController:
             "current_batch_catalog_version": -1,
         }
         self.live_rotation_state_remote = {"current_offset": 0}
+        self.historic_bootstrap_loading = False
+        self.historic_bootstrap_complete = False
+        self.historic_bootstrap_thread = None
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -513,8 +517,50 @@ class MainController:
             self.display.set_sftp_client(None)
 
     def _register_historic_local_dir_on_startup(self):
+        if self.historic_bootstrap_loading or self.historic_bootstrap_complete:
+            return
+
         historic_dir = str(HISTORIC_LOCAL_DIR)
-        self._register_local_images_in_db(historic_dir)
+        self.historic_bootstrap_loading = True
+        self.logger.info("[DB] Historic startup bootstrap started", allow_repeat=True)
+
+        def _bootstrap_worker():
+            worker_db = None
+            try:
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+                self._register_local_images_in_db(
+                    historic_dir,
+                    db_client=worker_db,
+                    track_registered=False,
+                )
+                self.logger.info("[DB] Historic startup bootstrap completed", allow_repeat=True)
+            except Exception as exc:
+                self.logger.error(
+                    f"[DB] Historic startup bootstrap failed: {exc}",
+                    allow_repeat=True,
+                )
+            finally:
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+                self.historic_bootstrap_loading = False
+                self.historic_bootstrap_complete = True
+
+        self.historic_bootstrap_thread = Thread(
+            target=_bootstrap_worker,
+            name="historic-db-bootstrap",
+            daemon=True,
+        )
+        self.historic_bootstrap_thread.start()
+
+    def _show_no_images_dialog(self, message):
+        d = self.display
+        d.no_images_dialog_message = message
+        d.show_no_images_dialog = True
 
     def handle_disconnect(self, reason):
         self.logger.warn(f"[SSH] Disconnected ({reason}), switching to local fallback", allow_repeat=True)
@@ -709,6 +755,10 @@ class MainController:
 
     def enter_historic_mode(self):
         d = self.display
+        if self.historic_bootstrap_loading:
+            self._show_no_images_dialog("Historic loading in progress")
+            return
+
         current_jsn = None
         fallback_offset = d.historic_offset
         if d.historic_mode and d.historic_images:
@@ -728,7 +778,7 @@ class MainController:
 
             if not d.historic_images:
                 if not d.historic_mode:
-                    d.show_no_images_dialog = True
+                    self._show_no_images_dialog("No images available")
                 return
 
             if not d.historic_mode:
@@ -933,7 +983,7 @@ class MainController:
             d.available_jsns = []
             d.filtered_suggestions = []
             self.exit_historic_mode()
-            d.show_no_images_dialog = True
+            self._show_no_images_dialog("No images available")
         else:
             self.enter_historic_mode()
 
@@ -1101,10 +1151,17 @@ class MainController:
             print(f"Error reading historic batch: {exc}")
             return []
 
-    def _register_local_images_in_db(self, historic_dir, image_names=None):
+    def _register_local_images_in_db(
+        self,
+        historic_dir,
+        image_names=None,
+        db_client=None,
+        track_registered=True,
+    ):
         d = self.display
+        db = db_client or d.db
         try:
-            if not d.db:
+            if not db:
                 return
             if not self.file_manager.exists(historic_dir):
                 return
@@ -1121,11 +1178,14 @@ class MainController:
             if not local_images:
                 return
 
-            pending = [img for img in local_images if img not in d._db_registered_images]
+            if track_registered:
+                pending = [img for img in local_images if img not in d._db_registered_images]
+            else:
+                pending = local_images
             if not pending:
                 return
 
-            existing_rows = d.db.fetch(
+            existing_rows = db.fetch(
                 "SELECT img_name FROM img_results WHERE img_name = ANY(%s)",
                 (pending,),
             )
@@ -1136,11 +1196,12 @@ class MainController:
                 query_insert = "INSERT INTO img_results (img_name, result) VALUES (%s, %s)"
                 for img_name in images_to_insert:
                     try:
-                        d.db.execute(query_insert, (img_name, "OK"))
+                        db.execute(query_insert, (img_name, "OK"))
                     except Exception as exc:
                         print(f"Error inserting {img_name}: {exc}")
 
-            d._db_registered_images.update(pending)
+            if track_registered:
+                d._db_registered_images.update(pending)
             d.historic_db_registered = True
 
         except Exception as exc:
@@ -1361,6 +1422,7 @@ class MainController:
             self.toggle_result(payload.get("img_name"), payload.get("result_value"))
         elif action == "dismiss_no_images_dialog":
             d.show_no_images_dialog = False
+            d.no_images_dialog_message = "No images available"
         elif action == "search_focus":
             d.search_active = True
             self.collect_available_jsns()

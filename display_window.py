@@ -81,6 +81,7 @@ class DisplayWindow:
         self.delete_confirm_button_rect = None  # Confirm delete button rect
         self.delete_cancel_button_rect = None  # Cancel delete button rect
         self.show_no_images_dialog = False  # Show no images available dialog
+        self.no_images_dialog_message = "No images available"
         self.no_images_ok_button_rect = None  # OK button rect for no images dialog
         self.sync_message = ""
         self.sync_message_time = 0
@@ -1419,10 +1420,14 @@ class DisplayWindow:
         cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 1.8, (255, 255, 255), 3)
 
         # Message text to the right of the icon, not touching the border
-        message_text = "No images available"
-        font_scale = 0.9  # Smaller font
+        message_text = self.no_images_dialog_message or "No images available"
+        font_scale = 0.9
         thickness = 2
+        max_text_width = dialog_width - 140
         text_size = cv2.getTextSize(message_text, font, font_scale, thickness)[0]
+        while text_size[0] > max_text_width and font_scale > 0.55:
+            font_scale -= 0.05
+            text_size = cv2.getTextSize(message_text, font, font_scale, thickness)[0]
         # Place text to the right of the icon, with margin
         margin_right_of_icon = 20
         text_x = icon_x + 30 + margin_right_of_icon
