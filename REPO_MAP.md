@@ -15,6 +15,7 @@
   - Loads SFTP credentials from `settings.py` and wires `DisplayWindow` + `MainController`.
 - `main_controller.py`
   - Owns runtime/business logic:
+    - Startup bootstrap: scans local historic cache (`HISTORIC_LOCAL_DIR`) and inserts missing `img_results` rows with default `result='OK'`.
     - SFTP connect/reconnect lifecycle.
     - Remote process start/stop and remote event handling.
     - Live image rotation and fallback policy.

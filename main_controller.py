@@ -6,6 +6,7 @@ from multiprocessing import Event, Process, Queue
 
 from file_manager import FileManager
 from paths_config import (
+    HISTORIC_LOCAL_DIR,
     HISTORIC_SUBDIR_NAME,
     REMOTE_HIST_DISPLAY_DIR,
     REMOTE_TEST_DISPLAY_DIR,
@@ -482,6 +483,8 @@ class MainController:
             self.display.db = get_db_connection()
 
     def initialize(self):
+        self._register_historic_local_dir_on_startup()
+
         if self.sftp_credentials is not None and self.sftp_app is None:
             self.sftp_app = SFTPApp(
                 self.sftp_credentials["hostname"],
@@ -508,6 +511,10 @@ class MainController:
         else:
             self.logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
             self.display.set_sftp_client(None)
+
+    def _register_historic_local_dir_on_startup(self):
+        historic_dir = str(HISTORIC_LOCAL_DIR)
+        self._register_local_images_in_db(historic_dir)
 
     def handle_disconnect(self, reason):
         self.logger.warn(f"[SSH] Disconnected ({reason}), switching to local fallback", allow_repeat=True)
@@ -1126,10 +1133,10 @@ class MainController:
 
             images_to_insert = [img for img in pending if img not in existing]
             if images_to_insert:
-                query_insert = "INSERT INTO img_results (img_name) VALUES (%s)"
+                query_insert = "INSERT INTO img_results (img_name, result) VALUES (%s, %s)"
                 for img_name in images_to_insert:
                     try:
-                        d.db.execute(query_insert, (img_name,))
+                        d.db.execute(query_insert, (img_name, "OK"))
                     except Exception as exc:
                         print(f"Error inserting {img_name}: {exc}")
 

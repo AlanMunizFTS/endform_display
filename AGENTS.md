@@ -26,14 +26,17 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
 
 ## Runtime Flow
 1. `main.py` loads env/config and wires `DisplayWindow` + `MainController`.
-2. `MainController` manages SFTP connection via `SFTPApp` and runtime loop.
-3. Normal mode:
+2. `MainController` bootstraps DB from local historic cache:
+   - Scans `HISTORIC_LOCAL_DIR` on startup.
+   - Inserts missing `img_results.img_name` rows with default `result='OK'`.
+3. `MainController` manages SFTP connection via `SFTPApp` and runtime loop.
+4. Normal mode:
    - Pulls a rotating batch from remote `/media/ssd/test_display`.
    - Mirrors each downloaded image to remote `/media/ssd/hist_display`.
-4. Historic mode:
+5. Historic mode:
    - Reads local historic cache, groups by JSN, allows search/navigation.
    - Lets user assign/toggle `OK/NOK` and persists to Postgres.
-5. Sync action:
+6. Sync action:
    - Reads `img_results`, routes files into `*_ok` / `*_nok`, and removes mismatches.
 
 ## Task-to-File Routing

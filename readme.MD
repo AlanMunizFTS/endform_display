@@ -45,6 +45,14 @@ Expected logs include:
 - `[SSH] Initial SFTP connection failed, running local-only fallback`
 - `[SSH] Reconnected successfully`
 
+## Startup Historic DB Bootstrap
+
+- On app startup, `MainController.initialize()` scans local `HISTORIC_LOCAL_DIR` (`tmp_display/historic`).
+- For each local image filename not present in `img_results`, the app inserts a new row with:
+  - `img_name = <filename>`
+  - `result = 'OK'`
+- Existing DB rows are not modified by this bootstrap step.
+
 ## Quick Commands
 
 - Activate virtualenv: `venv\Scripts\activate`
