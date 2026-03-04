@@ -84,7 +84,11 @@ class DisplayWindow:
         self.no_images_dialog_message = "No images available"
         self.no_images_ok_button_rect = None  # OK button rect for no images dialog
         self.sync_message = ""
+        self.sync_message_is_error = False
         self.sync_message_time = 0
+        self.sync_in_progress = False
+        self.sync_progress = 0
+        self.sync_stage = ""
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
         self.connected_cameras = set()  # Unique connected cameras in normal view
@@ -275,7 +279,12 @@ class DisplayWindow:
                     if bx <= x <= bx + bw and by <= y <= by + bh:
                         self._emit_action("cancel_reset_confirm")
                         return
+
                 # If dialog is shown, don't process other clicks
+                return
+
+            # Block UI interactions while dataset sync is running.
+            if self.sync_in_progress:
                 return
             
             # HISTORIC button - only to activate historic mode
@@ -1110,8 +1119,101 @@ class DisplayWindow:
         cv2.putText(canvas, text, (text_x, text_y), font, font_scale, color, thickness)
         return canvas
 
+    def draw_sync_progress(self, canvas):
+        """Draw modal loading screen with progress while syncing dataset."""
+        if not self.sync_in_progress:
+            return canvas
+
+        dialog_width = 760
+        dialog_height = 250
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.58, canvas, 0.42, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (245, 245, 245),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        title = "Saving Dataset"
+        title_scale = 1.1
+        title_thickness = 3
+        cv2.putText(
+            canvas,
+            title,
+            (dialog_x + 35, dialog_y + 58),
+            font,
+            title_scale,
+            (0, 0, 0),
+            title_thickness,
+        )
+
+        stage_text = self.sync_stage or "Working..."
+        stage_scale = 0.85
+        stage_thickness = 2
+        cv2.putText(
+            canvas,
+            stage_text,
+            (dialog_x + 35, dialog_y + 100),
+            font,
+            stage_scale,
+            (40, 40, 40),
+            stage_thickness,
+        )
+
+        bar_x = dialog_x + 35
+        bar_y = dialog_y + 135
+        bar_w = dialog_width - 70
+        bar_h = 34
+        progress = max(0, min(100, int(self.sync_progress)))
+        fill_w = int((bar_w * progress) / 100)
+
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (220, 220, 220), -1)
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (30, 30, 30), 2)
+        if fill_w > 0:
+            cv2.rectangle(
+                canvas,
+                (bar_x + 2, bar_y + 2),
+                (bar_x + fill_w - 2, bar_y + bar_h - 2),
+                (67, 125, 22),
+                -1,
+            )
+
+        pct_text = f"{progress}%"
+        pct_size = cv2.getTextSize(pct_text, font, 0.9, 2)[0]
+        pct_x = bar_x + (bar_w - pct_size[0]) // 2
+        pct_y = bar_y + bar_h - 8
+        cv2.putText(canvas, pct_text, (pct_x, pct_y), font, 0.9, (255, 255, 255), 2)
+
+        helper_text = "Please wait until the process finishes."
+        cv2.putText(
+            canvas,
+            helper_text,
+            (dialog_x + 35, dialog_y + 205),
+            font,
+            0.7,
+            (30, 30, 30),
+            2,
+        )
+
+        return canvas
+
     def draw_sync_message(self, canvas):
-        """Draw a short confirmation message after syncing"""
+        """Draw completion/error message after syncing dataset."""
         import time
 
         if not self.sync_message or self.show_reset_confirm or self.show_delete_confirm:
@@ -1138,33 +1240,56 @@ class DisplayWindow:
         cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
                      (0, 0, 0), 3)
 
-        # OK icon
+        # Status icon
         icon_x = dialog_x + 60
         icon_y = dialog_y + 80
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 150, 0), -1)
+        icon_color = (0, 0, 200) if self.sync_message_is_error else (0, 150, 0)
+        cv2.circle(canvas, (icon_x, icon_y), 30, icon_color, -1)
         cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        ok_text = "OK"
-        ok_scale = 1.1
-        ok_thickness = 3
-        ok_size = cv2.getTextSize(ok_text, font, ok_scale, ok_thickness)[0]
-        ok_x = icon_x - (ok_size[0] // 2)
-        ok_y = icon_y + (ok_size[1] // 2)
-        cv2.putText(canvas, ok_text, (ok_x, ok_y), font, ok_scale, (255, 255, 255), ok_thickness)
+        icon_text = "!" if self.sync_message_is_error else "OK"
+        icon_scale = 1.0 if self.sync_message_is_error else 1.1
+        icon_thickness = 3
+        icon_size = cv2.getTextSize(icon_text, font, icon_scale, icon_thickness)[0]
+        icon_x_text = icon_x - (icon_size[0] // 2)
+        icon_y_text = icon_y + (icon_size[1] // 2)
+        cv2.putText(
+            canvas,
+            icon_text,
+            (icon_x_text, icon_y_text),
+            font,
+            icon_scale,
+            (255, 255, 255),
+            icon_thickness,
+        )
 
-        # Message text
+        # Message text (word-wrapped in up to 2 lines)
         text_x = dialog_x + 130
         text_y = dialog_y + 80
+        message = self.sync_message.strip()
 
-        line1 = "Dataset correctly"
-        line2 = "saved"
+        words = message.split()
+        line1_words = []
+        line2_words = []
+        max_line_width = 520
+        for word in words:
+            candidate = " ".join(line1_words + [word]).strip()
+            width = cv2.getTextSize(candidate, font, 1.15, 3)[0][0]
+            if width <= max_line_width or not line1_words:
+                line1_words.append(word)
+            else:
+                line2_words.append(word)
 
-        font_scale = 1.4
+        line1 = " ".join(line1_words) if line1_words else message
+        line2 = " ".join(line2_words)
+
+        font_scale = 1.15
         thickness = 3
 
         cv2.putText(canvas, line1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, line2, (text_x, text_y + 50), font, font_scale, (0, 0, 0), thickness)
+        if line2:
+            cv2.putText(canvas, line2, (text_x, text_y + 50), font, font_scale, (0, 0, 0), thickness)
 
         return canvas
     
@@ -1920,10 +2045,6 @@ class DisplayWindow:
             else:
                 self.start_stop_button_rect = None
             canvas = self.draw_exit_button(canvas)
-            
-            # Draw no images dialog if needed
-            if self.show_no_images_dialog:
-                canvas = self.draw_no_images_dialog(canvas)
         else:
             # Historic mode: show JSN in upper blue bar
             if self.historic_images and len(self.historic_images) > 0:
@@ -1976,7 +2097,6 @@ class DisplayWindow:
             canvas = self.draw_trash_button(canvas)
             canvas = self.draw_sync_button(canvas)
             canvas = self.draw_reset_button(canvas)
-            canvas = self.draw_sync_message(canvas)
             
             # Draw piece date dialog if needed
             if self.show_piece_date_dialog:
@@ -1987,6 +2107,13 @@ class DisplayWindow:
                 canvas = self.draw_reset_confirmation_dialog(canvas)
             elif self.show_delete_confirm:
                 canvas = self.draw_delete_confirmation_dialog(canvas)
+
+        if self.show_no_images_dialog:
+            canvas = self.draw_no_images_dialog(canvas)
+        if self.sync_in_progress:
+            canvas = self.draw_sync_progress(canvas)
+        else:
+            canvas = self.draw_sync_message(canvas)
 
         self.image = canvas
         return self.show()  # Muestra el display y retorna True para actualizar

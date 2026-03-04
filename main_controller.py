@@ -475,6 +475,7 @@ class MainController:
         self.historic_bootstrap_loading = False
         self.historic_bootstrap_complete = False
         self.historic_bootstrap_thread = None
+        self.sync_worker_thread = None
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -561,6 +562,99 @@ class MainController:
         d = self.display
         d.no_images_dialog_message = message
         d.show_no_images_dialog = True
+
+    def _set_sync_progress(self, stage, percent):
+        d = self.display
+        d.sync_stage = str(stage)
+        d.sync_progress = max(0, min(100, int(percent)))
+
+    def start_sync_images_by_status_async(self, historic_dir=None, base_dir=None):
+        d = self.display
+        if d.sync_in_progress:
+            return
+
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing dataset sync..."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _sync_worker():
+            worker_db = None
+            try:
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _sync_progress_cb(done, total, stage):
+                    if total <= 0:
+                        phase_percent = 0
+                        stage_text = stage
+                    else:
+                        phase_percent = int((done / total) * 85)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_sync_progress(stage_text, phase_percent)
+
+                sync_result = self.sync_images_by_status(
+                    historic_dir=historic_dir,
+                    base_dir=base_dir,
+                    db_client=worker_db,
+                    progress_callback=_sync_progress_cb,
+                )
+
+                if not sync_result.get("ok", False):
+                    raise RuntimeError(sync_result.get("error", "Dataset sync failed"))
+
+                def _verify_progress_cb(done, total, stage):
+                    if total <= 0:
+                        phase_percent = 85
+                        stage_text = stage
+                    else:
+                        phase_percent = 85 + int((done / total) * 15)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_sync_progress(stage_text, phase_percent)
+
+                verify_result = self.verify_sync_images_by_status(
+                    historic_dir=historic_dir,
+                    base_dir=base_dir,
+                    db_client=worker_db,
+                    progress_callback=_verify_progress_cb,
+                )
+
+                self._set_sync_progress("Completed", 100)
+                if verify_result.get("verified"):
+                    d.sync_message = "Dataset completed and verified"
+                    d.sync_message_is_error = False
+                else:
+                    issue_count = verify_result.get("issue_count", 0)
+                    d.sync_message = (
+                        f"Dataset completed but verification failed ({issue_count} issues)"
+                    )
+                    d.sync_message_is_error = True
+                    self.logger.warn(
+                        f"[SYNC] Verification failed with {issue_count} issues",
+                        allow_repeat=True,
+                    )
+            except Exception as exc:
+                d.sync_message = f"Dataset sync failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(f"[SYNC] Dataset sync failed: {exc}", allow_repeat=True)
+            finally:
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.sync_worker_thread = Thread(
+            target=_sync_worker,
+            name="dataset-sync-worker",
+            daemon=True,
+        )
+        self.sync_worker_thread.start()
 
     def handle_disconnect(self, reason):
         self.logger.warn(f"[SSH] Disconnected ({reason}), switching to local fallback", allow_repeat=True)
@@ -1247,8 +1341,15 @@ class MainController:
         d.temp_results.clear()
         print("Temporary changes cleared")
 
-    def sync_images_by_status(self, historic_dir=None, base_dir=None):
+    def sync_images_by_status(
+        self,
+        historic_dir=None,
+        base_dir=None,
+        db_client=None,
+        progress_callback=None,
+    ):
         d = self.display
+        db = db_client or d.db
         historic_dir = historic_dir or self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
         base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
 
@@ -1264,42 +1365,62 @@ class MainController:
             for path in dirs.values():
                 self.file_manager.makedirs(path, exist_ok=True)
 
-        if not d.db:
-            print("No database connection available")
-            return
+        if not db:
+            message = "No database connection available"
+            print(message)
+            return {"ok": False, "error": message}
 
         if not self.file_manager.exists(historic_dir):
-            print(f"Historic folder not found: {historic_dir}")
-            return
+            message = f"Historic folder not found: {historic_dir}"
+            print(message)
+            return {"ok": False, "error": message}
 
         try:
-            rows = d.db.fetch("SELECT img_name, result FROM img_results")
+            rows = db.fetch("SELECT img_name, result FROM img_results")
         except Exception as exc:
-            print(f"Error fetching image results: {exc}")
-            return
+            message = f"Error fetching image results: {exc}"
+            print(message)
+            return {"ok": False, "error": message}
 
         if not rows:
-            print("No image results found in database")
-            return
+            message = "No image results found in database"
+            print(message)
+            return {"ok": False, "error": message}
 
-        for row in rows:
+        total_rows = len(rows)
+        copied_count = 0
+        removed_count = 0
+        error_count = 0
+
+        if callable(progress_callback):
+            progress_callback(0, total_rows, "Saving dataset")
+
+        for idx, row in enumerate(rows, start=1):
             img_name = row.get("img_name") or row.get("name")
             status = row.get("result")
 
             if not img_name or status is None:
+                if callable(progress_callback):
+                    progress_callback(idx, total_rows, "Saving dataset")
                 continue
 
             status = str(status).strip().upper()
             if status not in ("OK", "NOK"):
+                if callable(progress_callback):
+                    progress_callback(idx, total_rows, "Saving dataset")
                 continue
 
             match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
             if not match:
+                if callable(progress_callback):
+                    progress_callback(idx, total_rows, "Saving dataset")
                 continue
             position = match.group(1).lower()
 
             source_path = self.file_manager.join(historic_dir, img_name)
             if not self.file_manager.exists(source_path):
+                if callable(progress_callback):
+                    progress_callback(idx, total_rows, "Saving dataset")
                 continue
 
             target_dir = position_dirs[position][status]
@@ -1312,14 +1433,184 @@ class MainController:
             if self.file_manager.exists(other_path):
                 try:
                     self.file_manager.remove(other_path)
+                    removed_count += 1
                 except Exception as exc:
+                    error_count += 1
                     print(f"Error removing from wrong folder: {other_path} -> {exc}")
 
             if not self.file_manager.exists(target_path):
                 try:
                     self.file_manager.copy2(source_path, target_path)
+                    copied_count += 1
                 except Exception as exc:
+                    error_count += 1
                     print(f"Error copying {img_name} to {target_dir}: {exc}")
+
+            if callable(progress_callback):
+                progress_callback(idx, total_rows, "Saving dataset")
+
+        return {
+            "ok": True,
+            "rows": total_rows,
+            "copied": copied_count,
+            "removed": removed_count,
+            "errors": error_count,
+        }
+
+    def verify_sync_images_by_status(
+        self,
+        historic_dir=None,
+        base_dir=None,
+        db_client=None,
+        progress_callback=None,
+    ):
+        db = db_client or self.display.db
+        historic_dir = historic_dir or self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
+
+        if not db:
+            return {"verified": False, "issue_count": 1, "issues": {"db": ["No database connection"]}}
+
+        if not self.file_manager.exists(historic_dir):
+            return {
+                "verified": False,
+                "issue_count": 1,
+                "issues": {"historic": [f"Historic folder not found: {historic_dir}"]},
+            }
+
+        rows = db.fetch("SELECT img_name, result FROM img_results ORDER BY img_name")
+        if not rows:
+            return {
+                "verified": False,
+                "issue_count": 1,
+                "issues": {"db_rows": ["img_results returned no rows"]},
+            }
+
+        image_extensions = {".png", ".jpg", ".jpeg", ".bmp"}
+        historic_images = sorted(
+            name
+            for name in self.file_manager.listdir(historic_dir)
+            if self.file_manager.is_file(self.file_manager.join(historic_dir, name))
+            and any(name.lower().endswith(ext) for ext in image_extensions)
+        )
+        if not historic_images:
+            return {
+                "verified": False,
+                "issue_count": 1,
+                "issues": {"historic_images": ["No image files found in historic folder"]},
+            }
+
+        db_status_by_image = defaultdict(set)
+        for row in rows:
+            img_name = row.get("img_name") or row.get("name")
+            result = row.get("result")
+            status = "" if result is None else str(result).strip().upper()
+            if not img_name or status not in ("OK", "NOK"):
+                continue
+            db_status_by_image[img_name].add(status)
+
+        if not db_status_by_image:
+            return {
+                "verified": False,
+                "issue_count": 1,
+                "issues": {"db_status": ["No valid DB rows with status OK/NOK were found"]},
+            }
+
+        total_steps = max(1, len(historic_images) * 2)
+        done = 0
+        if callable(progress_callback):
+            progress_callback(done, total_steps, "Verifying classification")
+
+        expected_folder_by_image = {}
+        missing_db_status = []
+        conflicting_db_status = []
+        invalid_position = []
+
+        for img_name in historic_images:
+            statuses = db_status_by_image.get(img_name, set())
+            if not statuses:
+                missing_db_status.append(img_name)
+                done += 1
+                if callable(progress_callback):
+                    progress_callback(done, total_steps, "Verifying classification")
+                continue
+            if len(statuses) > 1:
+                conflicting_db_status.append(f"{img_name}: {sorted(statuses)}")
+                done += 1
+                if callable(progress_callback):
+                    progress_callback(done, total_steps, "Verifying classification")
+                continue
+
+            match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
+            if not match:
+                invalid_position.append(img_name)
+                done += 1
+                if callable(progress_callback):
+                    progress_callback(done, total_steps, "Verifying classification")
+                continue
+
+            position = match.group(1).lower()
+            status = next(iter(statuses))
+            expected_folder_by_image[img_name] = STATUS_SYNC_DIRS[position][status]
+            done += 1
+            if callable(progress_callback):
+                progress_callback(done, total_steps, "Verifying classification")
+
+        status_dirs = [
+            self.file_manager.join(base_dir, folder_name)
+            for statuses in STATUS_SYNC_DIRS.values()
+            for folder_name in statuses.values()
+        ]
+        actual_locations = defaultdict(list)
+        for folder_path in status_dirs:
+            if not self.file_manager.exists(folder_path):
+                continue
+            for name in self.file_manager.listdir(folder_path):
+                file_path = self.file_manager.join(folder_path, name)
+                if self.file_manager.is_file(file_path):
+                    actual_locations[name].append(self.file_manager.basename(folder_path))
+
+        duplicates = {
+            img_name: sorted(folder_names)
+            for img_name, folder_names in actual_locations.items()
+            if len(folder_names) > 1
+        }
+
+        missing = []
+        wrong_folder = []
+        for img_name, expected_folder in expected_folder_by_image.items():
+            actual = actual_locations.get(img_name)
+            if not actual:
+                missing.append(f"{img_name} (expected in {expected_folder})")
+            elif actual[0] != expected_folder:
+                wrong_folder.append(
+                    f"{img_name} (expected {expected_folder}, found {actual[0]})"
+                )
+            done += 1
+            if callable(progress_callback):
+                progress_callback(done, total_steps, "Verifying classification")
+
+        issues = {
+            "missing_db_status": missing_db_status,
+            "conflicting_db_status": conflicting_db_status,
+            "invalid_position": invalid_position,
+            "duplicates": list(duplicates.keys()),
+            "missing": missing,
+            "wrong_folder": wrong_folder,
+        }
+        issue_count = sum(len(v) for v in issues.values())
+        verified = issue_count == 0 and len(expected_folder_by_image) == len(historic_images)
+
+        if callable(progress_callback):
+            progress_callback(total_steps, total_steps, "Verifying classification")
+
+        return {
+            "verified": verified,
+            "issue_count": issue_count,
+            "issues": issues,
+            "historic_images": len(historic_images),
+            "mapped_images": len(expected_folder_by_image),
+        }
 
     def get_piece_date(self):
         d = self.display
@@ -1415,9 +1706,7 @@ class MainController:
             d.show_delete_confirm = False
             self.perform_delete_current_piece()
         elif action == "sync_images_by_status":
-            self.sync_images_by_status()
-            d.sync_message = "Dataset correctly saved"
-            d.sync_message_time = time.time()
+            self.start_sync_images_by_status_async()
         elif action == "toggle_result":
             self.toggle_result(payload.get("img_name"), payload.get("result_value"))
         elif action == "dismiss_no_images_dialog":
