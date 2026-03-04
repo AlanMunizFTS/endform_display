@@ -1814,10 +1814,19 @@ class DisplayWindow:
         
         # Loop until it's time to update
         while True:
-            key = cv2.waitKey(100)
+            if hasattr(cv2, "waitKeyEx"):
+                key_ex = cv2.waitKeyEx(100)
+            else:
+                key_ex = cv2.waitKey(100)
+            key = (key_ex & 0xFF) if key_ex != -1 else -1
+
+            left_arrow_keys = {2424832, 81}
+            right_arrow_keys = {2555904, 83}
+            up_arrow_keys = {2490368, 82}
+            down_arrow_keys = {2621440, 84}
             
             # Handle keyboard input when search is active
-            if self.search_active and key != -1:
+            if self.search_active and key_ex != -1:
                 if key == 27:  # ESC key
                     self._emit_action("search_cancel")
                     return True
@@ -1827,14 +1836,28 @@ class DisplayWindow:
                 elif key == 8:  # BACKSPACE key
                     self._emit_action("search_backspace")
                     return True
-                elif key == 0 or key == 2490368:  # UP arrow key
+                elif key_ex in up_arrow_keys:  # UP arrow key
                     self._emit_action("search_move_up")
                     return True
-                elif key == 1 or key == 2621440:  # DOWN arrow key
+                elif key_ex in down_arrow_keys:  # DOWN arrow key
                     self._emit_action("search_move_down")
                     return True
                 elif 48 <= key <= 57:  # Only numeric characters (0-9)
                     self._emit_action("search_append_digit", digit=chr(key))
+                    return True
+
+            # Historic navigation with keyboard arrows (left/right)
+            if (
+                key_ex != -1
+                and self.historic_mode
+                and not self.search_active
+                and not self.sync_in_progress
+            ):
+                if key_ex in left_arrow_keys:
+                    self._emit_action("prev_historic_batch")
+                    return True
+                if key_ex in right_arrow_keys:
+                    self._emit_action("next_historic_batch")
                     return True
             
             # Check if it's time to update
