@@ -82,6 +82,7 @@ Expected logs include:
 ## Quick Commands
 
 - Activate virtualenv: `venv\Scripts\activate`
+- Create Python 3.12 venv: `py -3.12 -m venv venv`
 - Run app: `python main.py`
 - Check remote historic folder: `python utilities/check_hist_display.py`
 - Run status-sync unittest: `.\venv\Scripts\python.exe -m unittest tests/test_sync_images_by_status.py`
@@ -129,7 +130,7 @@ Deletes files from classification folders using image names from DB (`img_result
 
 --TERMINAL--
 - venv\scripts\activate
-- python -m venv venv   
+- py -3.12 -m venv venv
 - pip install -r requirements.txt 
 
 ## database form
