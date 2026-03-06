@@ -41,6 +41,60 @@ def _sleep_with_stop(stop_event, seconds):
         time.sleep(0.2)
 
 
+def _cleanup_zero_byte_images(file_manager, target_dir, image_extensions):
+    removed_count = 0
+    if not file_manager.exists(target_dir):
+        return removed_count
+
+    for name in file_manager.listdir(target_dir):
+        if not name.lower().endswith(image_extensions):
+            continue
+        file_path = file_manager.join(target_dir, name)
+        if not file_manager.is_file(file_path):
+            continue
+        try:
+            if file_manager.getsize(file_path) > 0:
+                continue
+        except Exception:
+            continue
+
+        try:
+            file_manager.remove(file_path)
+            removed_count += 1
+        except Exception:
+            pass
+
+    return removed_count
+
+
+def _sftp_get_with_cleanup_retry(
+    file_manager,
+    sftp_client,
+    remote_path,
+    local_path,
+    max_attempts=2,
+):
+    attempts = max(1, int(max_attempts))
+    last_exc = None
+
+    for _ in range(attempts):
+        try:
+            file_manager.sftp_get(sftp_client, remote_path, local_path)
+            if file_manager.getsize(local_path) <= 0:
+                raise IOError(f"Downloaded file is empty: {remote_path}")
+            return
+        except Exception as exc:
+            last_exc = exc
+            try:
+                if file_manager.exists(local_path):
+                    file_manager.remove(local_path)
+            except Exception:
+                pass
+
+    if last_exc is not None:
+        raise last_exc
+
+
 def _download_images_background_worker(
     hostname,
     port,
@@ -62,6 +116,8 @@ def _download_images_background_worker(
     image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
     ssh_client = None
     sftp_client = None
+    sync_error_count = 0
+    size_mismatch_count = 0
 
     file_manager.makedirs(historic_temp_dir, exist_ok=True)
 
@@ -113,6 +169,20 @@ def _download_images_background_worker(
                     continue
 
             try:
+                removed_zero_files = _cleanup_zero_byte_images(
+                    file_manager=file_manager,
+                    target_dir=historic_temp_dir,
+                    image_extensions=image_extensions,
+                )
+                if removed_zero_files:
+                    logger.warn(
+                        (
+                            "[HIST_SYNC_SSH] Removed "
+                            f"{removed_zero_files} zero-byte local historic images"
+                        ),
+                        allow_repeat=True,
+                    )
+
                 existing_local = (
                     set(file_manager.listdir(historic_temp_dir))
                     if file_manager.exists(historic_temp_dir)
@@ -150,7 +220,13 @@ def _download_images_background_worker(
                     if stop_event is not None and stop_event.is_set():
                         break
                     local_file = file_manager.join(historic_temp_dir, img)
-                    file_manager.sftp_get(sftp_client, img, local_file)
+                    _sftp_get_with_cleanup_retry(
+                        file_manager=file_manager,
+                        sftp_client=sftp_client,
+                        remote_path=img,
+                        local_path=local_file,
+                        max_attempts=2,
+                    )
                     downloaded_count += 1
 
                 if downloaded_count:
@@ -168,8 +244,20 @@ def _download_images_background_worker(
                 )
                 _sleep_with_stop(stop_event, check_interval)
             except Exception as exc:
+                sync_error_count += 1
+                lower_exc = str(exc).lower()
+                if "size mismatch in get" in lower_exc:
+                    size_mismatch_count += 1
                 logger.error(
-                    f"[HIST_SYNC_SSH] Sync error: {exc}",
+                    (
+                        f"[HIST_SYNC_SSH] Sync error: {exc} | "
+                        f"sync_error_count={sync_error_count}"
+                        + (
+                            f" | size_mismatch_count={size_mismatch_count}"
+                            if "size mismatch in get" in lower_exc
+                            else ""
+                        )
+                    ),
                     allow_repeat=True,
                 )
                 close_connections()
@@ -213,8 +301,14 @@ def _download_live_images_local_impl(
                 if not name.lower().endswith(image_extensions):
                     continue
                 path = file_manager.join(local_path, name)
-                if file_manager.is_file(path):
-                    images.append(name)
+                if not file_manager.is_file(path):
+                    continue
+                try:
+                    if file_manager.getsize(path) <= 0:
+                        continue
+                except Exception:
+                    continue
+                images.append(name)
 
             images.sort(reverse=True)
 
@@ -284,6 +378,7 @@ def _download_live_images_remote_impl(
 
     app.file_manager.makedirs(local_path, exist_ok=True)
     downloaded_files = []
+    transfer_error_count = int(rotation_state.get("transfer_error_count", 0) or 0)
 
     try:
         files = app.list_remote_files(remote_path)
@@ -312,9 +407,26 @@ def _download_live_images_remote_impl(
             local_file = app.file_manager.join(local_path, img_name)
             remote_img_path = app.join_remote_path(remote_path, img_name)
             remote_hist_path = app.join_remote_path(remote_hist_dir, img_name)
-            app.download_file(remote_img_path, local_file)
-            app.upload_file(local_file, remote_hist_path)
-            downloaded_files.append(local_file)
+            try:
+                _sftp_get_with_cleanup_retry(
+                    file_manager=app.file_manager,
+                    sftp_client=app.sftp_client,
+                    remote_path=remote_img_path,
+                    local_path=local_file,
+                    max_attempts=2,
+                )
+                app.upload_file(local_file, remote_hist_path)
+                downloaded_files.append(local_file)
+            except Exception as exc:
+                transfer_error_count += 1
+                rotation_state["transfer_error_count"] = transfer_error_count
+                logger.warn(
+                    (
+                        f"[SSH] Skipping live image {img_name} after transfer error: {exc} | "
+                        f"transfer_error_count={transfer_error_count}"
+                    ),
+                    allow_repeat=True,
+                )
 
         return downloaded_files
 
@@ -949,6 +1061,18 @@ class MainController:
             for name in files
             if name.lower().endswith(self.config.image_extensions) and name.startswith("11861")
         ]
+        valid_images = []
+        for name in images_with_jsn:
+            image_path = self.file_manager.join(local_historic_dir, name)
+            if not self.file_manager.is_file(image_path):
+                continue
+            try:
+                if self.file_manager.getsize(image_path) <= 0:
+                    continue
+            except Exception:
+                continue
+            valid_images.append(name)
+        images_with_jsn = valid_images
 
         jsn_groups = defaultdict(list)
         for img in images_with_jsn:

@@ -34,6 +34,7 @@ class TestFileManager(unittest.TestCase):
         self.assertTrue(self.fm.is_file(file_path))
         self.assertIn("sample.txt", self.fm.listdir(nested_dir))
         self.assertIsInstance(self.fm.getmtime(file_path), float)
+        self.assertEqual(self.fm.getsize(file_path), 5)
 
         copied = self.fm.join(nested_dir, "copy.txt")
         self.fm.copy2(file_path, copied)

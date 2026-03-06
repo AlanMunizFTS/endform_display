@@ -9,6 +9,7 @@ from db import get_db_connection
 from file_manager import FileManager
 from main_controller import check_historic_images as controller_check_historic_images
 from paths_config import REMOTE_HIST_DISPLAY_DIR
+from utilities.log import get_logger
 
 class DisplayWindow:
     CAMERA_ICON_PATH = "./resources/camara.png"
@@ -48,6 +49,7 @@ class DisplayWindow:
         self.remote_controls_enabled = False
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
+        self.logger = get_logger()
         self.controller = controller
         self.action_handler = action_handler
         self.filename_mapping = filename_mapping or {}  # Mapping of short names to original names
@@ -127,7 +129,10 @@ class DisplayWindow:
         self._background_cache_mtime = None
         self._background_cache_size = (self.width, self.height)
         self._image_cache = OrderedDict()
+        self._failed_image_cache = {}
         self._image_cache_max_items = 64
+        self._zero_byte_image_count = 0
+        self._decode_error_count = 0
         self._db_result_cache = {}
         self._db_registered_images = set()
         self._historic_index_cache = None
@@ -2140,6 +2145,12 @@ class DisplayWindow:
             current_mtime = self.file_manager.getmtime(img_path)
         except Exception:
             self._image_cache.pop(img_path, None)
+            self._failed_image_cache.pop(img_path, None)
+            return None
+
+        failed_mtime = self._failed_image_cache.get(img_path)
+        if failed_mtime == current_mtime:
+            self._image_cache.pop(img_path, None)
             return None
 
         cached = self._image_cache.get(img_path)
@@ -2147,11 +2158,39 @@ class DisplayWindow:
             self._image_cache.move_to_end(img_path)
             return cached[1]
 
+        try:
+            if self.file_manager.getsize(img_path) <= 0:
+                self._image_cache.pop(img_path, None)
+                self._failed_image_cache[img_path] = current_mtime
+                self._zero_byte_image_count += 1
+                self.logger.warn(
+                    (
+                        f"[IMAGE] Zero-byte image skipped: {img_path} | "
+                        f"zero_byte_count={self._zero_byte_image_count}"
+                    ),
+                    allow_repeat=True,
+                )
+                return None
+        except Exception:
+            self._image_cache.pop(img_path, None)
+            self._failed_image_cache[img_path] = current_mtime
+            return None
+
         img = self.file_manager.read_image(img_path)
         if img is None:
             self._image_cache.pop(img_path, None)
+            self._failed_image_cache[img_path] = current_mtime
+            self._decode_error_count += 1
+            self.logger.warn(
+                (
+                    f"[IMAGE] Decode failed: {img_path} | "
+                    f"decode_error_count={self._decode_error_count}"
+                ),
+                allow_repeat=True,
+            )
             return None
 
+        self._failed_image_cache.pop(img_path, None)
         self._image_cache[img_path] = (current_mtime, img)
         self._image_cache.move_to_end(img_path)
         while len(self._image_cache) > self._image_cache_max_items:
