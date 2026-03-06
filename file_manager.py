@@ -1,5 +1,7 @@
 import os
 import shutil
+import sys
+import threading
 from typing import Iterable, List, Optional
 
 import cv2
@@ -7,6 +9,7 @@ import cv2
 
 class FileManager:
     """Thin adapter for filesystem and SFTP file operations."""
+    _imread_stderr_lock = threading.Lock()
 
     def join(self, *parts: str) -> str:
         return os.path.join(*parts)
@@ -45,7 +48,37 @@ class FileManager:
         return os.path.getsize(path)
 
     def read_image(self, path: str, flags: int = cv2.IMREAD_COLOR):
-        return cv2.imread(path, flags)
+        # OpenCV/codec backends may print decode errors (e.g., libpng) directly to
+        # stderr. Suppress stderr for this call and handle decode failures via `None`.
+        stderr_fd = None
+        saved_stderr_fd = None
+        null_fd = None
+        with self._imread_stderr_lock:
+            try:
+                stderr_fd = sys.stderr.fileno()
+            except Exception:
+                return cv2.imread(path, flags)
+
+            try:
+                saved_stderr_fd = os.dup(stderr_fd)
+                null_fd = os.open(os.devnull, os.O_WRONLY)
+                os.dup2(null_fd, stderr_fd)
+                return cv2.imread(path, flags)
+            finally:
+                if saved_stderr_fd is not None:
+                    try:
+                        os.dup2(saved_stderr_fd, stderr_fd)
+                    except Exception:
+                        pass
+                    try:
+                        os.close(saved_stderr_fd)
+                    except Exception:
+                        pass
+                if null_fd is not None:
+                    try:
+                        os.close(null_fd)
+                    except Exception:
+                        pass
 
     def write_image(self, path: str, image) -> bool:
         return bool(cv2.imwrite(path, image))

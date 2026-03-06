@@ -2162,6 +2162,11 @@ class DisplayWindow:
             if self.file_manager.getsize(img_path) <= 0:
                 self._image_cache.pop(img_path, None)
                 self._failed_image_cache[img_path] = current_mtime
+                try:
+                    if self.file_manager.exists(img_path):
+                        self.file_manager.remove(img_path)
+                except Exception:
+                    pass
                 self._zero_byte_image_count += 1
                 self.logger.warn(
                     (
@@ -2180,6 +2185,11 @@ class DisplayWindow:
         if img is None:
             self._image_cache.pop(img_path, None)
             self._failed_image_cache[img_path] = current_mtime
+            try:
+                if self.file_manager.exists(img_path):
+                    self.file_manager.remove(img_path)
+            except Exception:
+                pass
             self._decode_error_count += 1
             self.logger.warn(
                 (

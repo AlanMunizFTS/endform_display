@@ -123,6 +123,7 @@ class TestImageIntegrityGuards(unittest.TestCase):
         file_manager.getmtime.side_effect = [100.0, 100.0, 101.0]
         file_manager.getsize.return_value = 128
         file_manager.read_image.return_value = None
+        file_manager.exists.return_value = True
 
         window = DisplayWindow(file_manager=file_manager, sftp_client=None)
 
@@ -131,6 +132,7 @@ class TestImageIntegrityGuards(unittest.TestCase):
         self.assertIsNone(window._get_cached_image("img.png"))
         self.assertEqual(file_manager.read_image.call_count, 2)
         self.assertEqual(logger_mock.warn.call_count, 2)
+        self.assertEqual(file_manager.remove.call_count, 2)
         self.assertIn("decode_error_count=1", logger_mock.warn.call_args_list[0].args[0])
         self.assertIn("decode_error_count=2", logger_mock.warn.call_args_list[1].args[0])
 
@@ -143,6 +145,7 @@ class TestImageIntegrityGuards(unittest.TestCase):
         file_manager.getmtime.return_value = 200.0
         file_manager.getsize.return_value = 0
         file_manager.read_image.return_value = None
+        file_manager.exists.return_value = True
 
         window = DisplayWindow(file_manager=file_manager, sftp_client=None)
 
@@ -150,6 +153,7 @@ class TestImageIntegrityGuards(unittest.TestCase):
         self.assertIsNone(window._get_cached_image("zero.png"))
         file_manager.read_image.assert_not_called()
         logger_mock.warn.assert_called_once()
+        file_manager.remove.assert_called_once_with("zero.png")
         self.assertIn("zero_byte_count=1", logger_mock.warn.call_args.args[0])
 
     def test_live_remote_transfer_error_logs_counter(self):
