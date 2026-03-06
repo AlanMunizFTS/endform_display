@@ -118,6 +118,9 @@ def _download_images_background_worker(
     sftp_client = None
     sync_error_count = 0
     size_mismatch_count = 0
+    total_downloaded_since_start = 0
+    counter_interval_sec = 15 * 60
+    next_counter_ts = time.monotonic() + counter_interval_sec
 
     file_manager.makedirs(historic_temp_dir, exist_ok=True)
 
@@ -136,7 +139,10 @@ def _download_images_background_worker(
         sftp_client = None
         ssh_client = None
 
-    logger.info("[HIST_SYNC_SSH] Historic worker started", allow_repeat=True)
+    logger.info(
+        "[HIST_SYNC_SSH] Historic download started (counter logged every 15 minutes)",
+        allow_repeat=True,
+    )
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -230,10 +236,18 @@ def _download_images_background_worker(
                     downloaded_count += 1
 
                 if downloaded_count:
+                    total_downloaded_since_start += downloaded_count
+
+                now = time.monotonic()
+                while now >= next_counter_ts:
                     logger.info(
-                        f"[HIST_SYNC_SSH] Downloaded {downloaded_count} new historic images",
+                        (
+                            "[HIST_SYNC_SSH] 15-minute counter: "
+                            f"total_downloaded_since_start={total_downloaded_since_start}"
+                        ),
                         allow_repeat=True,
                     )
+                    next_counter_ts += counter_interval_sec
 
                 _sleep_with_stop(stop_event, check_interval)
 
