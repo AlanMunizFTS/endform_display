@@ -26,6 +26,8 @@ class Logger:
 
     def _is_excluded(self, message):
         lower_msg = message.lower()
+        if "[hist_sync_ssh] downloaded " in lower_msg and "new historic images" in lower_msg:
+            return True
         if "background" in lower_msg:
             return True
         if "?" in message:
