@@ -2021,8 +2021,8 @@ class DisplayWindow:
                     return True
                 continue
 
-            left_arrow_keys = {2424832, 81}
-            right_arrow_keys = {2555904, 83}
+            left_arrow_keys = {2424832, 81, ord('a'), ord('A')}
+            right_arrow_keys = {2555904, 83, ord('d'), ord('D')}
             up_arrow_keys = {2490368, 82}
             down_arrow_keys = {2621440, 84}
             
