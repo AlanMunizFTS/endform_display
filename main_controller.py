@@ -7,8 +7,10 @@ from threading import Thread
 
 from file_manager import FileManager
 from paths_config import (
+    ANNOTATED_SUBDIR_NAME,
     HISTORIC_LOCAL_DIR,
     HISTORIC_SUBDIR_NAME,
+    REMOTE_ANNOTATED_DIR,
     REMOTE_HIST_DISPLAY_DIR,
     REMOTE_TEST_DISPLAY_DIR,
     STATUS_SYNC_DIRS,
@@ -47,10 +49,11 @@ def _download_images_background_worker(
     username,
     password,
     remote_dir,
-    historic_temp_dir,
+    local_temp_dir,
     check_interval=30,
     reconnect_interval=10,
     stop_event=None,
+    worker_label="HIST_SYNC_SSH",
     verbose=False,
 ):
     import paramiko
@@ -63,7 +66,7 @@ def _download_images_background_worker(
     ssh_client = None
     sftp_client = None
 
-    file_manager.makedirs(historic_temp_dir, exist_ok=True)
+    file_manager.makedirs(local_temp_dir, exist_ok=True)
 
     def close_connections():
         nonlocal sftp_client, ssh_client
@@ -80,7 +83,7 @@ def _download_images_background_worker(
         sftp_client = None
         ssh_client = None
 
-    logger.info("[HIST_SYNC_SSH] Historic worker started", allow_repeat=True)
+    logger.info(f"[{worker_label}] Worker started", allow_repeat=True)
     try:
         while True:
             if stop_event is not None and stop_event.is_set():
@@ -89,7 +92,7 @@ def _download_images_background_worker(
             if sftp_client is None:
                 try:
                     logger.info(
-                        f"[HIST_SYNC_SSH] Connecting to {hostname}:{port} as {username}",
+                        f"[{worker_label}] Connecting to {hostname}:{port} as {username}",
                         allow_repeat=True,
                     )
                     ssh_client = paramiko.SSHClient()
@@ -102,10 +105,10 @@ def _download_images_background_worker(
                         timeout=10,
                     )
                     sftp_client = ssh_client.open_sftp()
-                    logger.info("[HIST_SYNC_SSH] Connection successful", allow_repeat=True)
+                    logger.info(f"[{worker_label}] Connection successful", allow_repeat=True)
                 except Exception as exc:
                     logger.error(
-                        f"[HIST_SYNC_SSH] Connection failed: {exc}",
+                        f"[{worker_label}] Connection failed: {exc}",
                         allow_repeat=True,
                     )
                     close_connections()
@@ -114,8 +117,8 @@ def _download_images_background_worker(
 
             try:
                 existing_local = (
-                    set(file_manager.listdir(historic_temp_dir))
-                    if file_manager.exists(historic_temp_dir)
+                    set(file_manager.listdir(local_temp_dir))
+                    if file_manager.exists(local_temp_dir)
                     else set()
                 )
 
@@ -149,13 +152,13 @@ def _download_images_background_worker(
                 for img in images_to_download:
                     if stop_event is not None and stop_event.is_set():
                         break
-                    local_file = file_manager.join(historic_temp_dir, img)
+                    local_file = file_manager.join(local_temp_dir, img)
                     file_manager.sftp_get(sftp_client, img, local_file)
                     downloaded_count += 1
 
                 if downloaded_count:
                     logger.info(
-                        f"[HIST_SYNC_SSH] Downloaded {downloaded_count} new historic images",
+                        f"[{worker_label}] Downloaded {downloaded_count} new images",
                         allow_repeat=True,
                     )
 
@@ -163,20 +166,20 @@ def _download_images_background_worker(
 
             except FileNotFoundError:
                 logger.warn(
-                    f"[HIST_SYNC_SSH] Remote historic folder not found: {remote_dir}",
+                    f"[{worker_label}] Remote folder not found: {remote_dir}",
                     allow_repeat=True,
                 )
                 _sleep_with_stop(stop_event, check_interval)
             except Exception as exc:
                 logger.error(
-                    f"[HIST_SYNC_SSH] Sync error: {exc}",
+                    f"[{worker_label}] Sync error: {exc}",
                     allow_repeat=True,
                 )
                 close_connections()
                 _sleep_with_stop(stop_event, reconnect_interval)
     finally:
         close_connections()
-        logger.info("[HIST_SYNC_SSH] Historic worker stopped", allow_repeat=True)
+        logger.info(f"[{worker_label}] Worker stopped", allow_repeat=True)
 
 
 def _download_live_images_local_impl(
@@ -433,6 +436,7 @@ class ControllerConfig:
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
+    remote_annotated_dir: str = REMOTE_ANNOTATED_DIR
     display_cols: int = 4
     display_rows: int = 2
     historic_download_check_interval: int = 10
@@ -1349,11 +1353,13 @@ class MainController:
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         d = self.display
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+        annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
+        self.file_manager.makedirs(annotated_temp_dir, exist_ok=True)
 
         creds = self.sftp_credentials or d.sftp_credentials
         if not creds:
-            print("SFTP historic downloader disabled: missing credentials")
+            print("SFTP background downloader disabled: missing credentials")
             return
 
         hostname = creds.get("hostname")
@@ -1361,59 +1367,91 @@ class MainController:
         username = creds.get("username")
         password = creds.get("password")
         if not all([hostname, port, username, password]):
-            print("SFTP historic downloader disabled: incomplete credentials")
+            print("SFTP background downloader disabled: incomplete credentials")
             return
 
-        if d.download_process and d.download_process.is_alive():
-            print("Background download process is already running")
-            return
+        def _is_alive(process):
+            try:
+                return process is not None and process.is_alive()
+            except Exception:
+                return False
 
-        try:
-            d.download_stop_event = Event()
-            d.download_process = Process(
-                target=_download_images_background_worker,
-                args=(
-                    hostname,
-                    port,
-                    username,
-                    password,
-                    self.config.remote_hist_dir,
-                    historic_temp_dir,
-                    check_interval,
-                    10,
-                    d.download_stop_event,
-                ),
-            )
-            d.download_process.daemon = True
-            d.download_process.start()
-        except Exception as exc:
-            print(f"Error starting background download: {exc}")
-            d.download_process = None
-            d.download_stop_event = None
+        def _start_worker(remote_dir, local_dir, process_attr, stop_attr, worker_label):
+            process = getattr(d, process_attr, None)
+            if _is_alive(process):
+                print(f"Background download already running for {worker_label}")
+                return
+
+            try:
+                stop_event = Event()
+                process = Process(
+                    target=_download_images_background_worker,
+                    args=(
+                        hostname,
+                        port,
+                        username,
+                        password,
+                        remote_dir,
+                        local_dir,
+                        check_interval,
+                        10,
+                        stop_event,
+                        worker_label,
+                    ),
+                )
+                process.daemon = True
+                process.start()
+                setattr(d, stop_attr, stop_event)
+                setattr(d, process_attr, process)
+            except Exception as exc:
+                print(f"Error starting background download for {worker_label}: {exc}")
+                setattr(d, process_attr, None)
+                setattr(d, stop_attr, None)
+
+        _start_worker(
+            remote_dir=self.config.remote_hist_dir,
+            local_dir=historic_temp_dir,
+            process_attr="download_process",
+            stop_attr="download_stop_event",
+            worker_label="HIST_SYNC_SSH",
+        )
+        _start_worker(
+            remote_dir=self.config.remote_annotated_dir,
+            local_dir=annotated_temp_dir,
+            process_attr="annotated_download_process",
+            stop_attr="annotated_download_stop_event",
+            worker_label="ANNOTATED_SYNC_SSH",
+        )
 
     def stop_historic_download_worker(self):
         d = self.display
-        if d.download_stop_event is not None:
-            try:
-                d.download_stop_event.set()
-            except Exception:
-                pass
+        def _stop_worker(process_attr, stop_attr):
+            stop_event = getattr(d, stop_attr, None)
+            if stop_event is not None:
+                try:
+                    stop_event.set()
+                except Exception:
+                    pass
 
-        if d.download_process is not None:
-            try:
-                d.download_process.join(timeout=2)
-            except Exception:
-                pass
+            process = getattr(d, process_attr, None)
+            if process is not None:
+                try:
+                    process.join(timeout=2)
+                except Exception:
+                    pass
 
-            try:
-                if d.download_process.is_alive():
-                    d.download_process.terminate()
-                    d.download_process.join(timeout=1)
-            except Exception:
-                pass
+                try:
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=1)
+                except Exception:
+                    pass
 
-        d.download_process = None
-        d.download_stop_event = None
+            setattr(d, process_attr, None)
+            setattr(d, stop_attr, None)
+
+        _stop_worker("download_process", "download_stop_event")
+        _stop_worker("annotated_download_process", "annotated_download_stop_event")
 
     def download_historic_batch(self, local_path, max_images=7):
         d = self.display

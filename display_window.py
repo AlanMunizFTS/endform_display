@@ -69,6 +69,8 @@ class DisplayWindow:
             self.db_block_detail = str(exc)
         self.download_process = None  # Process for background download
         self.download_stop_event = None
+        self.annotated_download_process = None  # Process for annotated background download
+        self.annotated_download_stop_event = None
         self.historic_db_registered = False  # Tracks whether visible historic images were registered in DB.
         self.search_button_rect = None  # Search button rect
         self.search_input_rect = None  # Search input field rect
@@ -2074,27 +2076,33 @@ class DisplayWindow:
         
     def close(self):
         """Close the display window"""
-        if self.download_stop_event is not None:
-            try:
-                self.download_stop_event.set()
-            except Exception:
-                pass
+        def _stop_worker(process_attr, stop_attr):
+            stop_event = getattr(self, stop_attr, None)
+            if stop_event is not None:
+                try:
+                    stop_event.set()
+                except Exception:
+                    pass
 
-        if self.download_process is not None:
-            try:
-                self.download_process.join(timeout=2)
-            except Exception:
-                pass
+            process = getattr(self, process_attr, None)
+            if process is not None:
+                try:
+                    process.join(timeout=2)
+                except Exception:
+                    pass
 
-            try:
-                if self.download_process.is_alive():
-                    self.download_process.terminate()
-                    self.download_process.join(timeout=1)
-            except Exception:
-                pass
+                try:
+                    if process.is_alive():
+                        process.terminate()
+                        process.join(timeout=1)
+                except Exception:
+                    pass
 
-        self.download_process = None
-        self.download_stop_event = None
+            setattr(self, process_attr, None)
+            setattr(self, stop_attr, None)
+
+        _stop_worker("download_process", "download_stop_event")
+        _stop_worker("annotated_download_process", "annotated_download_stop_event")
 
         try:
             cv2.destroyWindow(self.window_name)
