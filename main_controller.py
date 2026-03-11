@@ -2030,16 +2030,9 @@ class MainController:
                     images = []
 
                     if self._pending_remote_images:
-                        # Wait until all pending files are on disk before rendering
+                        # Don't download again — wait until all 7 are confirmed on disk
                         if all(self.file_manager.exists(p) for p in self._pending_remote_images):
                             images = self._pending_remote_images
-                            new_images_set = set(images)
-                            for prev_path in self.display.image_paths:
-                                if prev_path not in new_images_set:
-                                    try:
-                                        self.file_manager.remove(prev_path)
-                                    except Exception:
-                                        pass
                             self._pending_remote_images = None
                         else:
                             images = self.display.image_paths or []
@@ -2049,6 +2042,14 @@ class MainController:
                             self.stop_remote_process("sftp-disconnect")
                             self.handle_disconnect("live-download-failure")
                         elif remote_images:
+                            # Delete old files immediately so tmp_display never exceeds 7
+                            new_images_set = set(remote_images)
+                            for prev_path in self.display.image_paths:
+                                if prev_path not in new_images_set:
+                                    try:
+                                        self.file_manager.remove(prev_path)
+                                    except Exception:
+                                        pass
                             self._pending_remote_images = remote_images
                             images = self.display.image_paths or []
                         else:
