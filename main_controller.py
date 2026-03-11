@@ -2038,6 +2038,14 @@ class MainController:
                     if not images:
                         images = self._download_live_images_local()
 
+                new_images_set = set(images)
+                for prev_path in self.display.image_paths:
+                    if prev_path not in new_images_set:
+                        try:
+                            self.file_manager.remove(prev_path)
+                        except Exception:
+                            pass
+
                 self.display.image_paths = images
                 self.display.show_image_grid(
                     images,
