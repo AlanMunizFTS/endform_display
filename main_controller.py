@@ -293,6 +293,9 @@ def _download_live_images_remote_impl(
         images = [f for f in files if f.lower().endswith(image_extensions)]
         images.sort(reverse=True)
 
+        if len(images) < max_images:
+            return []
+
         total_batches = (len(images) + max_images - 1) // max_images
         current_offset = rotation_state.get("current_offset", 0)
         if total_batches > 0:
