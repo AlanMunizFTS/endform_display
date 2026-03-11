@@ -482,6 +482,7 @@ class MainController:
             "current_batch_catalog_version": -1,
         }
         self.live_rotation_state_remote = {"current_offset": 0}
+        self._pending_remote_images = None
         self.historic_bootstrap_loading = False
         self.historic_bootstrap_complete = False
         self.historic_bootstrap_thread = None
@@ -2027,27 +2028,35 @@ class MainController:
                     )
                 else:
                     images = []
-                    remote_images = []
-                    if self.sftp_connected and self.sftp_app:
+
+                    if self._pending_remote_images:
+                        # Wait until all pending files are on disk before rendering
+                        if all(self.file_manager.exists(p) for p in self._pending_remote_images):
+                            images = self._pending_remote_images
+                            new_images_set = set(images)
+                            for prev_path in self.display.image_paths:
+                                if prev_path not in new_images_set:
+                                    try:
+                                        self.file_manager.remove(prev_path)
+                                    except Exception:
+                                        pass
+                            self._pending_remote_images = None
+                        else:
+                            images = self.display.image_paths or []
+                    elif self.sftp_connected and self.sftp_app:
                         remote_images = self._download_live_images_remote()
                         if not self.sftp_app.sftp_client:
                             self.stop_remote_process("sftp-disconnect")
                             self.handle_disconnect("live-download-failure")
-                        elif not remote_images:
+                        elif remote_images:
+                            self._pending_remote_images = remote_images
+                            images = self.display.image_paths or []
+                        else:
                             self.logger.info(
                                 "[LOCAL] Falling back to local live images",
                                 allow_repeat=True,
                             )
-
-                    if remote_images:
-                        images = remote_images
-                        new_images_set = set(images)
-                        for prev_path in self.display.image_paths:
-                            if prev_path not in new_images_set:
-                                try:
-                                    self.file_manager.remove(prev_path)
-                                except Exception:
-                                    pass
+                            images = self._download_live_images_local()
                     else:
                         images = self._download_live_images_local()
 
