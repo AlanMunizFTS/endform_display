@@ -2027,27 +2027,29 @@ class MainController:
                     )
                 else:
                     images = []
+                    remote_images = []
                     if self.sftp_connected and self.sftp_app:
-                        images = self._download_live_images_remote()
+                        remote_images = self._download_live_images_remote()
                         if not self.sftp_app.sftp_client:
                             self.stop_remote_process("sftp-disconnect")
                             self.handle_disconnect("live-download-failure")
-                        elif not images:
+                        elif not remote_images:
                             self.logger.info(
                                 "[LOCAL] Falling back to local live images",
                                 allow_repeat=True,
                             )
 
-                    if not images:
+                    if remote_images:
+                        images = remote_images
+                        new_images_set = set(images)
+                        for prev_path in self.display.image_paths:
+                            if prev_path not in new_images_set:
+                                try:
+                                    self.file_manager.remove(prev_path)
+                                except Exception:
+                                    pass
+                    else:
                         images = self._download_live_images_local()
-
-                new_images_set = set(images)
-                for prev_path in self.display.image_paths:
-                    if prev_path not in new_images_set:
-                        try:
-                            self.file_manager.remove(prev_path)
-                        except Exception:
-                            pass
 
                 self.display.image_paths = images
                 self.display.show_image_grid(
