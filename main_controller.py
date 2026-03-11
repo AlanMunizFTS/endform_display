@@ -318,9 +318,16 @@ def _download_live_images_remote_impl(
             local_file = app.file_manager.join(local_path, img_name)
             remote_img_path = app.join_remote_path(remote_path, img_name)
             remote_hist_path = app.join_remote_path(remote_hist_dir, img_name)
-            app.download_file(remote_img_path, local_file)
-            app.upload_file(local_file, remote_hist_path)
-            downloaded_files.append(local_file)
+            try:
+                app.download_file(remote_img_path, local_file)
+                app.upload_file(local_file, remote_hist_path)
+                downloaded_files.append(local_file)
+            except FileNotFoundError:
+                logger.warn(
+                    f"[SSH] File disappeared before download: {img_name}, skipping batch",
+                    allow_repeat=True,
+                )
+                return []
 
         return downloaded_files
 
