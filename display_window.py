@@ -2184,8 +2184,8 @@ class DisplayWindow:
         # Clear result buttons list at start
         self.result_buttons = []
 
-        # Pre-blank every tile slot so no residual from previous batch can show
-        for slot in range(cols * rows):
+        # Pre-blank the 7 active tile slots (skip last slot = bottom-right)
+        for slot in range(cols * rows - 1):
             r = slot // cols
             c = slot % cols
             sx = start_x + c * (img_size + padding)
