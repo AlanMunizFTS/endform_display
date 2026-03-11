@@ -1,6 +1,7 @@
 
 import cv2
 import numpy as np
+import os
 import re
 import time
 from collections import OrderedDict
@@ -2266,6 +2267,38 @@ class DisplayWindow:
                     button_height = bg_y2 - y_draw
                     button_rect = (x_draw, y_draw, size_draw, button_height)
                     self.result_buttons.append((button_rect, img_filename, result_text))
+
+            else:
+                # Vista normal: extraer estado OK/NOK desde el nombre del archivo
+                img_filename = self.file_manager.basename(img_path)
+                base_name = os.path.splitext(img_filename)[0]
+                if base_name.endswith('_OK'):
+                    result_text = 'OK'
+                elif base_name.endswith('_NOK'):
+                    result_text = 'NOK'
+                else:
+                    result_text = None
+
+                if result_text is not None:
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 0.8
+                    thickness = 2
+                    label_text = result_text
+
+                    text_size = cv2.getTextSize(label_text, font, font_scale, thickness)[0]
+                    text_x = x_draw + (size_draw - text_size[0]) // 2
+                    text_y = y_draw + size_draw + 30
+
+                    bg_x1 = x_draw
+                    bg_y1 = text_y - text_size[1] - 8
+                    bg_x2 = x_draw + size_draw
+                    bg_y2 = text_y + 8
+
+                    if bg_y2 < self.height and bg_x2 < self.width:
+                        bg_color = (49, 49, 255) if result_text == 'NOK' else (103, 122, 20)
+                        cv2.rectangle(canvas, (bg_x1, bg_y1), (bg_x2, bg_y2), bg_color, -1)
+                        cv2.putText(canvas, label_text, (text_x, text_y), font,
+                                    font_scale, (255, 255, 255), thickness)
 
         # Normal mode: only HISTORIC button
         if not self.historic_mode:
