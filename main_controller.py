@@ -296,6 +296,21 @@ def _download_live_images_remote_impl(
         if len(images) < max_images:
             return []
 
+        # Group by JSN (prefix before first '_') and keep only the most recent JSN
+        def _jsn(name):
+            return name.split("_")[0] if "_" in name else name
+
+        jsn_groups = {}
+        for img in images:
+            j = _jsn(img)
+            jsn_groups.setdefault(j, []).append(img)
+
+        latest_jsn = max(jsn_groups, key=lambda j: jsn_groups[j][0])
+        images = jsn_groups[latest_jsn]
+
+        if len(images) < max_images:
+            return []
+
         total_batches = (len(images) + max_images - 1) // max_images
         current_offset = rotation_state.get("current_offset", 0)
         if total_batches > 0:
@@ -323,10 +338,6 @@ def _download_live_images_remote_impl(
                 app.upload_file(local_file, remote_hist_path)
                 downloaded_files.append(local_file)
             except FileNotFoundError:
-                logger.warn(
-                    f"[SSH] File disappeared before download: {img_name}, skipping batch",
-                    allow_repeat=True,
-                )
                 return []
 
         return downloaded_files
@@ -508,7 +519,19 @@ class MainController:
             if hasattr(self.display, "set_db_connection"):
                 self.display.set_db_connection(self.display.db)
 
+    def _clear_tmp_display(self):
+        tmp_dir = self.config.temp_dir
+        if not self.file_manager.exists(tmp_dir):
+            return
+        for fname in self.file_manager.listdir(tmp_dir):
+            if fname.lower().endswith(self.config.image_extensions):
+                try:
+                    self.file_manager.remove(self.file_manager.join(tmp_dir, fname))
+                except Exception:
+                    pass
+
     def initialize(self):
+        self._clear_tmp_display()
         if not self.db_connected:
             self.try_connect_db("startup")
         if self.db_connected:
@@ -2060,10 +2083,6 @@ class MainController:
                             self._pending_remote_images = remote_images
                             images = self.display.image_paths or []
                         else:
-                            self.logger.info(
-                                "[LOCAL] Falling back to local live images",
-                                allow_repeat=True,
-                            )
                             images = self._download_live_images_local()
                     else:
                         images = self._download_live_images_local()
