@@ -4,6 +4,10 @@ Watches test_images/ for new images, classifies them with YOLO models,
 and injects results into tmp_display/ (normal view), tmp_display/historic/
 (historic view), and tmp_display/annotated/ (annotated, NOK only).
 
+Images are processed JSN by JSN. After each piece, the script waits
+PIECE_DISPLAY_DURATION seconds before clearing tmp_display/ and showing
+the next piece.
+
 Run from the project root:
     python utilities/classifier.py
 """
@@ -11,6 +15,7 @@ Run from the project root:
 import os
 import shutil
 import time
+from collections import defaultdict
 
 import cv2
 from ultralytics import YOLO
@@ -25,33 +30,38 @@ ANNOTATED_DIR   = "./tmp_display/annotated"
 MODELS_FOLDER   = "./models"
 
 # ---------------------------------------------------------------------------
-# Config
+# Config — adjust these as needed
 # ---------------------------------------------------------------------------
-CONFIDENCE_THR   = 0.33
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
-POLL_INTERVAL    = 1.0   # seconds between directory scans
-POSITIONS        = ["side", "front", "diag"]
+CONFIDENCE_THR        = 0.33
+PIECE_DISPLAY_DURATION = 4.0   # seconds each JSN group stays visible in normal view
+POLL_INTERVAL         = 4.0   # seconds between scans when no new images are found
+IMAGE_EXTENSIONS      = {".jpg", ".jpeg", ".png", ".bmp"}
+POSITIONS             = ["side", "front", "diag"]
 
 
 # ---------------------------------------------------------------------------
 # Load models: map position → YOLO model
 # ---------------------------------------------------------------------------
 def load_models(models_folder):
-    models = {}
+    """Returns Dict[position, List[YOLO]] — all models per position."""
+    models = defaultdict(list)
     if not os.path.isdir(models_folder):
         print(f"[WARN] Models folder not found: {models_folder}")
         return models
 
-    for fname in os.listdir(models_folder):
+    for fname in sorted(os.listdir(models_folder)):
         if not fname.endswith(".pt"):
             continue
         lower = fname.lower()
         for pos in POSITIONS:
             if pos in lower:
                 path = os.path.join(models_folder, fname)
-                models[pos] = YOLO(path)
+                models[pos].append(YOLO(path))
                 print(f"[MODEL] Loaded '{fname}' → position '{pos}'")
                 break
+
+    for pos, lst in models.items():
+        print(f"[MODEL] {pos}: {len(lst)} model(s)")
 
     return models
 
@@ -67,12 +77,38 @@ def get_position(filename):
     return None
 
 
-def already_processed(basename, ext):
-    """True if either _OK or _NOK output already exists in tmp_display/."""
-    for status in ("OK", "NOK"):
-        if os.path.exists(os.path.join(TMP_DISPLAY_DIR, f"{basename}_{status}{ext}")):
-            return True
-    return False
+def get_jsn(filename):
+    """Extract JSN prefix (everything before the first '_')."""
+    return filename.split("_")[0] if "_" in filename else os.path.splitext(filename)[0]
+
+
+def build_processed_set():
+    """Scan historic/ once at startup; return set of original basenames already processed."""
+    processed = set()
+    if not os.path.isdir(HISTORIC_DIR):
+        return processed
+    for fname in os.listdir(HISTORIC_DIR):
+        base = os.path.splitext(fname)[0]
+        if base.endswith("_OK"):
+            processed.add(base[:-3])
+        elif base.endswith("_NOK"):
+            processed.add(base[:-4])
+    return processed
+
+
+def already_processed(basename, processed_set):
+    """True if basename is in the in-memory processed set."""
+    return basename in processed_set
+
+
+def clear_tmp_display():
+    """Remove image files from tmp_display/ root (not subdirectories)."""
+    for fname in os.listdir(TMP_DISPLAY_DIR):
+        if os.path.splitext(fname)[1].lower() in IMAGE_EXTENSIONS:
+            try:
+                os.remove(os.path.join(TMP_DISPLAY_DIR, fname))
+            except Exception as e:
+                print(f"  [WARN] Could not remove {fname}: {e}")
 
 
 def has_high_confidence_detection(result, confidence_threshold):
@@ -131,56 +167,83 @@ def main():
         print("[ERROR] No models loaded. Make sure ./models/ contains .pt files with 'side'/'front'/'diag' in their name.")
         return
 
+    processed_set = build_processed_set()
     print(f"[INFO] Watching '{TEST_IMAGES_DIR}' — polling every {POLL_INTERVAL}s")
     print(f"[INFO] Confidence threshold: {CONFIDENCE_THR}")
+    print(f"[INFO] Piece display duration: {PIECE_DISPLAY_DURATION}s")
+    print(f"[INFO] Already processed (from historic/): {len(processed_set)} image(s)")
 
     while True:
         try:
+            # --- Scan and group unprocessed images by JSN ---
+            jsn_groups = defaultdict(list)
             for filename in os.listdir(TEST_IMAGES_DIR):
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in IMAGE_EXTENSIONS:
                     continue
-
                 basename = os.path.splitext(filename)[0]
-
-                if already_processed(basename, ext):
+                if already_processed(basename, processed_set):
                     continue
+                jsn_groups[get_jsn(filename)].append(filename)
 
-                position = get_position(filename)
-                model = models.get(position)
-                if model is None:
-                    print(f"[SKIP] No model for position of '{filename}'")
-                    continue
+            if not jsn_groups:
+                time.sleep(POLL_INTERVAL)
+                continue
 
-                image_path = os.path.join(TEST_IMAGES_DIR, filename)
+            # --- Process one JSN group at a time ---
+            for jsn in sorted(jsn_groups.keys()):
+                files = sorted(jsn_groups[jsn])
+                print(f"\n[JSN] {jsn}  ({len(files)} images)")
 
-                print(f"[CLASSIFY] {filename} (position={position})")
-                classification_result, has_detection = get_result(
-                    image_path, [model], CONFIDENCE_THR
-                )
+                clear_tmp_display()
 
-                status = "NOK" if has_detection else "OK"
-                out_name = f"{basename}_{status}{ext}"
-                print(f"  → {status}  ({out_name})")
+                for filename in files:
+                    ext = os.path.splitext(filename)[1].lower()
+                    basename = os.path.splitext(filename)[0]
 
-                # Original → tmp_display/ (normal view)
-                shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
+                    position = get_position(filename)
+                    models_list = models.get(position, [])
+                    image_path = os.path.join(TEST_IMAGES_DIR, filename)
 
-                # Original → tmp_display/historic/ (historic view)
-                shutil.copy2(image_path, os.path.join(HISTORIC_DIR, out_name))
+                    if not models_list:
+                        # No model available: show image as OK without classification
+                        out_name = f"{basename}_OK{ext}"
+                        print(f"  {filename} → OK (no model for '{position}')")
+                        shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
+                        shutil.copy2(image_path, os.path.join(HISTORIC_DIR, out_name))
+                        processed_set.add(basename)
+                        continue
 
-                # Annotated → tmp_display/annotated/ (only if NOK)
-                if classification_result is not None and has_detection:
-                    try:
-                        annotated_image = classification_result.plot()
-                        cv2.imwrite(os.path.join(ANNOTATED_DIR, out_name), annotated_image)
-                    except Exception as e:
-                        print(f"  [WARN] plot() failed for {filename}: {e}")
+                    classification_result, has_detection = get_result(
+                        image_path, models_list, CONFIDENCE_THR
+                    )
+
+                    status = "NOK" if has_detection else "OK"
+                    out_name = f"{basename}_{status}{ext}"
+                    print(f"  {filename} → {status}")
+
+                    # Annotated → tmp_display/ (normal view: annotated if NOK, original if OK)
+                    if classification_result is not None and has_detection:
+                        try:
+                            annotated_image = classification_result.plot()
+                            cv2.imwrite(os.path.join(TMP_DISPLAY_DIR, out_name), annotated_image)
+                            cv2.imwrite(os.path.join(ANNOTATED_DIR, out_name), annotated_image)
+                        except Exception as e:
+                            print(f"  [WARN] plot() failed for {filename}: {e}")
+                            shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
+                    else:
+                        shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
+
+                    # Original → tmp_display/historic/ (always original)
+                    shutil.copy2(image_path, os.path.join(HISTORIC_DIR, out_name))
+                    processed_set.add(basename)
+
+                # Hold this JSN visible for PIECE_DISPLAY_DURATION seconds
+                time.sleep(PIECE_DISPLAY_DURATION)
 
         except Exception as e:
-            print(f"[ERROR] Unexpected error in poll loop: {e}")
-
-        time.sleep(POLL_INTERVAL)
+            print(f"[ERROR] Unexpected error: {e}")
+            time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
