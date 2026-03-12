@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS piece_result (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    jsn TEXT,
+    jsn TEXT UNIQUE,
     operator_result TEXT CHECK (operator_result IN ('OK','NOK')),
     model_result TEXT CHECK (model_result IN ('OK','NOK')),
     final_result TEXT GENERATED ALWAYS AS (
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS piece_result (
 
 CREATE TABLE IF NOT EXISTS classified_images (
     id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    img_name TEXT,
+    img_name TEXT UNIQUE,
     operator_result TEXT CHECK (operator_result IN ('OK','NOK')),
     model_result TEXT CHECK (model_result IN ('OK','NOK')),
     piece_id INTEGER,

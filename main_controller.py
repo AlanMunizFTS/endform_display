@@ -708,10 +708,15 @@ class MainController:
                 )
 
                 self._set_sync_progress("Completed", 100)
-                if verify_result.get("verified"):
-                    d.sync_message = "Dataset completed and verified"
+                classification = sync_result.get("classification") or {}
+                if verify_result.get("verified") and classification.get("ok"):
+                    pieces = classification.get("pieces", 0)
+                    images = classification.get("images", 0)
+                    d.sync_message = (
+                        f"Dataset saved: {pieces} pieces, {images} images"
+                    )
                     d.sync_message_is_error = False
-                else:
+                elif not verify_result.get("verified"):
                     issue_count = verify_result.get("issue_count", 0)
                     d.sync_message = (
                         f"Dataset completed but verification failed ({issue_count} issues)"
@@ -719,6 +724,14 @@ class MainController:
                     d.sync_message_is_error = True
                     self.logger.warn(
                         f"[SYNC] Verification failed with {issue_count} issues",
+                        allow_repeat=True,
+                    )
+                else:
+                    cls_error = classification.get("error", "unknown error")
+                    d.sync_message = f"Dataset saved but DB classification failed: {cls_error}"
+                    d.sync_message_is_error = True
+                    self.logger.warn(
+                        f"[SYNC] Classification DB save failed: {cls_error}",
                         allow_repeat=True,
                     )
             except Exception as exc:
@@ -1698,13 +1711,125 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
+        classification_result = self.save_classification_results(db_client=db)
+
         return {
             "ok": True,
             "rows": total_rows,
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
+            "classification": classification_result,
         }
+
+    def save_classification_results(self, db_client=None):
+        """Persist per-image and per-piece classification results.
+
+        For each image in img_results:
+          - operator_result  comes from the ``result`` column in img_results.
+          - model_result     comes from the _OK / _NOK suffix in the filename.
+
+        For each piece (unique JSN):
+          - operator_result = 'NOK' if any image has operator_result 'NOK', else 'OK'
+          - model_result    = 'NOK' if any image has model_result 'NOK', else 'OK'
+          - final_result    is auto-computed by the DB.
+        """
+        d = self.display
+        db = db_client or d.db
+        if not db:
+            return {"ok": False, "error": "No DB connection"}
+
+        try:
+            rows = db.fetch("SELECT img_name, result FROM img_results")
+        except Exception as exc:
+            return {"ok": False, "error": f"Error fetching img_results: {exc}"}
+
+        if not rows:
+            return {"ok": False, "error": "No rows in img_results"}
+
+        # ---- build per-image data grouped by JSN ----
+        jsn_groups = defaultdict(list)
+        for row in rows:
+            img_name = row.get("img_name") or row.get("name")
+            operator_result = row.get("result")
+            if not img_name or operator_result is None:
+                continue
+
+            operator_result = str(operator_result).strip().upper()
+            if operator_result not in ("OK", "NOK"):
+                continue
+
+            # model_result from filename suffix (_OK or _NOK before extension)
+            m = re.search(r"_(OK|NOK)\.\w+$", img_name, re.IGNORECASE)
+            model_result = m.group(1).upper() if m else "OK"
+
+            jsn = img_name.split("_")[0] if "_" in img_name else img_name
+            jsn_groups[jsn].append({
+                "img_name": img_name,
+                "operator_result": operator_result,
+                "model_result": model_result,
+            })
+
+        if not jsn_groups:
+            return {"ok": False, "error": "No valid image groups found"}
+
+        piece_count = len(jsn_groups)
+        image_count = sum(len(v) for v in jsn_groups.values())
+
+        # ---- upsert into DB inside a single transaction ----
+        try:
+            with db.get_cursor() as cursor:
+                for jsn, images in jsn_groups.items():
+                    piece_operator = (
+                        "NOK" if any(i["operator_result"] == "NOK" for i in images)
+                        else "OK"
+                    )
+                    piece_model = (
+                        "NOK" if any(i["model_result"] == "NOK" for i in images)
+                        else "OK"
+                    )
+
+                    cursor.execute(
+                        "INSERT INTO piece_result (jsn, operator_result, model_result) "
+                        "VALUES (%s, %s, %s) "
+                        "ON CONFLICT (jsn) DO UPDATE SET "
+                        "operator_result = EXCLUDED.operator_result, "
+                        "model_result = EXCLUDED.model_result "
+                        "RETURNING id",
+                        (jsn, piece_operator, piece_model),
+                    )
+                    piece_id = cursor.fetchone()["id"]
+
+                    for img in images:
+                        cursor.execute(
+                            "INSERT INTO classified_images "
+                            "(img_name, operator_result, model_result, piece_id) "
+                            "VALUES (%s, %s, %s, %s) "
+                            "ON CONFLICT (img_name) DO UPDATE SET "
+                            "operator_result = EXCLUDED.operator_result, "
+                            "model_result = EXCLUDED.model_result, "
+                            "piece_id = EXCLUDED.piece_id",
+                            (img["img_name"], img["operator_result"],
+                             img["model_result"], piece_id),
+                        )
+
+            # ---- verify data was actually written ----
+            piece_db_count = db.fetch("SELECT COUNT(*) as n FROM piece_result")[0]["n"]
+            images_db_count = db.fetch("SELECT COUNT(*) as n FROM classified_images")[0]["n"]
+
+            if piece_db_count == 0 or images_db_count == 0:
+                return {
+                    "ok": False,
+                    "error": f"Verification failed: piece_result={piece_db_count}, classified_images={images_db_count}",
+                }
+
+            print(
+                f"save_classification_results: saved {piece_count} pieces, {image_count} images"
+            )
+            return {"ok": True, "pieces": piece_count, "images": image_count}
+
+        except Exception as exc:
+            return {"ok": False, "error": f"DB error: {exc}"}
 
     def verify_sync_images_by_status(
         self,
