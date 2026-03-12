@@ -296,21 +296,6 @@ def _download_live_images_remote_impl(
         if len(images) < max_images:
             return []
 
-        # Group by JSN (prefix before first '_') and keep only the most recent JSN
-        def _jsn(name):
-            return name.split("_")[0] if "_" in name else name
-
-        jsn_groups = {}
-        for img in images:
-            j = _jsn(img)
-            jsn_groups.setdefault(j, []).append(img)
-
-        latest_jsn = max(jsn_groups, key=lambda j: jsn_groups[j][0])
-        images = jsn_groups[latest_jsn]
-
-        if len(images) < max_images:
-            return []
-
         total_batches = (len(images) + max_images - 1) // max_images
         current_offset = rotation_state.get("current_offset", 0)
         if total_batches > 0:

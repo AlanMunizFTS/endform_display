@@ -205,12 +205,17 @@ def main():
                     models_list = models.get(position, [])
                     image_path = os.path.join(TEST_IMAGES_DIR, filename)
 
+                    # Strip JSN prefix for output filename (JSN_angulo → angulo)
+                    _parts = basename.split("_", 1)
+                    display_basename = _parts[1] if len(_parts) > 1 else basename
+
                     if not models_list:
                         # No model available: show image as OK without classification
-                        out_name = f"{basename}_OK{ext}"
+                        out_name  = f"{display_basename}_OK{ext}"
+                        hist_name = f"{basename}_OK{ext}"
                         print(f"  {filename} → OK (no model for '{position}')")
                         shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
-                        shutil.copy2(image_path, os.path.join(HISTORIC_DIR, out_name))
+                        shutil.copy2(image_path, os.path.join(HISTORIC_DIR, hist_name))
                         processed_set.add(basename)
                         continue
 
@@ -219,7 +224,8 @@ def main():
                     )
 
                     status = "NOK" if has_detection else "OK"
-                    out_name = f"{basename}_{status}{ext}"
+                    out_name  = f"{display_basename}_{status}{ext}"
+                    hist_name = f"{basename}_{status}{ext}"
                     print(f"  {filename} → {status}")
 
                     # Annotated → tmp_display/ (normal view: annotated if NOK, original if OK)
@@ -227,15 +233,15 @@ def main():
                         try:
                             annotated_image = classification_result.plot()
                             cv2.imwrite(os.path.join(TMP_DISPLAY_DIR, out_name), annotated_image)
-                            cv2.imwrite(os.path.join(ANNOTATED_DIR, out_name), annotated_image)
+                            cv2.imwrite(os.path.join(ANNOTATED_DIR, hist_name), annotated_image)
                         except Exception as e:
                             print(f"  [WARN] plot() failed for {filename}: {e}")
                             shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
                     else:
                         shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
 
-                    # Original → tmp_display/historic/ (always original)
-                    shutil.copy2(image_path, os.path.join(HISTORIC_DIR, out_name))
+                    # Original → tmp_display/historic/ (always original, with JSN)
+                    shutil.copy2(image_path, os.path.join(HISTORIC_DIR, hist_name))
                     processed_set.add(basename)
 
                 # Hold this JSN visible for PIECE_DISPLAY_DURATION seconds
