@@ -8,6 +8,8 @@ from threading import Thread
 from file_manager import FileManager
 from paths_config import (
     ANNOTATED_SUBDIR_NAME,
+    FINAL_CLASSIFICATION_DIR,
+    FINAL_CLASSIFICATION_DIRS,
     HISTORIC_LOCAL_DIR,
     HISTORIC_SUBDIR_NAME,
     REMOTE_ANNOTATED_DIR,
@@ -677,7 +679,7 @@ class MainController:
                         phase_percent = 0
                         stage_text = stage
                     else:
-                        phase_percent = int((done / total) * 85)
+                        phase_percent = int((done / total) * 65)
                         stage_text = f"{stage} ({done}/{total})"
                     self._set_sync_progress(stage_text, phase_percent)
 
@@ -691,12 +693,27 @@ class MainController:
                 if not sync_result.get("ok", False):
                     raise RuntimeError(sync_result.get("error", "Dataset sync failed"))
 
-                def _verify_progress_cb(done, total, stage):
+                def _classification_progress_cb(done, total, stage):
                     if total <= 0:
-                        phase_percent = 85
+                        phase_percent = 65
                         stage_text = stage
                     else:
-                        phase_percent = 85 + int((done / total) * 15)
+                        phase_percent = 65 + int((done / total) * 23)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_sync_progress(stage_text, phase_percent)
+
+                classification = self.save_classification_results(
+                    db_client=worker_db,
+                    historic_dir=historic_dir,
+                    progress_callback=_classification_progress_cb,
+                )
+
+                def _verify_progress_cb(done, total, stage):
+                    if total <= 0:
+                        phase_percent = 88
+                        stage_text = stage
+                    else:
+                        phase_percent = 88 + int((done / total) * 12)
                         stage_text = f"{stage} ({done}/{total})"
                     self._set_sync_progress(stage_text, phase_percent)
 
@@ -708,14 +725,26 @@ class MainController:
                 )
 
                 self._set_sync_progress("Completed", 100)
-                classification = sync_result.get("classification") or {}
-                if verify_result.get("verified") and classification.get("ok"):
+                classification = classification or {}
+                folder_errors = classification.get("classification_folder_errors", [])
+                if verify_result.get("verified") and classification.get("ok") and not folder_errors:
                     pieces = classification.get("pieces", 0)
                     images = classification.get("images", 0)
+                    copied = classification.get("files_copied", 0)
                     d.sync_message = (
-                        f"Dataset saved: {pieces} pieces, {images} images"
+                        f"Dataset saved: {pieces} pieces, {images} images, {copied} files"
                     )
                     d.sync_message_is_error = False
+                elif verify_result.get("verified") and classification.get("ok") and folder_errors:
+                    n_errors = len(folder_errors)
+                    d.sync_message = (
+                        f"Dataset saved but {n_errors} file copy issues"
+                    )
+                    d.sync_message_is_error = True
+                    self.logger.warn(
+                        f"[SYNC] Classification folder errors: {'; '.join(folder_errors[:5])}",
+                        allow_repeat=True,
+                    )
                 elif not verify_result.get("verified"):
                     issue_count = verify_result.get("issue_count", 0)
                     d.sync_message = (
@@ -1711,18 +1740,15 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
-        classification_result = self.save_classification_results(db_client=db)
-
         return {
             "ok": True,
             "rows": total_rows,
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
-            "classification": classification_result,
         }
 
-    def save_classification_results(self, db_client=None):
+    def save_classification_results(self, db_client=None, historic_dir=None, progress_callback=None):
         """Persist per-image and per-piece classification results.
 
         For each image in img_results:
@@ -1826,10 +1852,118 @@ class MainController:
             print(
                 f"save_classification_results: saved {piece_count} pieces, {image_count} images"
             )
-            return {"ok": True, "pieces": piece_count, "images": image_count}
 
         except Exception as exc:
             return {"ok": False, "error": f"DB error: {exc}"}
+
+        # ---- copy images to final_classification folders ----
+        historic_dir = historic_dir or self.file_manager.join(
+            self.config.temp_dir, HISTORIC_SUBDIR_NAME
+        )
+        base_dir = str(FINAL_CLASSIFICATION_DIR)
+
+        # Create all subfolders
+        for position_dirs in FINAL_CLASSIFICATION_DIRS.values():
+            for folder_name in position_dirs.values():
+                self.file_manager.makedirs(
+                    self.file_manager.join(base_dir, folder_name), exist_ok=True
+                )
+
+        files_copied = 0
+        copy_errors = []
+        expected_counts = defaultdict(int)  # folder_name -> expected count
+
+        all_images = [img for images in jsn_groups.values() for img in images]
+        total_images = len(all_images)
+
+        if callable(progress_callback):
+            progress_callback(0, total_images, "Classifying images")
+
+        for idx, img in enumerate(all_images, start=1):
+            img_name = img["img_name"]
+            op = img["operator_result"]
+            mdl = img["model_result"]
+
+            # Determine classification tag
+            if op == "OK" and mdl == "OK":
+                tag = "P"
+            elif op == "NOK" and mdl == "NOK":
+                tag = "N"
+            elif op == "NOK" and mdl == "OK":
+                tag = "FP"
+            elif op == "OK" and mdl == "NOK":
+                tag = "FN"
+            else:
+                if callable(progress_callback):
+                    progress_callback(idx, total_images, "Classifying images")
+                continue
+
+            # Determine position from filename
+            pos_match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
+            if not pos_match:
+                if callable(progress_callback):
+                    progress_callback(idx, total_images, "Classifying images")
+                continue
+            position = pos_match.group(1).lower()
+
+            folder_name = FINAL_CLASSIFICATION_DIRS[position][tag]
+            target_path = self.file_manager.join(base_dir, folder_name, img_name)
+            source_path = self.file_manager.join(historic_dir, img_name)
+
+            expected_counts[folder_name] += 1
+
+            # Remove from wrong folders (status may have changed)
+            for other_tag, other_folder in FINAL_CLASSIFICATION_DIRS[position].items():
+                if other_tag == tag:
+                    continue
+                old_path = self.file_manager.join(base_dir, other_folder, img_name)
+                if self.file_manager.exists(old_path):
+                    try:
+                        self.file_manager.remove(old_path)
+                    except Exception:
+                        pass
+
+            if not self.file_manager.exists(source_path):
+                copy_errors.append(f"Source missing: {img_name}")
+            else:
+                try:
+                    self.file_manager.copy2(source_path, target_path)
+                    files_copied += 1
+                except Exception as exc:
+                    copy_errors.append(f"{img_name}: {exc}")
+
+            if callable(progress_callback):
+                progress_callback(idx, total_images, "Classifying images")
+
+        # ---- verify copied files ----
+        folder_errors = []
+        for folder_name, expected in expected_counts.items():
+            folder_path = self.file_manager.join(base_dir, folder_name)
+            try:
+                actual = len(self.file_manager.listdir(folder_path))
+            except Exception:
+                actual = 0
+            if actual < expected:
+                folder_errors.append(
+                    f"{folder_name}: expected {expected}, found {actual}"
+                )
+
+        result = {
+            "ok": True,
+            "pieces": piece_count,
+            "images": image_count,
+            "files_copied": files_copied,
+        }
+
+        if copy_errors or folder_errors:
+            all_errors = copy_errors + folder_errors
+            result["classification_folder_errors"] = all_errors
+            print(
+                f"save_classification_results: {len(all_errors)} folder issues: "
+                + "; ".join(all_errors[:5])
+            )
+
+        return result
 
     def verify_sync_images_by_status(
         self,

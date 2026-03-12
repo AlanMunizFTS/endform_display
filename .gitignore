@@ -16,3 +16,4 @@ log.txt
 *.zip
 test_images/
 annotated/
+final_classification/
