@@ -128,6 +128,8 @@ py --version
 py -m venv venv
 venv\scripts\activate
 pip install -r requirements.txt 
+docker compose up -d postgres pgadmin
+
 
 ## database form
 
@@ -143,4 +145,3 @@ pass: admin123
 - User: postgres 
 - Password: MartinreaFT$2023#
 
-python utilities\import_local_images_to_db.py

@@ -34,3 +34,14 @@ STATUS_SYNC_DIRS = {
     "front": {"OK": "front_ok", "NOK": "front_nok"},
     "diag": {"OK": "diag_ok", "NOK": "diag_nok"},
 }
+
+# --------------------------------------------------
+# Final classification folders (model vs operator)
+# --------------------------------------------------
+FINAL_CLASSIFICATION_DIR = Path("./final_classification")
+
+FINAL_CLASSIFICATION_DIRS = {
+    "side": {"P": "Side_P", "N": "Side_N", "FP": "Side_FP", "FN": "Side_FN"},
+    "front": {"P": "Front_P", "N": "Front_N", "FP": "Front_FP", "FN": "Front_FN"},
+    "diag": {"P": "Diag_P", "N": "Diag_N", "FP": "Diag_FP", "FN": "Diag_FN"},
+}
