@@ -338,13 +338,14 @@ def _download_live_images_remote_impl(
         return []
 
 
-def _process_remote_event_impl(msg, display, logger, camera_ids):
+def _process_remote_event_impl(msg, display, logger):
     if not isinstance(msg, dict):
         return
 
     msg_type = msg.get("type")
     if msg_type == "stdout":
         line = str(msg.get("line", ""))
+        logger.info(f"[REMOTE] {line}", allow_repeat=True)
         lower_line = line.lower()
 
         if (not display.trigger_active) and ("waiting for trigger" in lower_line):
@@ -354,15 +355,9 @@ def _process_remote_event_impl(msg, display, logger, camera_ids):
                 allow_repeat=True,
             )
 
-        if "configured successfully" in lower_line:
-            for cam_id in camera_ids:
-                if cam_id in line and cam_id not in display.connected_cameras:
-                    display.connected_cameras.add(cam_id)
-                    logger.info(
-                        f"[REMOTE] Camera {cam_id} configured successfully",
-                        allow_repeat=True,
-                    )
-                    break
+    elif msg_type == "stderr":
+        line = str(msg.get("line", ""))
+        logger.warn(f"[REMOTE:ERR] {line}", allow_repeat=True)
 
 
 def download_live_images_local(file_manager, local_path, rotation_state, logger, max_images=7):
@@ -399,21 +394,11 @@ def download_live_images_remote(
     )
 
 
-def process_remote_event(msg, display, logger, camera_ids=None):
+def process_remote_event(msg, display, logger):
     _process_remote_event_impl(
         msg=msg,
         display=display,
         logger=logger,
-        camera_ids=camera_ids
-        or {
-            "25430027",
-            "25384186",
-            "25430026",
-            "25384190",
-            "25324823",
-            "25324824",
-            "25371186",
-        },
     )
 
 
@@ -429,17 +414,6 @@ class ControllerConfig:
         "sh -lc 'echo $$; "
         "cd ~/Vision-Standard 2>/dev/null || cd ~/vision-standard; "
         "stdbuf -oL -eL python3 -u main.py -f art_1861_endform -p omron -d teledyne 2>&1'"
-    )
-    camera_ids: set = field(
-        default_factory=lambda: {
-            "25430027",
-            "25384186",
-            "25430026",
-            "25384190",
-            "25324823",
-            "25324824",
-            "25371186",
-        }
     )
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
@@ -904,7 +878,6 @@ class MainController:
         )
         self.display.remote_requested = True
         self.display.trigger_active = False
-        self.display.connected_cameras = set()
         try:
             self.remote_pid = self.pid_queue.get(timeout=5)
             self.logger.info(f"[REMOTE] PID: {self.remote_pid}", allow_repeat=True)
@@ -915,7 +888,6 @@ class MainController:
         if self.stop_event is None and self.remote_process is None and self.remote_pid is None:
             self.display.remote_requested = False
             self.display.trigger_active = False
-            self.display.connected_cameras = set()
             return
         self.logger.info(f"[REMOTE] Stop requested ({reason})", allow_repeat=True)
         if self.stop_event is not None:
@@ -938,7 +910,6 @@ class MainController:
         self.event_queue = None
         self.display.remote_requested = False
         self.display.trigger_active = False
-        self.display.connected_cameras = set()
 
     def _process_remote_events(self):
         if self.event_queue is not None:
@@ -949,7 +920,6 @@ class MainController:
                         msg=msg,
                         display=self.display,
                         logger=self.logger,
-                        camera_ids=self.config.camera_ids,
                     )
             except Exception:
                 pass
