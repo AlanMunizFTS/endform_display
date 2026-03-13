@@ -635,10 +635,31 @@ class MainController:
             return
 
         if current_mtime > self.last_historic_mtime:
-            self._register_local_images_in_db(historic_dir)
-            # Update piece_result instantly
-            self.save_classification_results(historic_dir=historic_dir)
             self.last_historic_mtime = current_mtime
+            # Run heavy DB/file work in background to avoid freezing the main loop
+            if not getattr(self, '_register_worker_running', False):
+                self._register_worker_running = True
+                captured_dir = historic_dir
+
+                def _register_worker():
+                    worker_db = None
+                    try:
+                        from db import get_db_connection
+                        worker_db = get_db_connection()
+                        self._register_local_images_in_db(captured_dir, db_client=worker_db)
+                        self._backfill_piece_result(db_client=worker_db)
+                        self.save_classification_results(historic_dir=captured_dir, db_client=worker_db)
+                    except Exception as exc:
+                        print(f"Error in register worker: {exc}")
+                    finally:
+                        if worker_db:
+                            try:
+                                worker_db.close()
+                            except Exception:
+                                pass
+                        self._register_worker_running = False
+
+                Thread(target=_register_worker, name="historic-register-worker", daemon=True).start()
         if self.historic_bootstrap_loading or self.historic_bootstrap_complete:
             return
         if not self.db_connected:
@@ -1078,6 +1099,45 @@ class MainController:
         d.historic_db_registered = False
         return historic_images
 
+    def _refresh_historic_index_async(self):
+        """Rescan historic directory in a background thread and update d.historic_images."""
+        if getattr(self, '_historic_index_refresh_running', False):
+            return
+        self._historic_index_refresh_running = True
+
+        def _worker():
+            try:
+                new_index = self._load_historic_index(force_rescan=True)
+                d = self.display
+                if not new_index:
+                    self._historic_index_refresh_running = False
+                    return
+                # Preserve current JSN position
+                current_jsn = None
+                if d.historic_images:
+                    try:
+                        batch = d.historic_images[d.historic_offset]
+                        if batch:
+                            current_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+                    except Exception:
+                        pass
+                d.historic_images = new_index
+                if current_jsn:
+                    for idx, batch in enumerate(new_index):
+                        if batch and (batch[0].split("_")[0] if "_" in batch[0] else batch[0]) == current_jsn:
+                            d.historic_offset = idx
+                            break
+                    else:
+                        d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+                else:
+                    d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+            except Exception as exc:
+                print(f"Error refreshing historic index: {exc}")
+            finally:
+                self._historic_index_refresh_running = False
+
+        Thread(target=_worker, name="historic-index-refresh", daemon=True).start()
+
     def enter_historic_mode(self):
         d = self.display
         if self.historic_bootstrap_loading:
@@ -1099,12 +1159,17 @@ class MainController:
                 current_jsn = None
 
         try:
-            d.historic_images = self._load_historic_index(force_rescan=False)
+            # Use cached index immediately (never blocks); trigger async rescan if stale
+            cached = self._load_historic_index(force_rescan=False)
 
-            if not d.historic_images:
+            if not cached:
                 if not d.historic_mode:
                     self._show_no_images_dialog("No images available")
+                # Kick off a background rescan so next call has fresh data
+                self._refresh_historic_index_async()
                 return
+
+            d.historic_images = cached
 
             if not d.historic_mode:
                 d.historic_mode = True
@@ -1125,6 +1190,9 @@ class MainController:
                         d.historic_offset = min(fallback_offset, len(d.historic_images) - 1)
                 else:
                     d.historic_offset = min(fallback_offset, len(d.historic_images) - 1)
+
+            # Trigger async rescan so the index stays fresh without blocking
+            self._refresh_historic_index_async()
         except Exception as exc:
             print(f"Error entering historic: {exc}")
 
@@ -1573,7 +1641,12 @@ class MainController:
                 if self.file_manager.exists(local_file):
                     downloaded_files.append(local_file)
 
-            self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
+            # Only register when the batch changes, not every loop iteration
+            batch_key = (d.historic_offset, tuple(batch_images))
+            if getattr(self, '_last_registered_batch_key', None) != batch_key:
+                self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
+                self._last_registered_batch_key = batch_key
+
             return downloaded_files
 
         except Exception as exc:
