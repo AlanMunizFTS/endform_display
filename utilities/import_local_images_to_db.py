@@ -37,6 +37,39 @@ def _collect_image_names(folder: Path, recursive: bool) -> List[str]:
     return sorted(names)
 
 
+import re
+
+
+def _upsert_piece_result(db, img_name: str, operator_result: str) -> None:
+    """Mirror of MainController._upsert_classification for standalone use."""
+    m = re.search(r"_(OK|NOK)\.\w+$", img_name, re.IGNORECASE)
+    model_result = m.group(1).upper() if m else "OK"
+    jsn = img_name.split("_")[0] if "_" in img_name else img_name
+    with db.get_cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO piece_result (jsn, operator_result, model_result) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (jsn) DO UPDATE SET "
+            "operator_result = CASE WHEN piece_result.operator_result = 'NOK' "
+            "  OR EXCLUDED.operator_result = 'NOK' THEN 'NOK' ELSE 'OK' END, "
+            "model_result = CASE WHEN piece_result.model_result = 'NOK' "
+            "  OR EXCLUDED.model_result = 'NOK' THEN 'NOK' ELSE 'OK' END "
+            "RETURNING id",
+            (jsn, operator_result, model_result),
+        )
+        piece_id = cursor.fetchone()["id"]
+        cursor.execute(
+            "INSERT INTO classified_images "
+            "(img_name, operator_result, model_result, piece_id) "
+            "VALUES (%s, %s, %s, %s) "
+            "ON CONFLICT (img_name) DO UPDATE SET "
+            "operator_result = EXCLUDED.operator_result, "
+            "model_result = EXCLUDED.model_result, "
+            "piece_id = EXCLUDED.piece_id",
+            (img_name, operator_result, model_result, piece_id),
+        )
+
+
 def _import_images(folder: Path, recursive: bool, dry_run: bool, update_existing: bool) -> int:
     try:
         from db import get_db_connection
@@ -73,6 +106,10 @@ def _import_images(folder: Path, recursive: bool, dry_run: bool, update_existing
             if not rows:
                 if not dry_run:
                     db.execute(query_insert, (img_name, "OK"))
+                    try:
+                        _upsert_piece_result(db, img_name, "OK")
+                    except Exception as exc:
+                        print(f"Warning: could not upsert piece_result for {img_name}: {exc}")
                 inserted += 1
                 continue
 
@@ -83,6 +120,10 @@ def _import_images(folder: Path, recursive: bool, dry_run: bool, update_existing
                     continue
                 if not dry_run:
                     db.execute(query_update, ("OK", img_name))
+                    try:
+                        _upsert_piece_result(db, img_name, "OK")
+                    except Exception as exc:
+                        print(f"Warning: could not upsert piece_result for {img_name}: {exc}")
                 updated += 1
             else:
                 skipped += 1

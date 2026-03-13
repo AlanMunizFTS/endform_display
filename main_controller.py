@@ -660,6 +660,7 @@ class MainController:
                     db_client=worker_db,
                     track_registered=False,
                 )
+                self._backfill_piece_result(db_client=worker_db)
                 self.logger.info("[DB] Historic startup bootstrap completed", allow_repeat=True)
                 completed = True
             except Exception as exc:
@@ -1635,6 +1636,31 @@ class MainController:
 
         except Exception as exc:
             print(f"General error registering images in DB: {exc}")
+
+    def _backfill_piece_result(self, db_client=None):
+        """Populate piece_result for any img_results rows whose JSN is not yet in piece_result."""
+        db = db_client or self.display.db
+        if not db:
+            return
+        try:
+            rows = db.fetch(
+                """
+                SELECT img_name, result FROM img_results
+                WHERE SPLIT_PART(img_name, '_', 1) NOT IN (SELECT jsn FROM piece_result)
+                """
+            )
+            if not rows:
+                return
+            self.logger.info(f"[DB] Backfilling piece_result for {len(rows)} images", allow_repeat=True)
+            for row in rows:
+                img_name = row.get("img_name")
+                operator_result = str(row.get("result") or "OK").strip().upper()
+                if operator_result not in ("OK", "NOK"):
+                    operator_result = "OK"
+                if img_name:
+                    self._upsert_classification(img_name, operator_result, db_client=db)
+        except Exception as exc:
+            print(f"Error backfilling piece_result: {exc}")
 
     def _upsert_classification(self, img_name, operator_result, db_client=None):
         db = db_client or self.display.db
