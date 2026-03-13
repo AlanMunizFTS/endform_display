@@ -34,7 +34,7 @@ MODELS_FOLDER   = "./models"
 # ---------------------------------------------------------------------------
 CONFIDENCE_THR        = 0.33
 PIECE_DISPLAY_DURATION = 4.0   # seconds each JSN group stays visible in normal view
-POLL_INTERVAL         = 4.0   # seconds between scans when no new images are found
+POLL_INTERVAL         = 0.5   # seconds between scans when no new images are found
 IMAGE_EXTENSIONS      = {".jpg", ".jpeg", ".png", ".bmp"}
 POSITIONS             = ["side", "front", "diag"]
 
@@ -195,7 +195,9 @@ def main():
                 files = sorted(jsn_groups[jsn])
                 print(f"\n[JSN] {jsn}  ({len(files)} images)")
 
-                clear_tmp_display()
+                # --- Classify all images first, collect outputs in memory ---
+                display_batch = []  # (out_name, annotated_array_or_None, src_path)
+                historic_batch = []  # (hist_name, annotated_array_or_None, src_path)
 
                 for filename in files:
                     ext = os.path.splitext(filename)[1].lower()
@@ -210,12 +212,11 @@ def main():
                     display_basename = _parts[1] if len(_parts) > 1 else basename
 
                     if not models_list:
-                        # No model available: show image as OK without classification
                         out_name  = f"{display_basename}_OK{ext}"
                         hist_name = f"{basename}_OK{ext}"
                         print(f"  {filename} → OK (no model for '{position}')")
-                        shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
-                        shutil.copy2(image_path, os.path.join(HISTORIC_DIR, hist_name))
+                        display_batch.append((out_name, None, image_path))
+                        historic_batch.append((hist_name, None, image_path))
                         processed_set.add(basename)
                         continue
 
@@ -228,21 +229,32 @@ def main():
                     hist_name = f"{basename}_{status}{ext}"
                     print(f"  {filename} → {status}")
 
-                    # Annotated → tmp_display/ (normal view: annotated if NOK, original if OK)
+                    annotated_image = None
                     if classification_result is not None and has_detection:
                         try:
                             annotated_image = classification_result.plot()
-                            cv2.imwrite(os.path.join(TMP_DISPLAY_DIR, out_name), annotated_image)
-                            cv2.imwrite(os.path.join(ANNOTATED_DIR, hist_name), annotated_image)
                         except Exception as e:
                             print(f"  [WARN] plot() failed for {filename}: {e}")
-                            shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
-                    else:
-                        shutil.copy2(image_path, os.path.join(TMP_DISPLAY_DIR, out_name))
 
-                    # Original → tmp_display/historic/ (always original, with JSN)
-                    shutil.copy2(image_path, os.path.join(HISTORIC_DIR, hist_name))
+                    display_batch.append((out_name, annotated_image, image_path))
+                    historic_batch.append((hist_name, annotated_image, image_path))
                     processed_set.add(basename)
+
+                # --- Write all results to tmp_display/ in one shot ---
+                clear_tmp_display()
+                for out_name, annotated_image, src_path in display_batch:
+                    if annotated_image is not None:
+                        cv2.imwrite(os.path.join(TMP_DISPLAY_DIR, out_name), annotated_image)
+                    else:
+                        shutil.copy2(src_path, os.path.join(TMP_DISPLAY_DIR, out_name))
+
+                for hist_name, annotated_image, src_path in historic_batch:
+                    ext = os.path.splitext(hist_name)[1].lower()
+                    base_no_status = hist_name.rsplit("_", 1)[0]
+                    is_nok = hist_name.rsplit("_", 1)[-1].startswith("NOK")
+                    if is_nok and annotated_image is not None:
+                        cv2.imwrite(os.path.join(ANNOTATED_DIR, hist_name), annotated_image)
+                    shutil.copy2(src_path, os.path.join(HISTORIC_DIR, hist_name))
 
                 # Hold this JSN visible for PIECE_DISPLAY_DURATION seconds
                 time.sleep(PIECE_DISPLAY_DURATION)
