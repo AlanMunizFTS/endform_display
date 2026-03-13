@@ -468,6 +468,7 @@ class MainController:
         self.historic_bootstrap_thread = None
         self.sync_worker_thread = None
         self.reset_worker_thread = None
+        self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -570,6 +571,95 @@ class MainController:
             return False
 
     def _register_historic_local_dir_on_startup(self):
+        """Register all images in historic dir on startup if not already in img_results."""
+        if not self.db_connected:
+            return
+
+        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        if not self.file_manager.exists(historic_dir):
+            self.historic_bootstrap_complete = True
+            return
+
+        self.historic_bootstrap_loading = True
+        self.historic_bootstrap_thread = Thread(target=self._register_historic_local_dir_worker, daemon=True)
+        self.historic_bootstrap_thread.start()
+
+    def _register_historic_local_dir_worker(self):
+        """Worker thread for registering historic images on startup."""
+        try:
+            historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+            if not self.file_manager.exists(historic_dir):
+                return
+
+            local_images = [
+                f for f in self.file_manager.listdir(historic_dir)
+                if f.lower().endswith(self.config.image_extensions)
+            ]
+
+            if not local_images:
+                return
+
+            # Check existing in DB
+            existing_rows = self.display.db.fetch(
+                "SELECT img_name FROM img_results WHERE img_name = ANY(%s)",
+                (local_images,),
+            )
+            existing = {row["img_name"] for row in existing_rows} if existing_rows else set()
+
+            new_images = [img for img in local_images if img not in existing]
+            if new_images:
+                query = "INSERT INTO img_results (img_name, result) VALUES (%s, %s)"
+                for img in new_images:
+                    try:
+                        self.display.db.execute(query, (img, "OK"))
+                    except Exception as exc:
+                        self.logger.error(f"Error registering {img}: {exc}")
+
+        finally:
+            self.historic_bootstrap_loading = False
+            self.historic_bootstrap_complete = True
+
+    def _check_and_register_new_historic_images(self):
+        """Check for new images in historic dir and register them in DB, then update piece_result."""
+        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        if not self.file_manager.exists(historic_dir):
+            return
+
+        try:
+            current_mtime = self.file_manager.getmtime(historic_dir)
+        except Exception:
+            return
+
+        if not hasattr(self, 'last_historic_mtime'):
+            self.last_historic_mtime = current_mtime
+            return
+
+        if current_mtime > self.last_historic_mtime:
+            self.last_historic_mtime = current_mtime
+            # Run heavy DB/file work in background to avoid freezing the main loop
+            if not getattr(self, '_register_worker_running', False):
+                self._register_worker_running = True
+                captured_dir = historic_dir
+
+                def _register_worker():
+                    worker_db = None
+                    try:
+                        from db import get_db_connection
+                        worker_db = get_db_connection()
+                        self._register_local_images_in_db(captured_dir, db_client=worker_db)
+                        self._backfill_piece_result(db_client=worker_db)
+                        self.save_classification_results(historic_dir=captured_dir, db_client=worker_db)
+                    except Exception as exc:
+                        print(f"Error in register worker: {exc}")
+                    finally:
+                        if worker_db:
+                            try:
+                                worker_db.close()
+                            except Exception:
+                                pass
+                        self._register_worker_running = False
+
+                Thread(target=_register_worker, name="historic-register-worker", daemon=True).start()
         if self.historic_bootstrap_loading or self.historic_bootstrap_complete:
             return
         if not self.db_connected:
@@ -591,6 +681,7 @@ class MainController:
                     db_client=worker_db,
                     track_registered=False,
                 )
+                self._backfill_piece_result(db_client=worker_db)
                 self.logger.info("[DB] Historic startup bootstrap completed", allow_repeat=True)
                 completed = True
             except Exception as exc:
@@ -1008,6 +1099,45 @@ class MainController:
         d.historic_db_registered = False
         return historic_images
 
+    def _refresh_historic_index_async(self):
+        """Rescan historic directory in a background thread and update d.historic_images."""
+        if getattr(self, '_historic_index_refresh_running', False):
+            return
+        self._historic_index_refresh_running = True
+
+        def _worker():
+            try:
+                new_index = self._load_historic_index(force_rescan=True)
+                d = self.display
+                if not new_index:
+                    self._historic_index_refresh_running = False
+                    return
+                # Preserve current JSN position
+                current_jsn = None
+                if d.historic_images:
+                    try:
+                        batch = d.historic_images[d.historic_offset]
+                        if batch:
+                            current_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+                    except Exception:
+                        pass
+                d.historic_images = new_index
+                if current_jsn:
+                    for idx, batch in enumerate(new_index):
+                        if batch and (batch[0].split("_")[0] if "_" in batch[0] else batch[0]) == current_jsn:
+                            d.historic_offset = idx
+                            break
+                    else:
+                        d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+                else:
+                    d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+            except Exception as exc:
+                print(f"Error refreshing historic index: {exc}")
+            finally:
+                self._historic_index_refresh_running = False
+
+        Thread(target=_worker, name="historic-index-refresh", daemon=True).start()
+
     def enter_historic_mode(self):
         d = self.display
         if self.historic_bootstrap_loading:
@@ -1029,12 +1159,17 @@ class MainController:
                 current_jsn = None
 
         try:
-            d.historic_images = self._load_historic_index(force_rescan=False)
+            # Use cached index immediately (never blocks); trigger async rescan if stale
+            cached = self._load_historic_index(force_rescan=False)
 
-            if not d.historic_images:
+            if not cached:
                 if not d.historic_mode:
                     self._show_no_images_dialog("No images available")
+                # Kick off a background rescan so next call has fresh data
+                self._refresh_historic_index_async()
                 return
+
+            d.historic_images = cached
 
             if not d.historic_mode:
                 d.historic_mode = True
@@ -1055,6 +1190,9 @@ class MainController:
                         d.historic_offset = min(fallback_offset, len(d.historic_images) - 1)
                 else:
                     d.historic_offset = min(fallback_offset, len(d.historic_images) - 1)
+
+            # Trigger async rescan so the index stays fresh without blocking
+            self._refresh_historic_index_async()
         except Exception as exc:
             print(f"Error entering historic: {exc}")
 
@@ -1503,7 +1641,12 @@ class MainController:
                 if self.file_manager.exists(local_file):
                     downloaded_files.append(local_file)
 
-            self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
+            # Only register when the batch changes, not every loop iteration
+            batch_key = (d.historic_offset, tuple(batch_images))
+            if getattr(self, '_last_registered_batch_key', None) != batch_key:
+                self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
+                self._last_registered_batch_key = batch_key
+
             return downloaded_files
 
         except Exception as exc:
@@ -1566,6 +1709,31 @@ class MainController:
 
         except Exception as exc:
             print(f"General error registering images in DB: {exc}")
+
+    def _backfill_piece_result(self, db_client=None):
+        """Populate piece_result for any img_results rows whose JSN is not yet in piece_result."""
+        db = db_client or self.display.db
+        if not db:
+            return
+        try:
+            rows = db.fetch(
+                """
+                SELECT img_name, result FROM img_results
+                WHERE SPLIT_PART(img_name, '_', 1) NOT IN (SELECT jsn FROM piece_result)
+                """
+            )
+            if not rows:
+                return
+            self.logger.info(f"[DB] Backfilling piece_result for {len(rows)} images", allow_repeat=True)
+            for row in rows:
+                img_name = row.get("img_name")
+                operator_result = str(row.get("result") or "OK").strip().upper()
+                if operator_result not in ("OK", "NOK"):
+                    operator_result = "OK"
+                if img_name:
+                    self._upsert_classification(img_name, operator_result, db_client=db)
+        except Exception as exc:
+            print(f"Error backfilling piece_result: {exc}")
 
     def _upsert_classification(self, img_name, operator_result, db_client=None):
         db = db_client or self.display.db
@@ -1779,6 +1947,12 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
+        # Ensure piece_result is up-to-date for the current dataset.
+        # This updates FOK/FNOK counts in the stats card based on DB state.
+        save_res = self.save_classification_results(db_client=db, historic_dir=historic_dir)
+        if not save_res.get("ok", False):
+            print(f"Warning: saving classification results failed: {save_res.get('error')}")
+
         return {
             "ok": True,
             "rows": total_rows,
@@ -1786,6 +1960,7 @@ class MainController:
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
+            "save_classification": save_res,
         }
 
     def save_classification_results(self, db_client=None, historic_dir=None, progress_callback=None):
@@ -2260,6 +2435,11 @@ class MainController:
                 if not self.historic_bootstrap_loading and not self.historic_bootstrap_complete:
                     self._register_historic_local_dir_on_startup()
 
+                # Periodic check for new historic images
+                if time.monotonic() - self.last_historic_check > 1.0:
+                    self._check_and_register_new_historic_images()
+                    self.last_historic_check = time.monotonic()
+
                 if self.display.remote_action_request:
                     action = self.display.remote_action_request
                     self.display.remote_action_request = None
@@ -2306,6 +2486,11 @@ class MainController:
                                     except Exception:
                                         pass
                             self._pending_remote_images = remote_images
+                            # Register new images in DB
+                            self._register_local_images_in_db(
+                                self.config.temp_dir,
+                                image_names=[self.file_manager.basename(p) for p in remote_images]
+                            )
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()
