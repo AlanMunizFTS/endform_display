@@ -20,7 +20,7 @@ def _safe_put_nowait(queue_obj, payload):
         pass
 
 
-def _remote_process_worker(hostname, port, username, password, command, pid_queue=None, stop_event=None, status_queue=None):
+def _remote_process_worker(hostname, port, username, password, command, pid_queue=None, stop_event=None, status_queue=None, stdin_queue=None):
     app = SFTPApp(hostname, port, username, password)
     if not app.connect_sftp():
         return
@@ -57,6 +57,13 @@ def _remote_process_worker(hostname, port, username, password, command, pid_queu
                         for line in error_lines[last_err_idx:]:
                             _safe_put_nowait(status_queue, {"type": "stderr", "line": line})
                         last_err_idx = len(error_lines)
+                if stdin_queue is not None and app.remote_process:
+                    while True:
+                        try:
+                            text = stdin_queue.get_nowait()
+                            app.remote_process.write_stdin(text)
+                        except Exception:
+                            break
                 time.sleep(0.2)
             except KeyboardInterrupt:
                 break
@@ -209,6 +216,15 @@ class RemoteProcess:
 
         self._running = False
 
+    def write_stdin(self, text):
+        """Write text to the remote process stdin."""
+        if self.stdin:
+            try:
+                self.stdin.write(text)
+                self.stdin.flush()
+            except Exception:
+                pass
+
     def get_output(self):
         """Return recent stdout lines."""
         return list(self.lines)
@@ -283,7 +299,7 @@ class SFTPApp:
         self.remote_process.start(command)
         return True
 
-    def start_remote_process_multiprocess(self, command, pid_queue=None, stop_event=None, status_queue=None):
+    def start_remote_process_multiprocess(self, command, pid_queue=None, stop_event=None, status_queue=None, stdin_queue=None):
         """Start the remote process in a separate local process.
 
         status_queue receives raw events:
@@ -292,7 +308,7 @@ class SFTPApp:
         from multiprocessing import Process
         proc = Process(
             target=_remote_process_worker,
-            args=(self.hostname, self.port, self.username, self.password, command, pid_queue, stop_event, status_queue)
+            args=(self.hostname, self.port, self.username, self.password, command, pid_queue, stop_event, status_queue, stdin_queue)
         )
         proc.daemon = True
         proc.start()

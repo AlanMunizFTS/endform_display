@@ -1985,6 +1985,10 @@ class DisplayWindow:
                     self._emit_action("search_append_digit", digit=chr(key))
                     return True
 
+            # Enter key sends "t\n" to remote process stdin when it's running
+            if key == 13 and not self.search_active and self.remote_requested:
+                self._emit_action("send_remote_input")
+
             # Historic navigation with keyboard arrows (left/right)
             if (
                 key_ex != -1
