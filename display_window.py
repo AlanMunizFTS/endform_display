@@ -12,12 +12,11 @@ from main_controller import check_historic_images as controller_check_historic_i
 from paths_config import REMOTE_HIST_DISPLAY_DIR
 
 class DisplayWindow:
-    CAMERA_ICON_PATH = "./resources/camara.png"
     TRASH_ICON_PATH = "./resources/trash.png"
     BACKGROUND_IMAGE_PATH = "./resources/base_screen.png"
     DEFAULT_TILE_SIZE = 360
     DEFAULT_TILE_PADDING = 96
-    DEFAULT_TOTAL_CAMERAS = 7
+
 
     def __init__(
         self,
@@ -108,11 +107,6 @@ class DisplayWindow:
         self.reset_stage = ""
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
-        self.connected_cameras = set()  # Unique connected cameras in normal view
-        self.total_cameras = self.DEFAULT_TOTAL_CAMERAS
-        self.camera_icon = None
-        self.camera_icon_size = None
-        self._camera_icon_warned = False
         self.trash_icon = None
         self.trash_icon_size = None
         self._trash_icon_warned = False
@@ -165,8 +159,6 @@ class DisplayWindow:
             self.remote_action_request = None
             self.remote_requested = False
             self.trigger_active = False
-            if hasattr(self, "connected_cameras"):
-                self.connected_cameras = set()
 
     def set_controller(self, controller):
         self.controller = controller
@@ -1032,36 +1024,6 @@ class DisplayWindow:
         
         return canvas
 
-    def _load_camera_icon(self, size):
-        if self.camera_icon is not None and self.camera_icon_size == size:
-            return
-        icon_path = self.CAMERA_ICON_PATH
-        if not self.file_manager.exists(icon_path):
-            self.camera_icon = None
-            self.camera_icon_size = size
-            return
-        icon = self.file_manager.read_image(icon_path, cv2.IMREAD_UNCHANGED)
-        if icon is None:
-            self.camera_icon = None
-            self.camera_icon_size = size
-            return
-        if icon.shape[2] < 4:
-            if not self._camera_icon_warned:
-                print("[ICON] camara.png has no alpha channel (not transparent).")
-                self._camera_icon_warned = True
-            icon = cv2.cvtColor(icon, cv2.COLOR_BGR2BGRA)
-            icon = self._apply_bg_key(icon)
-        else:
-            alpha = icon[:, :, 3]
-            if np.all(alpha == 255):
-                if not self._camera_icon_warned:
-                    print("[ICON] camara.png alpha channel is fully opaque.")
-                    self._camera_icon_warned = True
-                icon = self._apply_bg_key(icon)
-        icon = cv2.resize(icon, (size, size), interpolation=cv2.INTER_AREA)
-        self.camera_icon = icon
-        self.camera_icon_size = size
-
     def _load_trash_icon(self, size):
         if self.trash_icon is not None and self.trash_icon_size == size:
             return
@@ -1127,33 +1089,6 @@ class DisplayWindow:
                 )
         else:
             canvas[y:y + h, x:x + w] = icon[:, :, :3]
-
-    def draw_camera_status(self, canvas):
-        """Draw camera connection count with icon in the top section (normal mode)."""
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.3
-        thickness = 3
-        count = len(self.connected_cameras)
-        text = f"{count}/{self.total_cameras}"
-        color = (255, 255, 255)
-
-        icon_size = 40
-        self._load_camera_icon(icon_size)
-        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-
-        padding_right = 30 + self.right_info_shift - 20
-        gap = 8
-        total_width = icon_size + gap + text_size[0]
-        x_right = self.width - padding_right
-        x_icon = x_right - total_width
-        text_x = x_icon + icon_size + gap
-
-        text_y = 66
-        icon_y = text_y - icon_size + 10
-
-        self._overlay_icon(canvas, self.camera_icon, x_icon, icon_y)
-        cv2.putText(canvas, text, (text_x, text_y), font, font_scale, color, thickness)
-        return canvas
 
     def draw_sync_progress(self, canvas):
         """Draw modal loading screen with progress while syncing dataset."""
@@ -2312,7 +2247,6 @@ class DisplayWindow:
         if not self.historic_mode:
             if self.remote_controls_enabled:
                 canvas = self.draw_trigger_status(canvas)
-                canvas = self.draw_camera_status(canvas)
             canvas = self.draw_historic_button(canvas)
             if self.remote_controls_enabled:
                 canvas = self.draw_start_stop_button(canvas)

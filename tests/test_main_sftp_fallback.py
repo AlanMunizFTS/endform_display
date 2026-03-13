@@ -12,7 +12,6 @@ class TestMainSFTPFallback(unittest.TestCase):
         display.remote_action_request = None
         display.remote_requested = False
         display.trigger_active = False
-        display.connected_cameras = set()
         display.download_historic_batch.return_value = []
         display.file_manager = MagicMock()
         return display

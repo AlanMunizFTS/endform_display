@@ -26,7 +26,6 @@ class TestDisplayWindowSFTPState(unittest.TestCase):
         window.remote_requested = True
         window.remote_action_request = "start"
         window.trigger_active = True
-        window.connected_cameras = {"cam_1"}
         window.set_sftp_client(None)
 
         self.assertIsNone(window.sftp_client)
@@ -34,7 +33,6 @@ class TestDisplayWindowSFTPState(unittest.TestCase):
         self.assertFalse(window.remote_requested)
         self.assertIsNone(window.remote_action_request)
         self.assertFalse(window.trigger_active)
-        self.assertEqual(window.connected_cameras, set())
 
 
 if __name__ == "__main__":
