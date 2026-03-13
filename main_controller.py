@@ -697,6 +697,7 @@ class MainController:
                     base_dir=base_dir,
                     db_client=worker_db,
                     progress_callback=_verify_progress_cb,
+                    rows_snapshot=sync_result.get("rows_snapshot"),
                 )
 
                 self._set_sync_progress("Completed", 100)
@@ -1781,6 +1782,7 @@ class MainController:
         return {
             "ok": True,
             "rows": total_rows,
+            "rows_snapshot": rows,
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
@@ -1938,6 +1940,7 @@ class MainController:
         base_dir=None,
         db_client=None,
         progress_callback=None,
+        rows_snapshot=None,
     ):
         db = db_client or self.display.db
         historic_dir = historic_dir or self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
@@ -1953,7 +1956,7 @@ class MainController:
                 "issues": {"historic": [f"Historic folder not found: {historic_dir}"]},
             }
 
-        rows = db.fetch("SELECT img_name, result FROM img_results ORDER BY img_name")
+        rows = rows_snapshot if rows_snapshot is not None else db.fetch("SELECT img_name, result FROM img_results ORDER BY img_name")
         if not rows:
             return {
                 "verified": False,
@@ -1962,12 +1965,20 @@ class MainController:
             }
 
         image_extensions = {".png", ".jpg", ".jpeg", ".bmp"}
-        historic_images = sorted(
-            name
-            for name in self.file_manager.listdir(historic_dir)
-            if self.file_manager.is_file(self.file_manager.join(historic_dir, name))
-            and any(name.lower().endswith(ext) for ext in image_extensions)
-        )
+        if rows_snapshot is not None:
+            historic_images = sorted(
+                row.get("img_name") or row.get("name")
+                for row in rows_snapshot
+                if (row.get("img_name") or row.get("name"))
+                and any((row.get("img_name") or row.get("name", "")).lower().endswith(ext) for ext in image_extensions)
+            )
+        else:
+            historic_images = sorted(
+                name
+                for name in self.file_manager.listdir(historic_dir)
+                if self.file_manager.is_file(self.file_manager.join(historic_dir, name))
+                and any(name.lower().endswith(ext) for ext in image_extensions)
+            )
         if not historic_images:
             return {
                 "verified": False,
