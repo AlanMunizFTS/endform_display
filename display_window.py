@@ -257,39 +257,49 @@ class DisplayWindow:
         return "OK"
 
     def _draw_stats_card(self, canvas, x, y, size, ok_count, nok_count, fok_count, fnok_count):
-        """Draw a beige stats card (same size as one camera tile)."""
-        # Background (beige)
-        bg_color = (210, 180, 140)  # BGR
-        cv2.rectangle(canvas, (x, y), (x + size, y + size), bg_color, -1)
-        # Border
-        cv2.rectangle(canvas, (x, y), (x + size, y + size), (0, 0, 0), 2)
-
+        """Draw a stats card that fills the entire tile slot."""
         font = cv2.FONT_HERSHEY_SIMPLEX
-        title = "PIECE STATS"
-        title_scale = 0.7
-        title_thick = 2
-        title_size = cv2.getTextSize(title, font, title_scale, title_thick)[0]
-        title_x = x + (size - title_size[0]) // 2
-        title_y = y + 30
-        cv2.putText(canvas, title, (title_x, title_y), font, title_scale, (0, 0, 0), title_thick)
 
-        # Stats list
-        font_scale = 0.7
-        thickness = 2
-        line_height = 28
-        start_y = title_y + 25
+        # Background (dark charcoal) + border
+        cv2.rectangle(canvas, (x, y), (x + size, y + size), (45, 45, 45), -1)
+        cv2.rectangle(canvas, (x, y), (x + size, y + size), (20, 20, 20), 2)
+
+        # Title area: top 16% of tile
+        title = "PIECE STATS"
+        title_area_h = int(size * 0.16)
+        title_scale = size / 360 * 0.9
+        title_thick = 2
+        title_sz = cv2.getTextSize(title, font, title_scale, title_thick)[0]
+        title_x = x + (size - title_sz[0]) // 2
+        title_y = y + (title_area_h + title_sz[1]) // 2
+        cv2.putText(canvas, title, (title_x, title_y), font, title_scale, (220, 220, 220), title_thick)
+
+        # Divider below title
+        div_y = y + title_area_h + 2
+        cv2.line(canvas, (x + 6, div_y), (x + size - 6, div_y), (100, 100, 100), 1)
+
+        # Stat rows fill the remaining height
         stats = [
-            ("OK", ok_count),
-            ("NOK", nok_count),
-            ("FOK", fok_count),
-            ("FNOK", fnok_count),
+            ("OK",   ok_count,   (34,  100,  34)),   # dark forest green
+            ("NOK",  nok_count,  (25,   25, 160)),   # dark crimson
+            ("FOK",  fok_count,  (10,  110, 200)),   # dark amber
+            ("FNOK", fnok_count, (100,  30, 130)),   # dark purple
         ]
-        for idx, (label, value) in enumerate(stats):
-            text = f"{label}: {value}"
-            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-            text_x = x + 15
-            text_y = start_y + idx * line_height
-            cv2.putText(canvas, text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
+        remaining_h = size - title_area_h - 4
+        row_h = remaining_h // len(stats)
+        gap = 4
+        row_font_scale = size / 360 * 1.15
+        row_thick = 2
+
+        for idx, (label, value, color) in enumerate(stats):
+            ry = y + title_area_h + 4 + idx * row_h
+            # Colored row background
+            cv2.rectangle(canvas, (x + gap, ry), (x + size - gap, ry + row_h - gap), color, -1)
+            text = f"{label}:  {value}"
+            t_sz = cv2.getTextSize(text, font, row_font_scale, row_thick)[0]
+            tx = x + (size - t_sz[0]) // 2
+            ty = ry + (row_h - gap + t_sz[1]) // 2
+            cv2.putText(canvas, text, (tx, ty), font, row_font_scale, (255, 255, 255), row_thick)
 
     def create_white_display(self):
         """Create a white display"""
