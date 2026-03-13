@@ -2313,27 +2313,20 @@ class DisplayWindow:
                         cv2.putText(canvas, label_text, (text_x, text_y), font,
                                     font_scale, (255, 255, 255), thickness)
 
-        # Historic mode: draw stats card in the last slot
-        if self.historic_mode:
-            stats_slot = cols * rows - 1
-            stats_row = stats_slot // cols
-            stats_col = stats_slot % cols
-            stats_x = start_x + stats_col * (img_size + padding)
-            stats_y = start_y + stats_row * (img_size + padding)
+        # Draw stats card in the last slot (main display and historic)
+        stats_slot = cols * rows - 1
+        stats_row = stats_slot // cols
+        stats_col = stats_slot % cols
+        stats_x = start_x + stats_col * (img_size + padding)
+        stats_y = start_y + stats_row * (img_size + padding)
 
-            ok_count = 0
-            nok_count = 0
-            fok_count = 0
-            fnok_count = 0
+        db_counts = self._get_piece_result_counts()
+        ok_count = db_counts.get("OK", 0)
+        nok_count = db_counts.get("NOK", 0)
+        fok_count = db_counts.get("FOK", 0)
+        fnok_count = db_counts.get("FNOK", 0)
 
-            # Get overall counts from DB piece_result
-            db_counts = self._get_piece_result_counts()
-            ok_count = db_counts.get("OK", 0)
-            nok_count = db_counts.get("NOK", 0)
-            fok_count = db_counts.get("FOK", 0)
-            fnok_count = db_counts.get("FNOK", 0)
-
-            self._draw_stats_card(canvas, stats_x, stats_y, img_size, ok_count, nok_count, fok_count, fnok_count)
+        self._draw_stats_card(canvas, stats_x, stats_y, img_size, ok_count, nok_count, fok_count, fnok_count)
 
         # Normal mode: only HISTORIC button
         if not self.historic_mode:
