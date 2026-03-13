@@ -702,11 +702,10 @@ class MainController:
                 classification = classification or {}
                 folder_errors = classification.get("classification_folder_errors", [])
                 if verify_result.get("verified") and classification.get("ok") and not folder_errors:
-                    pieces = classification.get("pieces", 0)
                     images = classification.get("images", 0)
                     copied = classification.get("files_copied", 0)
                     d.sync_message = (
-                        f"Dataset saved: {pieces} pieces, {images} images, {copied} files"
+                        f"Dataset saved: {images} images, {copied} files copied"
                     )
                     d.sync_message_is_error = False
                 elif verify_result.get("verified") and classification.get("ok") and folder_errors:
@@ -731,10 +730,10 @@ class MainController:
                     )
                 else:
                     cls_error = classification.get("error", "unknown error")
-                    d.sync_message = f"Dataset saved but DB classification failed: {cls_error}"
+                    d.sync_message = f"Dataset saved but classification folder copy failed: {cls_error}"
                     d.sync_message_is_error = True
                     self.logger.warn(
-                        f"[SYNC] Classification DB save failed: {cls_error}",
+                        f"[SYNC] Classification folder copy failed: {cls_error}",
                         allow_repeat=True,
                     )
             except Exception as exc:
@@ -1552,6 +1551,7 @@ class MainController:
                 for img_name in images_to_insert:
                     try:
                         db.execute(query_insert, (img_name, "OK"))
+                        self._upsert_classification(img_name, "OK", db_client=db)
                     except Exception as exc:
                         print(f"Error inserting {img_name}: {exc}")
 
@@ -1562,12 +1562,76 @@ class MainController:
         except Exception as exc:
             print(f"General error registering images in DB: {exc}")
 
+    def _upsert_classification(self, img_name, operator_result, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return
+
+        m = re.search(r"_(OK|NOK)\.\w+$", img_name, re.IGNORECASE)
+        model_result = m.group(1).upper() if m else "OK"
+
+        jsn = img_name.split("_")[0] if "_" in img_name else img_name
+
+        try:
+            with db.get_cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO piece_result (jsn, operator_result, model_result) "
+                    "VALUES (%s, %s, %s) "
+                    "ON CONFLICT (jsn) DO UPDATE SET "
+                    "operator_result = CASE WHEN piece_result.operator_result = 'NOK' "
+                    "  OR EXCLUDED.operator_result = 'NOK' THEN 'NOK' ELSE 'OK' END, "
+                    "model_result = CASE WHEN piece_result.model_result = 'NOK' "
+                    "  OR EXCLUDED.model_result = 'NOK' THEN 'NOK' ELSE 'OK' END "
+                    "RETURNING id",
+                    (jsn, operator_result, model_result),
+                )
+                piece_id = cursor.fetchone()["id"]
+
+                cursor.execute(
+                    "INSERT INTO classified_images "
+                    "(img_name, operator_result, model_result, piece_id) "
+                    "VALUES (%s, %s, %s, %s) "
+                    "ON CONFLICT (img_name) DO UPDATE SET "
+                    "operator_result = EXCLUDED.operator_result, "
+                    "model_result = EXCLUDED.model_result, "
+                    "piece_id = EXCLUDED.piece_id",
+                    (img_name, operator_result, model_result, piece_id),
+                )
+        except Exception as exc:
+            print(f"Error upserting classification for {img_name}: {exc}")
+
+    def _recalculate_piece_result(self, jsn, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return
+        try:
+            db.execute(
+                "UPDATE piece_result SET "
+                "operator_result = COALESCE("
+                "  (SELECT 'NOK' FROM classified_images "
+                "   WHERE piece_id = piece_result.id AND operator_result = 'NOK' LIMIT 1), 'OK'), "
+                "model_result = COALESCE("
+                "  (SELECT 'NOK' FROM classified_images "
+                "   WHERE piece_id = piece_result.id AND model_result = 'NOK' LIMIT 1), 'OK') "
+                "WHERE jsn = %s",
+                (jsn,),
+            )
+        except Exception as exc:
+            print(f"Error recalculating piece_result for {jsn}: {exc}")
+
     def _update_result_in_db(self, img_name, new_value):
         d = self.display
         try:
             query_update = "UPDATE img_results SET result = %s WHERE img_name = %s"
             d.db.execute(query_update, (new_value, img_name))
             d._db_result_cache[img_name] = new_value
+
+            d.db.execute(
+                "UPDATE classified_images SET operator_result = %s WHERE img_name = %s",
+                (new_value, img_name),
+            )
+            jsn = img_name.split("_")[0] if "_" in img_name else img_name
+            self._recalculate_piece_result(jsn)
         except Exception as exc:
             print(f"Error updating result: {exc}")
 
@@ -1719,16 +1783,10 @@ class MainController:
         }
 
     def save_classification_results(self, db_client=None, historic_dir=None, progress_callback=None):
-        """Persist per-image and per-piece classification results.
+        """Copy images to final_classification folders (P/N/FP/FN per position).
 
-        For each image in img_results:
-          - operator_result  comes from the ``result`` column in img_results.
-          - model_result     comes from the _OK / _NOK suffix in the filename.
-
-        For each piece (unique JSN):
-          - operator_result = 'NOK' if any image has operator_result 'NOK', else 'OK'
-          - model_result    = 'NOK' if any image has model_result 'NOK', else 'OK'
-          - final_result    is auto-computed by the DB.
+        DB writes happen at data arrival time (_upsert_classification).
+        This method only handles folder copying based on current img_results state.
         """
         d = self.display
         db = db_client or d.db
@@ -1743,8 +1801,8 @@ class MainController:
         if not rows:
             return {"ok": False, "error": "No rows in img_results"}
 
-        # ---- build per-image data grouped by JSN ----
-        jsn_groups = defaultdict(list)
+        # ---- build per-image data ----
+        all_images = []
         for row in rows:
             img_name = row.get("img_name") or row.get("name")
             operator_result = row.get("result")
@@ -1755,76 +1813,17 @@ class MainController:
             if operator_result not in ("OK", "NOK"):
                 continue
 
-            # model_result from filename suffix (_OK or _NOK before extension)
             m = re.search(r"_(OK|NOK)\.\w+$", img_name, re.IGNORECASE)
             model_result = m.group(1).upper() if m else "OK"
 
-            jsn = img_name.split("_")[0] if "_" in img_name else img_name
-            jsn_groups[jsn].append({
+            all_images.append({
                 "img_name": img_name,
                 "operator_result": operator_result,
                 "model_result": model_result,
             })
 
-        if not jsn_groups:
-            return {"ok": False, "error": "No valid image groups found"}
-
-        piece_count = len(jsn_groups)
-        image_count = sum(len(v) for v in jsn_groups.values())
-
-        # ---- upsert into DB inside a single transaction ----
-        try:
-            with db.get_cursor() as cursor:
-                for jsn, images in jsn_groups.items():
-                    piece_operator = (
-                        "NOK" if any(i["operator_result"] == "NOK" for i in images)
-                        else "OK"
-                    )
-                    piece_model = (
-                        "NOK" if any(i["model_result"] == "NOK" for i in images)
-                        else "OK"
-                    )
-
-                    cursor.execute(
-                        "INSERT INTO piece_result (jsn, operator_result, model_result) "
-                        "VALUES (%s, %s, %s) "
-                        "ON CONFLICT (jsn) DO UPDATE SET "
-                        "operator_result = EXCLUDED.operator_result, "
-                        "model_result = EXCLUDED.model_result "
-                        "RETURNING id",
-                        (jsn, piece_operator, piece_model),
-                    )
-                    piece_id = cursor.fetchone()["id"]
-
-                    for img in images:
-                        cursor.execute(
-                            "INSERT INTO classified_images "
-                            "(img_name, operator_result, model_result, piece_id) "
-                            "VALUES (%s, %s, %s, %s) "
-                            "ON CONFLICT (img_name) DO UPDATE SET "
-                            "operator_result = EXCLUDED.operator_result, "
-                            "model_result = EXCLUDED.model_result, "
-                            "piece_id = EXCLUDED.piece_id",
-                            (img["img_name"], img["operator_result"],
-                             img["model_result"], piece_id),
-                        )
-
-            # ---- verify data was actually written ----
-            piece_db_count = db.fetch("SELECT COUNT(*) as n FROM piece_result")[0]["n"]
-            images_db_count = db.fetch("SELECT COUNT(*) as n FROM classified_images")[0]["n"]
-
-            if piece_db_count == 0 or images_db_count == 0:
-                return {
-                    "ok": False,
-                    "error": f"Verification failed: piece_result={piece_db_count}, classified_images={images_db_count}",
-                }
-
-            print(
-                f"save_classification_results: saved {piece_count} pieces, {image_count} images"
-            )
-
-        except Exception as exc:
-            return {"ok": False, "error": f"DB error: {exc}"}
+        if not all_images:
+            return {"ok": False, "error": "No valid images found"}
 
         # ---- copy images to final_classification folders ----
         historic_dir = historic_dir or self.file_manager.join(
@@ -1832,7 +1831,6 @@ class MainController:
         )
         base_dir = str(FINAL_CLASSIFICATION_DIR)
 
-        # Create all subfolders
         for position_dirs in FINAL_CLASSIFICATION_DIRS.values():
             for folder_name in position_dirs.values():
                 self.file_manager.makedirs(
@@ -1841,9 +1839,7 @@ class MainController:
 
         files_copied = 0
         copy_errors = []
-        expected_counts = defaultdict(int)  # folder_name -> expected count
-
-        all_images = [img for images in jsn_groups.values() for img in images]
+        expected_counts = defaultdict(int)
         total_images = len(all_images)
 
         if callable(progress_callback):
@@ -1854,7 +1850,6 @@ class MainController:
             op = img["operator_result"]
             mdl = img["model_result"]
 
-            # Determine classification tag
             if op == "OK" and mdl == "OK":
                 tag = "P"
             elif op == "NOK" and mdl == "NOK":
@@ -1868,7 +1863,6 @@ class MainController:
                     progress_callback(idx, total_images, "Classifying images")
                 continue
 
-            # Determine position from filename
             pos_match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
             if not pos_match:
                 if callable(progress_callback):
@@ -1882,7 +1876,7 @@ class MainController:
 
             expected_counts[folder_name] += 1
 
-            # Remove from wrong folders (status may have changed)
+            # Remove from wrong folders (idempotent: status may have changed)
             for other_tag, other_folder in FINAL_CLASSIFICATION_DIRS[position].items():
                 if other_tag == tag:
                     continue
@@ -1920,8 +1914,7 @@ class MainController:
 
         result = {
             "ok": True,
-            "pieces": piece_count,
-            "images": image_count,
+            "images": total_images,
             "files_copied": files_copied,
         }
 
