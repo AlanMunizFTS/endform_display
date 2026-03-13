@@ -316,6 +316,18 @@ def _download_live_images_remote_impl(
 
         app.ensure_remote_dir(remote_hist_dir)
 
+        # Clear existing images from local_path before downloading new batch
+        # so tmp_display never exceeds max_images files at any point
+        try:
+            for fname in app.file_manager.listdir(local_path):
+                if fname.lower().endswith(image_extensions):
+                    try:
+                        app.file_manager.remove(app.file_manager.join(local_path, fname))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         for img_name in selected_images:
             local_file = app.file_manager.join(local_path, img_name)
             remote_img_path = app.join_remote_path(remote_path, img_name)
