@@ -449,6 +449,7 @@ class MainController:
         self.stop_event = None
         self.pid_queue = None
         self.event_queue = None
+        self.stdin_queue = None
 
         self.live_rotation_state = {
             "current_offset": 0,
@@ -868,12 +869,14 @@ class MainController:
         self.stop_event = Event()
         self.pid_queue = Queue()
         self.event_queue = Queue()
+        self.stdin_queue = Queue()
         self.remote_pid = None
         self.remote_process = self.sftp_app.start_remote_process_multiprocess(
             self.config.remote_command,
             pid_queue=self.pid_queue,
             stop_event=self.stop_event,
             status_queue=self.event_queue,
+            stdin_queue=self.stdin_queue,
         )
         self.display.remote_requested = True
         self.display.trigger_active = False
@@ -907,6 +910,7 @@ class MainController:
         self.stop_event = None
         self.pid_queue = None
         self.event_queue = None
+        self.stdin_queue = None
         self.display.remote_requested = False
         self.display.trigger_active = False
 
@@ -2155,6 +2159,9 @@ class MainController:
             self.start_remote_process()
         elif action == "request_remote_stop":
             self.stop_remote_process("button")
+        elif action == "send_remote_input":
+            if self.stdin_queue is not None:
+                self.stdin_queue.put("t\n")
         elif action == "next_historic_batch":
             self.next_historic_batch()
         elif action == "prev_historic_batch":
