@@ -921,14 +921,6 @@ class MainController:
                         display=self.display,
                         logger=self.logger,
                     )
-                    if self.display.trigger_active:
-                        self.logger.info(
-                            "[REMOTE] Initialization complete, stopping remote process",
-                            allow_repeat=True,
-                        )
-                        self.stop_remote_process("initialized")
-                        self.display.trigger_active = True
-                        return
             except Exception:
                 pass
 
