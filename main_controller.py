@@ -468,6 +468,7 @@ class MainController:
         self.historic_bootstrap_thread = None
         self.sync_worker_thread = None
         self.reset_worker_thread = None
+        self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -570,6 +571,74 @@ class MainController:
             return False
 
     def _register_historic_local_dir_on_startup(self):
+        """Register all images in historic dir on startup if not already in img_results."""
+        if not self.db_connected:
+            return
+
+        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        if not self.file_manager.exists(historic_dir):
+            self.historic_bootstrap_complete = True
+            return
+
+        self.historic_bootstrap_loading = True
+        self.historic_bootstrap_thread = Thread(target=self._register_historic_local_dir_worker, daemon=True)
+        self.historic_bootstrap_thread.start()
+
+    def _register_historic_local_dir_worker(self):
+        """Worker thread for registering historic images on startup."""
+        try:
+            historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+            if not self.file_manager.exists(historic_dir):
+                return
+
+            local_images = [
+                f for f in self.file_manager.listdir(historic_dir)
+                if f.lower().endswith(self.config.image_extensions)
+            ]
+
+            if not local_images:
+                return
+
+            # Check existing in DB
+            existing_rows = self.display.db.fetch(
+                "SELECT img_name FROM img_results WHERE img_name = ANY(%s)",
+                (local_images,),
+            )
+            existing = {row["img_name"] for row in existing_rows} if existing_rows else set()
+
+            new_images = [img for img in local_images if img not in existing]
+            if new_images:
+                query = "INSERT INTO img_results (img_name, result) VALUES (%s, %s)"
+                for img in new_images:
+                    try:
+                        self.display.db.execute(query, (img, "OK"))
+                    except Exception as exc:
+                        self.logger.error(f"Error registering {img}: {exc}")
+
+        finally:
+            self.historic_bootstrap_loading = False
+            self.historic_bootstrap_complete = True
+
+    def _check_and_register_new_historic_images(self):
+        """Check for new images in historic dir and register them in DB, then update piece_result."""
+        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        if not self.file_manager.exists(historic_dir):
+            return
+
+        try:
+            current_mtime = self.file_manager.getmtime(historic_dir)
+        except Exception:
+            return
+
+        if not hasattr(self, 'last_historic_mtime'):
+            self.last_historic_mtime = current_mtime
+            return
+
+        if current_mtime > self.last_historic_mtime:
+            self._register_local_images_in_db(historic_dir)
+            # Update piece_result instantly
+            self.save_classification_results(historic_dir=historic_dir)
+            self.last_historic_mtime = current_mtime
         if self.historic_bootstrap_loading or self.historic_bootstrap_complete:
             return
         if not self.db_connected:
@@ -1778,12 +1847,19 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
+        # Ensure piece_result is up-to-date for the current dataset.
+        # This updates FOK/FNOK counts in the stats card based on DB state.
+        save_res = self.save_classification_results(db_client=db, historic_dir=historic_dir)
+        if not save_res.get("ok", False):
+            print(f"Warning: saving classification results failed: {save_res.get('error')}")
+
         return {
             "ok": True,
             "rows": total_rows,
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
+            "save_classification": save_res,
         }
 
     def save_classification_results(self, db_client=None, historic_dir=None, progress_callback=None):
@@ -2249,6 +2325,11 @@ class MainController:
                 if not self.historic_bootstrap_loading and not self.historic_bootstrap_complete:
                     self._register_historic_local_dir_on_startup()
 
+                # Periodic check for new historic images
+                if time.monotonic() - self.last_historic_check > 1.0:
+                    self._check_and_register_new_historic_images()
+                    self.last_historic_check = time.monotonic()
+
                 if self.display.remote_action_request:
                     action = self.display.remote_action_request
                     self.display.remote_action_request = None
@@ -2295,6 +2376,11 @@ class MainController:
                                     except Exception:
                                         pass
                             self._pending_remote_images = remote_images
+                            # Register new images in DB
+                            self._register_local_images_in_db(
+                                self.config.temp_dir,
+                                image_names=[self.file_manager.basename(p) for p in remote_images]
+                            )
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()
