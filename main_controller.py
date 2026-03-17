@@ -480,6 +480,7 @@ class MainController:
         self.historic_bootstrap_thread = None
         self.sync_worker_thread = None
         self.reset_worker_thread = None
+        self.rebuild_worker_thread = None
         self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
@@ -728,10 +729,14 @@ class MainController:
         d.sync_stage = str(stage)
         d.sync_progress = max(0, min(100, int(percent)))
 
-    def _set_reset_progress(self, stage, percent):
+    def _set_reset_progress(self, stage, percent, title=None, helper_text=None):
         d = self.display
         d.reset_stage = str(stage)
         d.reset_progress = max(0, min(100, int(percent)))
+        if title is not None:
+            d.reset_progress_title = str(title)
+        if helper_text is not None:
+            d.reset_progress_helper_text = str(helper_text)
 
     def start_sync_images_by_status_async(self, historic_dir=None, base_dir=None):
         d = self.display
@@ -869,6 +874,8 @@ class MainController:
         d.reset_in_progress = True
         d.reset_progress = 0
         d.reset_stage = "Preparing reset..."
+        d.reset_progress_title = "Resetting Dataset"
+        d.reset_progress_helper_text = "Please wait until reset finishes."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -887,7 +894,12 @@ class MainController:
                     else:
                         phase_percent = int((done / total) * 100)
                         stage_text = f"{stage} ({done}/{total})"
-                    self._set_reset_progress(stage_text, phase_percent)
+                    self._set_reset_progress(
+                        stage_text,
+                        phase_percent,
+                        title="Resetting Dataset",
+                        helper_text="Please wait until reset finishes.",
+                    )
 
                 result = self.perform_reset(
                     db_client=worker_db,
@@ -920,6 +932,73 @@ class MainController:
             daemon=True,
         )
         self.reset_worker_thread.start()
+
+    def start_rebuild_db_from_historic_async(self):
+        d = self.display
+        if getattr(d, "reset_in_progress", False) or getattr(d, "sync_in_progress", False):
+            return
+
+        d.reset_in_progress = True
+        d.reset_progress = 0
+        d.reset_stage = "Preparing rebuild..."
+        d.reset_progress_title = "Rebuilding Database"
+        d.reset_progress_helper_text = "Please wait until rebuild finishes."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _rebuild_worker():
+            worker_db = None
+            try:
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _rebuild_progress_cb(done, total, stage):
+                    if total <= 0:
+                        phase_percent = 0
+                        stage_text = stage
+                    else:
+                        phase_percent = int((done / total) * 100)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_reset_progress(
+                        stage_text,
+                        phase_percent,
+                        title="Rebuilding Database",
+                        helper_text="Please wait until rebuild finishes.",
+                    )
+
+                result = self.perform_rebuild_db_from_historic(
+                    db_client=worker_db,
+                    progress_callback=_rebuild_progress_cb,
+                )
+
+                if result.get("ok", False):
+                    d.sync_message = "Database rebuilt successfully"
+                    d.sync_message_is_error = False
+                else:
+                    error_text = result.get("error", "Database rebuild failed")
+                    d.sync_message = f"Database rebuild completed with issues: {error_text}"
+                    d.sync_message_is_error = True
+            except Exception as exc:
+                d.sync_message = f"Database rebuild failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(f"[REBUILD] Database rebuild failed: {exc}", allow_repeat=True)
+            finally:
+                d.reset_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.rebuild_worker_thread = Thread(
+            target=_rebuild_worker,
+            name="dataset-rebuild-worker",
+            daemon=True,
+        )
+        self.rebuild_worker_thread.start()
 
     def handle_disconnect(self, reason):
         self.logger.warn(f"[SSH] Disconnected ({reason}), switching to local fallback", allow_repeat=True)
@@ -1219,6 +1298,7 @@ class MainController:
         d.selected_suggestion_idx = -1
         d.show_reset_confirm = False
         d.show_delete_confirm = False
+        d.show_rebuild_confirm = False
         d.show_piece_date_dialog = False
 
     def next_historic_batch(self):
@@ -1396,6 +1476,161 @@ class MainController:
         print("PIECE DELETE COMPLETED")
         print("=" * 70 + "\n")
 
+    def _invalidate_dataset_runtime_state(self, clear_historic_images=False):
+        d = self.display
+        if clear_historic_images:
+            d.historic_images = []
+            d.historic_offset = 0
+        d.temp_results = {}
+        d.available_jsns = []
+        d.filtered_suggestions = []
+        d.historic_db_registered = False
+        d._db_registered_images.clear()
+        d._historic_index_cache = None
+        d._historic_index_mtime = None
+        d._historic_index_last_scan = 0.0
+        d._historic_jsn_cache = []
+        d._db_result_cache.clear()
+        d._image_cache.clear()
+
+    def _clear_final_classification_dir(self):
+        base_dir = str(FINAL_CLASSIFICATION_DIR)
+        self.file_manager.makedirs(base_dir, exist_ok=True)
+
+        removed_entries = 0
+        for entry_name in list(self.file_manager.listdir(base_dir)):
+            entry_path = self.file_manager.join(base_dir, entry_name)
+            if self.file_manager.is_dir(entry_path):
+                for child_name in list(self.file_manager.listdir(entry_path)):
+                    child_path = self.file_manager.join(entry_path, child_name)
+                    if self.file_manager.is_dir(child_path):
+                        self.file_manager.rmtree(child_path)
+                    else:
+                        self.file_manager.remove(child_path)
+                    removed_entries += 1
+            else:
+                self.file_manager.remove(entry_path)
+                removed_entries += 1
+
+        for position_dirs in FINAL_CLASSIFICATION_DIRS.values():
+            for folder_name in position_dirs.values():
+                self.file_manager.makedirs(
+                    self.file_manager.join(base_dir, folder_name),
+                    exist_ok=True,
+                )
+
+        return removed_entries
+
+    def perform_rebuild_db_from_historic(self, db_client=None, progress_callback=None):
+        d = self.display
+        db = db_client or d.db
+        print("\n" + "=" * 70)
+        print("STARTING DATABASE REBUILD FROM HISTORIC")
+        print("=" * 70)
+
+        historic_dir = str(HISTORIC_LOCAL_DIR)
+        errors = []
+        total_steps = 5
+        completed_steps = 0
+
+        def _advance(stage):
+            nonlocal completed_steps
+            completed_steps += 1
+            if callable(progress_callback):
+                progress_callback(completed_steps, total_steps, stage)
+
+        if callable(progress_callback):
+            progress_callback(0, total_steps, "Preparing rebuild")
+
+        if not db:
+            message = "No database connection available"
+            print(message)
+            return {"ok": False, "error": message}
+
+        if not self.file_manager.exists(historic_dir):
+            try:
+                self.file_manager.makedirs(historic_dir, exist_ok=True)
+                print(f"Historic directory not found; created empty folder: {historic_dir}")
+            except Exception as exc:
+                message = f"Unable to create historic directory: {exc}"
+                print(message)
+                return {"ok": False, "error": message}
+
+        try:
+            historic_images = sorted(
+                [
+                    name
+                    for name in self.file_manager.listdir(historic_dir)
+                    if name.lower().endswith(self.config.image_extensions)
+                ]
+            )
+        except Exception as exc:
+            message = f"Unable to scan historic directory: {exc}"
+            print(message)
+            return {"ok": False, "error": message}
+
+        _advance("Scanning historic images")
+
+        try:
+            truncated_tables = db.truncate_app_tables()
+            print(f"Truncated {truncated_tables} app tables")
+        except Exception as exc:
+            message = f"Error clearing database tables: {exc}"
+            print(message)
+            return {"ok": False, "error": message}
+        _advance("Clearing database tables")
+
+        try:
+            self._register_local_images_in_db(
+                historic_dir,
+                image_names=historic_images,
+                db_client=db,
+                track_registered=False,
+            )
+            self._backfill_piece_result(db_client=db)
+            count_rows = db.fetch("SELECT COUNT(*) AS cnt FROM img_results")
+            inserted_count = int(count_rows[0]["cnt"]) if count_rows else 0
+            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from historic")
+            if inserted_count != len(historic_images):
+                errors.append(
+                    f"Expected {len(historic_images)} img_results rows after rebuild, found {inserted_count}"
+                )
+            if not historic_images:
+                print("Historic directory is empty; database remains empty after rebuild")
+        except Exception as exc:
+            message = f"Error rebuilding database from historic: {exc}"
+            print(message)
+            return {"ok": False, "error": message}
+        _advance("Rebuilding database from historic")
+
+        try:
+            removed_entries = self._clear_final_classification_dir()
+            print(f"Cleared {removed_entries} entries from final_classification")
+        except Exception as exc:
+            errors.append(f"Error clearing final_classification: {exc}")
+            print(f"Error clearing final_classification: {exc}")
+        _advance("Clearing final classification")
+
+        self._invalidate_dataset_runtime_state(clear_historic_images=False)
+        if historic_images:
+            self.enter_historic_mode()
+        else:
+            self.exit_historic_mode()
+        _advance("Refreshing historic view")
+
+        print("=" * 70)
+        if errors:
+            print("DATABASE REBUILD COMPLETED WITH ISSUES")
+        else:
+            print("DATABASE REBUILD COMPLETED SUCCESSFULLY")
+        print("=" * 70 + "\n")
+
+        if callable(progress_callback):
+            progress_callback(total_steps, total_steps, "Completed")
+        if errors:
+            return {"ok": False, "error": errors[0], "errors": errors}
+        return {"ok": True}
+
     def perform_reset(self, db_client=None, progress_callback=None):
         d = self.display
         db = db_client or d.db
@@ -1507,18 +1742,7 @@ class MainController:
             print(message)
         _advance("Resetting database")
 
-        d.historic_images = []
-        d.historic_offset = 0
-        d.temp_results = {}
-        d.available_jsns = []
-        d.filtered_suggestions = []
-        d.historic_db_registered = False
-        d._db_registered_images.clear()
-        d._historic_index_cache = None
-        d._historic_index_mtime = None
-        d._historic_jsn_cache = []
-        d._db_result_cache.clear()
-        d._image_cache.clear()
+        self._invalidate_dataset_runtime_state(clear_historic_images=True)
         _advance("Finalizing reset")
 
         print("=" * 70)
@@ -2371,6 +2595,7 @@ class MainController:
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False
+            d.show_rebuild_confirm = False
         elif action == "cancel_reset_confirm":
             d.show_reset_confirm = False
         elif action == "confirm_reset":
@@ -2379,11 +2604,21 @@ class MainController:
         elif action == "open_delete_confirm":
             d.show_delete_confirm = True
             d.show_reset_confirm = False
+            d.show_rebuild_confirm = False
         elif action == "cancel_delete_confirm":
             d.show_delete_confirm = False
         elif action == "confirm_delete":
             d.show_delete_confirm = False
             self.perform_delete_current_piece()
+        elif action == "open_rebuild_db_confirm":
+            d.show_rebuild_confirm = True
+            d.show_reset_confirm = False
+            d.show_delete_confirm = False
+        elif action == "cancel_rebuild_db_confirm":
+            d.show_rebuild_confirm = False
+        elif action == "confirm_rebuild_db_from_historic":
+            d.show_rebuild_confirm = False
+            self.start_rebuild_db_from_historic_async()
         elif action == "sync_images_by_status":
             self.start_sync_images_by_status_async()
         elif action == "toggle_result":

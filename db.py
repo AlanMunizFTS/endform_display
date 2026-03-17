@@ -90,6 +90,24 @@ class PostgresDB:
         except Exception as e:
             logger.error(f"DB fetch error: {e}")
             raise
+
+    def truncate_app_tables(self):
+        """
+        Truncate only the tables managed by this application.
+
+        Returns:
+            Number of truncated tables
+        """
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute(
+                    "TRUNCATE TABLE piece_result, classified_images, img_results "
+                    "RESTART IDENTITY CASCADE"
+                )
+                return 3
+        except Exception as e:
+            logger.error(f"DB truncate_app_tables error: {e}")
+            raise
     
     def close(self):
         """Close all connections"""

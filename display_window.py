@@ -94,6 +94,9 @@ class DisplayWindow:
         self.show_delete_confirm = False  # Show delete-piece confirmation dialog
         self.delete_confirm_button_rect = None  # Confirm delete button rect
         self.delete_cancel_button_rect = None  # Cancel delete button rect
+        self.show_rebuild_confirm = False  # Show rebuild confirmation dialog
+        self.rebuild_confirm_button_rect = None  # Confirm rebuild button rect
+        self.rebuild_cancel_button_rect = None  # Cancel rebuild button rect
         self.show_no_images_dialog = False  # Show no images available dialog
         self.no_images_dialog_message = "No images available"
         self.no_images_ok_button_rect = None  # OK button rect for no images dialog
@@ -106,6 +109,8 @@ class DisplayWindow:
         self.reset_in_progress = False
         self.reset_progress = 0
         self.reset_stage = ""
+        self.reset_progress_title = "Resetting Dataset"
+        self.reset_progress_helper_text = "Please wait until reset finishes."
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
         self.trash_icon = None
@@ -119,6 +124,11 @@ class DisplayWindow:
         self.mouse_x = 0  # Current mouse X position
         self.mouse_y = 0  # Current mouse Y position
         self.mouse_button_down = False  # Track if left mouse button is down
+        self.stats_card_rect = None
+        self.stats_long_press_duration_sec = 5.0
+        self._stats_long_press_active = False
+        self._stats_long_press_started_at = 0.0
+        self._stats_long_press_fired = False
         self.historic_auto_refresh_interval = 2.0
         self._last_historic_auto_refresh = 0.0
         self._background_cache = None
@@ -325,12 +335,66 @@ class DisplayWindow:
         new_y = int(center_y - new_h / 2)
         return (new_x, new_y, new_w, new_h)
 
+    def _can_track_stats_long_press(self):
+        return (
+            self.stats_card_rect is not None
+            and not self.db_blocking
+            and not self.sync_in_progress
+            and not self.reset_in_progress
+            and not self.show_no_images_dialog
+            and not self.show_piece_date_dialog
+            and not self.show_reset_confirm
+            and not self.show_delete_confirm
+            and not self.show_rebuild_confirm
+        )
+
+    def _cancel_stats_long_press(self):
+        self._stats_long_press_active = False
+        self._stats_long_press_started_at = 0.0
+        self._stats_long_press_fired = False
+
+    def _start_stats_long_press(self):
+        self._stats_long_press_active = True
+        self._stats_long_press_started_at = time.monotonic()
+        self._stats_long_press_fired = False
+
+    def _check_stats_long_press(self):
+        if not self._stats_long_press_active:
+            return False
+        if (
+            not self._can_track_stats_long_press()
+            or not self.mouse_button_down
+            or not self._is_point_in_rect(self.mouse_x, self.mouse_y, self.stats_card_rect)
+        ):
+            self._cancel_stats_long_press()
+            return False
+        if self._stats_long_press_fired:
+            return False
+        if (time.monotonic() - self._stats_long_press_started_at) < self.stats_long_press_duration_sec:
+            return False
+
+        self._stats_long_press_fired = True
+        self._stats_long_press_active = False
+        self._emit_action("open_rebuild_db_confirm")
+        return True
+
     def mouse_callback(self, event, x, y, flags, _param):
         """Callback to handle mouse events"""
         # Track mouse position and button state
         self.mouse_x = x
         self.mouse_y = y
         self.mouse_button_down = (flags & cv2.EVENT_FLAG_LBUTTON) != 0
+
+        if event == cv2.EVENT_LBUTTONUP:
+            self._cancel_stats_long_press()
+            return
+
+        if self._stats_long_press_active and (
+            not self.mouse_button_down
+            or not self._is_point_in_rect(x, y, self.stats_card_rect)
+            or not self._can_track_stats_long_press()
+        ):
+            self._cancel_stats_long_press()
         
         if event == cv2.EVENT_LBUTTONDOWN:
             if self.db_blocking:
@@ -387,8 +451,28 @@ class DisplayWindow:
                 # If dialog is shown, don't process other clicks
                 return
 
+            # Rebuild confirmation buttons (high priority)
+            if self.show_rebuild_confirm:
+                if self.rebuild_confirm_button_rect:
+                    bx, by, bw, bh = self.rebuild_confirm_button_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("confirm_rebuild_db_from_historic")
+                        return
+
+                if self.rebuild_cancel_button_rect:
+                    bx, by, bw, bh = self.rebuild_cancel_button_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("cancel_rebuild_db_confirm")
+                        return
+
+                return
+
             # Block UI interactions while long-running operations are active.
             if self.sync_in_progress or self.reset_in_progress:
+                return
+
+            if self._can_track_stats_long_press() and self._is_point_in_rect(x, y, self.stats_card_rect):
+                self._start_stats_long_press()
                 return
             
             # HISTORIC button - only to activate historic mode
@@ -1261,7 +1345,12 @@ class DisplayWindow:
 
     def draw_sync_message(self, canvas):
         """Draw completion/error message after syncing dataset."""
-        if not self.sync_message or self.show_reset_confirm or self.show_delete_confirm:
+        if (
+            not self.sync_message
+            or self.show_reset_confirm
+            or self.show_delete_confirm
+            or self.show_rebuild_confirm
+        ):
             return canvas
 
         if time.time() - self.sync_message_time > 3:
@@ -1368,7 +1457,7 @@ class DisplayWindow:
         )
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        title = "Resetting Dataset"
+        title = self.reset_progress_title or "Resetting Dataset"
         title_scale = 1.1
         title_thickness = 3
         cv2.putText(
@@ -1418,7 +1507,7 @@ class DisplayWindow:
         pct_y = bar_y + bar_h - 8
         cv2.putText(canvas, pct_text, (pct_x, pct_y), font, 0.9, (255, 255, 255), 2)
 
-        helper_text = "Please wait until reset finishes."
+        helper_text = self.reset_progress_helper_text or "Please wait until the process finishes."
         cv2.putText(
             canvas,
             helper_text,
@@ -1612,6 +1701,132 @@ class DisplayWindow:
         text_y = buttons_y_draw_c + (button_height_draw_c + text_size[1]) // 2
         cv2.putText(canvas, confirm_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
         
+        return canvas
+
+    def draw_rebuild_confirmation_dialog(self, canvas):
+        """Draw rebuild-from-historic confirmation dialog."""
+        dialog_width = 860
+        dialog_height = 320
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (240, 240, 240),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        icon_x = dialog_x + 55
+        icon_y = dialog_y + 80
+        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 2.0, (255, 255, 255), 4)
+
+        text_x = dialog_x + 130
+        text_y = dialog_y + 62
+        font_scale = 0.82
+        thickness = 2
+
+        warning_lines = [
+            "Rebuild the app database from historic images?",
+            "This clears img_results, classified_images,",
+            "and piece_result before rebuilding from HISTORIC_LOCAL_DIR.",
+            "FINAL_CLASSIFICATION_DIR will also be emptied.",
+            "Historic images will be preserved.",
+        ]
+
+        for idx, line in enumerate(warning_lines):
+            cv2.putText(
+                canvas,
+                line,
+                (text_x, text_y + (idx * 38)),
+                font,
+                font_scale,
+                (0, 0, 0),
+                thickness,
+            )
+
+        button_width = 170
+        button_height = 52
+        button_spacing = 30
+        buttons_y = dialog_y + dialog_height - button_height - 30
+
+        cancel_x = dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2)
+        self.rebuild_cancel_button_rect = (cancel_x, buttons_y, button_width, button_height)
+
+        is_cancel_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.rebuild_cancel_button_rect)
+        is_cancel_pressed = is_cancel_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_cancel_pressed else (1.08 if is_cancel_hovered else 1.0)
+        scaled_rect = self._scale_rect(self.rebuild_cancel_button_rect, scale_factor)
+        cancel_x_draw, buttons_y_draw, button_width_draw, button_height_draw = scaled_rect
+
+        cv2.rectangle(
+            canvas,
+            (cancel_x_draw, buttons_y_draw),
+            (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
+            (150, 150, 150),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (cancel_x_draw, buttons_y_draw),
+            (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
+            (0, 0, 0),
+            2,
+        )
+
+        cancel_text = "CANCEL"
+        font_scale_buttons = 0.7
+        text_size = cv2.getTextSize(cancel_text, font, font_scale_buttons, 2)[0]
+        text_x = cancel_x_draw + (button_width_draw - text_size[0]) // 2
+        text_y = buttons_y_draw + (button_height_draw + text_size[1]) // 2
+        cv2.putText(canvas, cancel_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
+
+        confirm_x = dialog_x + (dialog_width // 2) + (button_spacing // 2)
+        self.rebuild_confirm_button_rect = (confirm_x, buttons_y, button_width, button_height)
+
+        is_confirm_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.rebuild_confirm_button_rect)
+        is_confirm_pressed = is_confirm_hovered and self.mouse_button_down
+        scale_factor_confirm = 0.95 if is_confirm_pressed else (1.08 if is_confirm_hovered else 1.0)
+        scaled_rect_confirm = self._scale_rect(self.rebuild_confirm_button_rect, scale_factor_confirm)
+        confirm_x_draw, buttons_y_draw_c, button_width_draw_c, button_height_draw_c = scaled_rect_confirm
+
+        cv2.rectangle(
+            canvas,
+            (confirm_x_draw, buttons_y_draw_c),
+            (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
+            (0, 0, 200),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (confirm_x_draw, buttons_y_draw_c),
+            (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
+            (0, 0, 0),
+            2,
+        )
+
+        confirm_text = "REBUILD"
+        text_size = cv2.getTextSize(confirm_text, font, font_scale_buttons, 2)[0]
+        text_x = confirm_x_draw + (button_width_draw_c - text_size[0]) // 2
+        text_y = buttons_y_draw_c + (button_height_draw_c + text_size[1]) // 2
+        cv2.putText(canvas, confirm_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
+
         return canvas
 
     def draw_delete_confirmation_dialog(self, canvas):
@@ -2030,6 +2245,9 @@ class DisplayWindow:
                 key_ex = cv2.waitKey(100)
             key = (key_ex & 0xFF) if key_ex != -1 else -1
 
+            if self._check_stats_long_press():
+                return True
+
             if self.db_blocking:
                 if time.time() - self.last_refresh_time >= self.refresh_interval:
                     return True
@@ -2329,6 +2547,7 @@ class DisplayWindow:
         stats_col = stats_slot % cols
         stats_x = start_x + stats_col * (img_size + padding)
         stats_y = start_y + stats_row * (img_size + padding)
+        self.stats_card_rect = (stats_x, stats_y, img_size, img_size)
 
         db_counts = self._get_piece_result_counts()
         ok_count = db_counts.get("OK", 0)
@@ -2410,6 +2629,9 @@ class DisplayWindow:
                 canvas = self.draw_reset_confirmation_dialog(canvas)
             elif self.show_delete_confirm:
                 canvas = self.draw_delete_confirmation_dialog(canvas)
+
+        if self.show_rebuild_confirm:
+            canvas = self.draw_rebuild_confirmation_dialog(canvas)
 
         if self.show_no_images_dialog:
             canvas = self.draw_no_images_dialog(canvas)
