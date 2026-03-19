@@ -33,7 +33,7 @@ MODELS_FOLDER   = "./models"
 # Config — adjust these as needed
 # ---------------------------------------------------------------------------
 CONFIDENCE_THR        = 0.33
-PIECE_DISPLAY_DURATION = 4.0   # seconds each JSN group stays visible in normal view
+PIECE_DISPLAY_DURATION = 1.0   # seconds each JSN group stays visible in normal view
 POLL_INTERVAL         = 0.5   # seconds between scans when no new images are found
 IMAGE_EXTENSIONS      = {".jpg", ".jpeg", ".png", ".bmp"}
 POSITIONS             = ["side", "front", "diag"]
@@ -75,6 +75,20 @@ def get_position(filename):
         if pos in lower:
             return pos
     return None
+
+
+def strip_trailing_status(filename):
+    """
+    Remove a trailing _ok or _nok from the basename, case-insensitively.
+    If no trailing status is present, return the original filename.
+    """
+    basename, ext = os.path.splitext(filename)
+    lower_basename = basename.lower()
+    if lower_basename.endswith("_nok"):
+        basename = basename[:-4]
+    elif lower_basename.endswith("_ok"):
+        basename = basename[:-3]
+    return f"{basename}{ext}"
 
 
 def get_jsn(filename):
@@ -181,10 +195,11 @@ def main():
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in IMAGE_EXTENSIONS:
                     continue
-                basename = os.path.splitext(filename)[0]
+                normalized_filename = strip_trailing_status(filename)
+                basename = os.path.splitext(normalized_filename)[0]
                 if already_processed(basename, processed_set):
                     continue
-                jsn_groups[get_jsn(filename)].append(filename)
+                jsn_groups[get_jsn(normalized_filename)].append(filename)
 
             if not jsn_groups:
                 time.sleep(POLL_INTERVAL)
@@ -201,7 +216,8 @@ def main():
 
                 for filename in files:
                     ext = os.path.splitext(filename)[1].lower()
-                    basename = os.path.splitext(filename)[0]
+                    normalized_filename = strip_trailing_status(filename)
+                    basename = os.path.splitext(normalized_filename)[0]
 
                     position = get_position(filename)
                     models_list = models.get(position, [])
