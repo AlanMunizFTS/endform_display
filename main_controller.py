@@ -1639,125 +1639,220 @@ class MainController:
         print("=" * 70)
 
         local_historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        local_annotated_dir = self.file_manager.join(
+            self.config.temp_dir, ANNOTATED_SUBDIR_NAME
+        )
         errors = []
+        result = None
 
-        local_entries = []
-        if self.file_manager.exists(local_historic_dir):
-            try:
-                local_entries = list(self.file_manager.listdir(local_historic_dir))
-            except Exception as exc:
-                errors.append(f"Unable to scan local historic folder: {exc}")
-                print(f"Error scanning local historic folder: {exc}")
-                local_entries = []
+        local_targets = [
+            ("historic", local_historic_dir),
+            ("annotated", local_annotated_dir),
+        ]
+        remote_targets = [
+            ("historic", self.config.remote_hist_dir),
+            ("annotated", self.config.remote_annotated_dir),
+        ]
 
-        remote_files = []
-        if d.sftp_client:
-            try:
-                self.file_manager.sftp_chdir(d.sftp_client, self.config.remote_hist_dir)
-                remote_files = list(self.file_manager.sftp_listdir(d.sftp_client))
-            except Exception as exc:
-                errors.append(f"Unable to access remote folder: {exc}")
-                print(f"Error accessing remote folder: {exc}")
-                remote_files = []
+        self.stop_historic_download_worker()
 
-        local_steps = max(1, len(local_entries))
-        remote_steps = max(1, len(remote_files))
-        db_steps = 1
-        final_steps = 1
-        total_steps = local_steps + remote_steps + db_steps + final_steps
-        completed_steps = 0
+        try:
+            def _scan_local_entries(folder_label, folder_path):
+                if not self.file_manager.exists(folder_path):
+                    return []
+                try:
+                    return list(self.file_manager.listdir(folder_path))
+                except Exception as exc:
+                    errors.append(
+                        f"Unable to scan local {folder_label} folder: {exc}"
+                    )
+                    print(f"Error scanning local {folder_label} folder: {exc}")
+                    return []
 
-        def _advance(stage):
-            nonlocal completed_steps
-            completed_steps += 1
+            def _scan_remote_entries(folder_label, remote_dir):
+                if not d.sftp_client:
+                    return []
+                try:
+                    self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
+                    return list(self.file_manager.sftp_listdir(d.sftp_client))
+                except FileNotFoundError:
+                    return []
+                except Exception as exc:
+                    errors.append(
+                        f"Unable to access remote {folder_label} folder: {exc}"
+                    )
+                    print(f"Error accessing remote {folder_label} folder: {exc}")
+                    return []
+
+            local_entries_by_label = {
+                folder_label: _scan_local_entries(folder_label, folder_path)
+                for folder_label, folder_path in local_targets
+            }
+            remote_entries_by_label = {
+                folder_label: _scan_remote_entries(folder_label, remote_dir)
+                for folder_label, remote_dir in remote_targets
+            }
+
+            local_steps = sum(
+                max(1, len(local_entries_by_label[folder_label]))
+                for folder_label, _ in local_targets
+            )
+            remote_steps = (
+                sum(
+                    max(1, len(remote_entries_by_label[folder_label]))
+                    for folder_label, _ in remote_targets
+                )
+                if d.sftp_client
+                else 1
+            )
+            db_steps = 1
+            final_steps = 1
+            total_steps = local_steps + remote_steps + db_steps + final_steps
+            completed_steps = 0
+
+            def _advance(stage):
+                nonlocal completed_steps
+                completed_steps += 1
+                if callable(progress_callback):
+                    progress_callback(completed_steps, total_steps, stage)
+
+            def _clear_local_folder(folder_label, folder_path, entry_names):
+                if self.file_manager.exists(folder_path):
+                    if entry_names:
+                        for idx, entry_name in enumerate(entry_names, start=1):
+                            entry_path = self.file_manager.join(folder_path, entry_name)
+                            try:
+                                if self.file_manager.is_dir(entry_path):
+                                    self.file_manager.rmtree(entry_path)
+                                else:
+                                    self.file_manager.remove(entry_path)
+                            except Exception as exc:
+                                errors.append(
+                                    f"Error removing local {folder_label} entry "
+                                    f"'{entry_name}': {exc}"
+                                )
+                                print(
+                                    f"Error removing local {folder_label} entry "
+                                    f"{entry_name}: {exc}"
+                                )
+                            _advance(
+                                f"Clearing local {folder_label} folder "
+                                f"({idx}/{len(entry_names)})"
+                            )
+                        print(f"Local {folder_label} folder cleared")
+                    else:
+                        print(f"Local {folder_label} folder is already empty")
+                        _advance(f"Local {folder_label} folder is already empty")
+                else:
+                    print(f"Local {folder_label} folder did not exist")
+                    _advance(f"Preparing local {folder_label} folder")
+
+                try:
+                    self.file_manager.makedirs(folder_path, exist_ok=True)
+                except Exception as exc:
+                    errors.append(
+                        f"Error recreating local {folder_label} folder: {exc}"
+                    )
+                    print(f"Error recreating local {folder_label} folder: {exc}")
+
+            def _clear_remote_folder(folder_label, remote_dir, entry_names):
+                if entry_names:
+                    print(
+                        f"Deleting {len(entry_names)} files from remote "
+                        f"{folder_label} folder..."
+                    )
+                    deleted_count = 0
+                    for idx, remote_file in enumerate(entry_names, start=1):
+                        try:
+                            file_path = f"{remote_dir}/{remote_file}"
+                            self.file_manager.sftp_remove(d.sftp_client, file_path)
+                            deleted_count += 1
+                        except Exception as exc:
+                            errors.append(
+                                f"Error deleting remote {folder_label} file "
+                                f"'{remote_file}': {exc}"
+                            )
+                            print(
+                                f"Error deleting remote {folder_label} file "
+                                f"{remote_file}: {exc}"
+                            )
+                        _advance(
+                            f"Clearing remote {folder_label} folder "
+                            f"({idx}/{len(entry_names)})"
+                        )
+                    print(
+                        f"Deleted {deleted_count}/{len(entry_names)} files from "
+                        f"remote {folder_label} folder"
+                    )
+                else:
+                    print(f"Remote {folder_label} folder is already empty")
+                    _advance(f"Remote {folder_label} folder is already empty")
+
             if callable(progress_callback):
-                progress_callback(completed_steps, total_steps, stage)
+                progress_callback(0, total_steps, "Preparing reset")
 
-        if callable(progress_callback):
-            progress_callback(0, total_steps, "Preparing reset")
+            for folder_label, folder_path in local_targets:
+                _clear_local_folder(
+                    folder_label,
+                    folder_path,
+                    local_entries_by_label[folder_label],
+                )
 
-        if self.file_manager.exists(local_historic_dir):
-            if local_entries:
-                for idx, entry_name in enumerate(local_entries, start=1):
-                    entry_path = self.file_manager.join(local_historic_dir, entry_name)
-                    try:
-                        if self.file_manager.is_dir(entry_path):
-                            self.file_manager.rmtree(entry_path)
-                        else:
-                            self.file_manager.remove(entry_path)
-                    except Exception as exc:
-                        errors.append(f"Error removing local file '{entry_name}': {exc}")
-                        print(f"Error removing local entry {entry_name}: {exc}")
-                    _advance(f"Clearing local historic folder ({idx}/{len(local_entries)})")
-                print("Local historic folder cleared")
+            if d.sftp_client:
+                for folder_label, remote_dir in remote_targets:
+                    _clear_remote_folder(
+                        folder_label,
+                        remote_dir,
+                        remote_entries_by_label[folder_label],
+                    )
             else:
-                print("Local historic folder is already empty")
-                _advance("Local historic folder is already empty")
-            try:
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-            except Exception as exc:
-                errors.append(f"Error recreating local historic folder: {exc}")
-                print(f"Error recreating local historic folder: {exc}")
-        else:
-            try:
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-                print("Local historic folder did not exist and was created")
-            except Exception as exc:
-                errors.append(f"Error creating local historic folder: {exc}")
-                print(f"Error creating local historic folder: {exc}")
-            _advance("Preparing local historic folder")
+                print("No SFTP connection available")
+                _advance("Remote reset skipped (no SFTP connection)")
 
-        if d.sftp_client:
-            if remote_files:
-                print(f"Deleting {len(remote_files)} files from remote server...")
-                deleted_count = 0
-                for idx, remote_file in enumerate(remote_files, start=1):
-                    try:
-                        file_path = f"{self.config.remote_hist_dir}/{remote_file}"
-                        self.file_manager.sftp_remove(d.sftp_client, file_path)
-                        deleted_count += 1
-                    except Exception as exc:
-                        errors.append(f"Error deleting remote file '{remote_file}': {exc}")
-                        print(f"Error deleting {remote_file}: {exc}")
-                    _advance(f"Clearing remote historic folder ({idx}/{len(remote_files)})")
-                print(f"Deleted {deleted_count}/{len(remote_files)} remote files")
+            if db:
+                try:
+                    query_delete = "DELETE FROM img_results"
+                    affected_rows = db.execute(query_delete)
+                    print(f"Deleted {affected_rows} records from database")
+                except Exception as exc:
+                    errors.append(f"Error clearing database: {exc}")
+                    print(f"Error clearing database: {exc}")
             else:
-                print("Remote folder is already empty")
-                _advance("Remote historic folder is already empty")
-        else:
-            print("No SFTP connection available")
-            _advance("Remote reset skipped (no SFTP connection)")
+                message = "No database connection available"
+                errors.append(message)
+                print(message)
+            _advance("Resetting database")
 
-        if db:
+            self._invalidate_dataset_runtime_state(clear_historic_images=True)
+            _advance("Finalizing reset")
+
+            print("=" * 70)
+            if errors:
+                print("RESET COMPLETED WITH ISSUES")
+            else:
+                print("RESET COMPLETED SUCCESSFULLY")
+            print("=" * 70 + "\n")
+
+            self.exit_historic_mode()
+            if callable(progress_callback):
+                progress_callback(total_steps, total_steps, "Completed")
+            if errors:
+                result = {"ok": False, "error": errors[0], "errors": errors}
+            else:
+                result = {"ok": True}
+        finally:
             try:
-                query_delete = "DELETE FROM img_results"
-                affected_rows = db.execute(query_delete)
-                print(f"Deleted {affected_rows} records from database")
+                self.start_historic_download_on_startup(
+                    self.config.temp_dir,
+                    check_interval=self.config.historic_download_check_interval,
+                )
             except Exception as exc:
-                errors.append(f"Error clearing database: {exc}")
-                print(f"Error clearing database: {exc}")
-        else:
-            message = "No database connection available"
-            errors.append(message)
-            print(message)
-        _advance("Resetting database")
+                errors.append(f"Error restarting historic download workers: {exc}")
+                print(f"Error restarting historic download workers: {exc}")
+                if result is None or result.get("ok"):
+                    result = {"ok": False, "error": errors[0], "errors": errors}
 
-        self._invalidate_dataset_runtime_state(clear_historic_images=True)
-        _advance("Finalizing reset")
-
-        print("=" * 70)
-        if errors:
-            print("RESET COMPLETED WITH ISSUES")
-        else:
-            print("RESET COMPLETED SUCCESSFULLY")
-        print("=" * 70 + "\n")
-
-        self.exit_historic_mode()
-        if callable(progress_callback):
-            progress_callback(total_steps, total_steps, "Completed")
-        if errors:
-            return {"ok": False, "error": errors[0], "errors": errors}
-        return {"ok": True}
+        return result
 
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         d = self.display
