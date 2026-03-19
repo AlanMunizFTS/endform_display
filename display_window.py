@@ -1747,6 +1747,7 @@ class DisplayWindow:
             "This clears img_results, classified_images,",
             "and piece_result before rebuilding from HISTORIC_LOCAL_DIR.",
             "FINAL_CLASSIFICATION_DIR will also be emptied.",
+            "SYNC_IMAGES_BASE_DIR will keep only empty folders.",
             "Historic images will be preserved.",
         ]
 
