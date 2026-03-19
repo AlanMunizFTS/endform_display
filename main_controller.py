@@ -295,7 +295,7 @@ def _download_live_images_remote_impl(
         images = [f for f in files if f.lower().endswith(image_extensions)]
         images.sort(reverse=True)
 
-        if len(images) < max_images:
+        if not images:
             return []
 
         total_batches = (len(images) + max_images - 1) // max_images
@@ -2755,7 +2755,7 @@ class MainController:
                     images = []
 
                     if self._pending_remote_images:
-                        # Don't download again — wait until all 7 are confirmed on disk
+                        # Don't download again until the current remote batch is confirmed on disk
                         if all(self.file_manager.exists(p) for p in self._pending_remote_images):
                             images = self._pending_remote_images
                             self._pending_remote_images = None
@@ -2767,7 +2767,7 @@ class MainController:
                             self.stop_remote_process("sftp-disconnect")
                             self.handle_disconnect("live-download-failure")
                         elif remote_images:
-                            # Delete old files immediately so tmp_display never exceeds 7
+                            # Delete old files immediately so tmp_display never exceeds max_images
                             new_images_set = set(remote_images)
                             for prev_path in self.display.image_paths:
                                 if prev_path not in new_images_set:
