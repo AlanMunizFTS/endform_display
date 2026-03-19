@@ -1310,9 +1310,8 @@ class MainController:
         d = self.display
         if not d.historic_images:
             return
-        if d.historic_offset == 0:
-            return
-        d.historic_offset = d.historic_offset - 1
+        total_batches = len(d.historic_images)
+        d.historic_offset = (d.historic_offset - 1) % total_batches
 
     def collect_available_jsns(self):
         d = self.display
@@ -1519,6 +1518,44 @@ class MainController:
 
         return removed_entries
 
+    def _clear_sync_images_base_dir(self):
+        base_dir = str(SYNC_IMAGES_BASE_DIR)
+        self.file_manager.makedirs(base_dir, exist_ok=True)
+
+        expected_folders = {
+            folder_name
+            for position_dirs in STATUS_SYNC_DIRS.values()
+            for folder_name in position_dirs.values()
+        }
+
+        removed_entries = 0
+        for entry_name in list(self.file_manager.listdir(base_dir)):
+            entry_path = self.file_manager.join(base_dir, entry_name)
+            if self.file_manager.is_dir(entry_path):
+                if entry_name not in expected_folders:
+                    self.file_manager.rmtree(entry_path)
+                    removed_entries += 1
+                    continue
+
+                for child_name in list(self.file_manager.listdir(entry_path)):
+                    child_path = self.file_manager.join(entry_path, child_name)
+                    if self.file_manager.is_dir(child_path):
+                        self.file_manager.rmtree(child_path)
+                    else:
+                        self.file_manager.remove(child_path)
+                    removed_entries += 1
+            else:
+                self.file_manager.remove(entry_path)
+                removed_entries += 1
+
+        for folder_name in expected_folders:
+            self.file_manager.makedirs(
+                self.file_manager.join(base_dir, folder_name),
+                exist_ok=True,
+            )
+
+        return removed_entries
+
     def perform_rebuild_db_from_historic(self, db_client=None, progress_callback=None):
         d = self.display
         db = db_client or d.db
@@ -1528,7 +1565,7 @@ class MainController:
 
         historic_dir = str(HISTORIC_LOCAL_DIR)
         errors = []
-        total_steps = 5
+        total_steps = 6
         completed_steps = 0
 
         def _advance(stage):
@@ -1608,6 +1645,14 @@ class MainController:
             errors.append(f"Error clearing final_classification: {exc}")
             print(f"Error clearing final_classification: {exc}")
         _advance("Clearing final classification")
+
+        try:
+            removed_entries = self._clear_sync_images_base_dir()
+            print(f"Cleared {removed_entries} entries from sync_images base directory")
+        except Exception as exc:
+            errors.append(f"Error clearing sync_images base directory: {exc}")
+            print(f"Error clearing sync_images base directory: {exc}")
+        _advance("Clearing classified folders")
 
         self._invalidate_dataset_runtime_state(clear_historic_images=False)
         if historic_images:
