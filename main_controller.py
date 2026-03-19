@@ -357,7 +357,6 @@ def _process_remote_event_impl(msg, display, logger):
     msg_type = msg.get("type")
     if msg_type == "stdout":
         line = str(msg.get("line", ""))
-        logger.info(f"[REMOTE] {line}", allow_repeat=True)
         lower_line = line.lower()
 
         if (not display.trigger_active) and ("waiting for trigger" in lower_line):
@@ -368,8 +367,7 @@ def _process_remote_event_impl(msg, display, logger):
             )
 
     elif msg_type == "stderr":
-        line = str(msg.get("line", ""))
-        logger.warn(f"[REMOTE:ERR] {line}", allow_repeat=True)
+        return
 
 
 def download_live_images_local(file_manager, local_path, rotation_state, logger, max_images=7):
