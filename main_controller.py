@@ -1346,6 +1346,12 @@ class MainController:
             d.filtered_suggestions = [jsn for jsn in d.available_jsns if d.search_jsn in jsn][:10]
         d.selected_suggestion_idx = -1
 
+    def _sanitize_search_jsn(self, value, max_length=21):
+        """Normalize search input so keyboard and paste use the same JSN rules."""
+        if value is None:
+            return ""
+        return "".join(ch for ch in str(value) if ch.isdigit())[:max_length]
+
     def perform_jsn_search(self):
         d = self.display
         if not d.search_jsn.strip():
@@ -2740,6 +2746,11 @@ class MainController:
             digit = payload.get("digit")
             if digit is not None and len(d.search_jsn) < 21 and str(digit).isdigit():
                 d.search_jsn += str(digit)
+                self.update_suggestions()
+        elif action == "search_paste":
+            pasted_text = self._sanitize_search_jsn(payload.get("text"))
+            if pasted_text:
+                d.search_jsn = pasted_text
                 self.update_suggestions()
         elif action == "search_backspace":
             d.search_jsn = d.search_jsn[:-1]

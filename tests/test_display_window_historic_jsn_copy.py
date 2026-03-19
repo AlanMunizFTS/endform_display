@@ -55,6 +55,22 @@ class TestDisplayWindowHistoricJsnCopy(unittest.TestCase):
 
         copy_mock.assert_called_once_with()
 
+    @patch("display_window.get_db_connection")
+    def test_paste_clipboard_into_search_emits_sanitized_jsn(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.historic_mode = True
+        display.search_active = True
+
+        with patch.object(display, "_read_text_from_clipboard", return_value="JSN 11861-77"):
+            pasted = display._paste_clipboard_into_search()
+
+        self.assertTrue(pasted)
+        action_handler.assert_called_once_with("search_paste", text="1186177")
+        self.assertEqual(display.toast_message, "Pasted JSN 1186177")
+        self.assertFalse(display.toast_message_is_error)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

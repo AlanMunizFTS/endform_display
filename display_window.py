@@ -288,6 +288,32 @@ class DisplayWindow:
         except Exception:
             return False
 
+    def _read_text_from_clipboard(self):
+        """Read plain text from the system clipboard."""
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return result.stdout.rstrip("\r\n")
+            except Exception:
+                pass
+
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            clipboard_text = root.clipboard_get()
+            root.destroy()
+            return str(clipboard_text)
+        except Exception:
+            return None
+
     def _copy_current_historic_jsn(self):
         """Copy the current historic JSN and show operator feedback."""
         jsn = self._get_current_historic_jsn()
@@ -301,6 +327,22 @@ class DisplayWindow:
         else:
             self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
         return copied
+
+    def _paste_clipboard_into_search(self):
+        """Paste numeric clipboard content into the historic JSN search field."""
+        clipboard_text = self._read_text_from_clipboard()
+        if clipboard_text is None:
+            self._set_toast_message("Unable to read clipboard", is_error=True)
+            return False
+
+        pasted_jsn = "".join(ch for ch in str(clipboard_text) if ch.isdigit())[:21]
+        if not pasted_jsn:
+            self._set_toast_message("Clipboard has no JSN digits", is_error=True)
+            return False
+
+        self._emit_action("search_paste", text=pasted_jsn)
+        self._set_toast_message(f"Pasted JSN {pasted_jsn}", is_error=False, duration_sec=1.4)
+        return True
     
     def _get_piece_date(self):
         """Delegate piece date resolution to controller business logic."""
@@ -2451,6 +2493,9 @@ class DisplayWindow:
                     return True
                 elif key == 13:  # ENTER key
                     self._emit_action("search_submit")
+                    return True
+                elif key == 22:  # CTRL+V
+                    self._paste_clipboard_into_search()
                     return True
                 elif key == 8:  # BACKSPACE key
                     self._emit_action("search_backspace")
