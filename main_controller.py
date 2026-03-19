@@ -1312,9 +1312,8 @@ class MainController:
         d = self.display
         if not d.historic_images:
             return
-        if d.historic_offset == 0:
-            return
-        d.historic_offset = d.historic_offset - 1
+        total_batches = len(d.historic_images)
+        d.historic_offset = (d.historic_offset - 1) % total_batches
 
     def collect_available_jsns(self):
         d = self.display

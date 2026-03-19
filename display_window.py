@@ -2610,9 +2610,7 @@ class DisplayWindow:
                                font_scale, (0, 0, 255), thickness)
             
             # Historic mode: navigation arrows, search elements and BACK button
-            # Only show left arrow if not at first batch
-            if self.historic_offset > 0:
-                canvas = self.draw_prev_button(canvas)
+            canvas = self.draw_prev_button(canvas)
             canvas = self.draw_next_button(canvas)
             canvas = self.draw_search_elements(canvas)
             canvas = self.draw_back_button(canvas)
