@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import os
 import re
+import subprocess
 import time
 from collections import OrderedDict
 from multiprocessing import Event, Process
@@ -77,6 +78,7 @@ class DisplayWindow:
         self.search_input_rect = None  # Search input field rect
         self.search_jsn = ""  # Current JSN search term
         self.search_active = False  # Whether search input is active
+        self.historic_jsn_rect = None  # Clickable JSN banner in historic mode
         self.available_jsns = []  # List of all available JSNs
         self.filtered_suggestions = []  # Filtered suggestions based on input
         self.selected_suggestion_idx = -1  # Index of selected suggestion (-1 = none)
@@ -143,6 +145,10 @@ class DisplayWindow:
         self._historic_index_last_scan = 0.0
         self.historic_index_rescan_interval = 1.5
         self._historic_jsn_cache = []
+        self.toast_message = ""
+        self.toast_message_is_error = False
+        self.toast_message_time = 0.0
+        self.toast_message_duration_sec = 1.8
         self.set_sftp_client(sftp_client)
 
     def set_db_connection(self, db_client):
@@ -228,6 +234,73 @@ class DisplayWindow:
         text_x = x + (img_size - text_size[0]) // 2
         text_y = label_y1 + padding_y + text_size[1]
         cv2.putText(canvas, label_text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
+
+    def _get_current_historic_jsn(self):
+        """Return the JSN for the visible historic batch, if any."""
+        if not self.historic_images:
+            return None
+        if self.historic_offset < 0 or self.historic_offset >= len(self.historic_images):
+            return None
+
+        current_batch = self.historic_images[self.historic_offset]
+        if not current_batch:
+            return None
+
+        first_image = current_batch[0]
+        return first_image.split("_")[0] if "_" in first_image else first_image
+
+    def _set_toast_message(self, message, is_error=False, duration_sec=1.8):
+        """Show a short non-blocking toast message."""
+        self.toast_message = str(message or "").strip()
+        self.toast_message_is_error = bool(is_error)
+        self.toast_message_time = time.time()
+        self.toast_message_duration_sec = max(0.5, float(duration_sec))
+
+    def _copy_text_to_clipboard(self, text):
+        """Copy text to the system clipboard with a Windows-first fallback."""
+        clipboard_text = str(text or "")
+        if not clipboard_text:
+            return False
+
+        if os.name == "nt":
+            try:
+                subprocess.run(
+                    ["clip"],
+                    input=clipboard_text,
+                    text=True,
+                    check=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return True
+            except Exception:
+                pass
+
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.withdraw()
+            root.clipboard_clear()
+            root.clipboard_append(clipboard_text)
+            root.update()
+            root.destroy()
+            return True
+        except Exception:
+            return False
+
+    def _copy_current_historic_jsn(self):
+        """Copy the current historic JSN and show operator feedback."""
+        jsn = self._get_current_historic_jsn()
+        if not jsn:
+            self._set_toast_message("No JSN available to copy", is_error=True)
+            return False
+
+        copied = self._copy_text_to_clipboard(jsn)
+        if copied:
+            self._set_toast_message(f"Copied JSN {jsn}", is_error=False)
+        else:
+            self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
+        return copied
     
     def _get_piece_date(self):
         """Delegate piece date resolution to controller business logic."""
@@ -509,6 +582,14 @@ class DisplayWindow:
                 bx, by, bw, bh = self.back_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self._emit_action("exit_historic_mode")
+                    return
+
+            # Historic JSN banner - click to copy current JSN
+            if self.historic_jsn_rect and self.historic_mode:
+                bx, by, bw, bh = self.historic_jsn_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._copy_current_historic_jsn()
+                    return
             
             # INFO icon - show piece date (historic mode)
             if self.info_icon_rect and self.historic_mode:
@@ -1427,6 +1508,111 @@ class DisplayWindow:
 
         return canvas
 
+    def draw_toast_message(self, canvas):
+        """Draw a short-lived toast for lightweight UI feedback."""
+        if not self.toast_message:
+            return canvas
+
+        if (time.time() - self.toast_message_time) > self.toast_message_duration_sec:
+            self.toast_message = ""
+            return canvas
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.75
+        thickness = 2
+        text = self.toast_message
+        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+        pad_x = 18
+        pad_y = 12
+        box_w = text_size[0] + pad_x * 2
+        box_h = text_size[1] + pad_y * 2
+        box_x = (self.width - box_w) // 2
+        box_y = 82
+
+        color = (40, 60, 190) if self.toast_message_is_error else (40, 120, 40)
+        overlay = canvas.copy()
+        cv2.rectangle(
+            overlay,
+            (box_x, box_y),
+            (box_x + box_w, box_y + box_h),
+            color,
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.9, canvas, 0.1, 0, canvas)
+        cv2.rectangle(
+            canvas,
+            (box_x, box_y),
+            (box_x + box_w, box_y + box_h),
+            (255, 255, 255),
+            2,
+        )
+
+        text_x = box_x + pad_x
+        text_y = box_y + pad_y + text_size[1]
+        cv2.putText(
+            canvas,
+            text,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
+        return canvas
+
+    def draw_historic_jsn_banner(self, canvas):
+        """Draw the historic JSN as a highlighted, clickable copy target."""
+        jsn = self._get_current_historic_jsn()
+        self.historic_jsn_rect = None
+        if not jsn:
+            return canvas
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.15
+        thickness = 2
+        label_text = "JSN"
+        value_text = str(jsn)
+        gap = 16
+        pad_x = 28
+        pad_y = 16
+
+        label_size = cv2.getTextSize(label_text, font, 0.85, 2)[0]
+        value_size = cv2.getTextSize(value_text, font, font_scale, thickness)[0]
+        box_w = label_size[0] + gap + value_size[0] + pad_x * 2
+        box_h = max(label_size[1], value_size[1]) + pad_y * 2
+        box_x = (self.width - box_w) // 2
+        box_y = 18
+        self.historic_jsn_rect = (box_x, box_y, box_w, box_h)
+
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.historic_jsn_rect)
+        fill_color = (200, 120, 30) if is_hovered else (168, 104, 30)
+        border_color = (255, 255, 255) if is_hovered else (230, 230, 230)
+
+        overlay = canvas.copy()
+        cv2.rectangle(
+            overlay,
+            (box_x, box_y),
+            (box_x + box_w, box_y + box_h),
+            fill_color,
+            -1,
+        )
+        cv2.addWeighted(overlay, 0.88, canvas, 0.12, 0, canvas)
+        cv2.rectangle(
+            canvas,
+            (box_x, box_y),
+            (box_x + box_w, box_y + box_h),
+            border_color,
+            2,
+        )
+
+        baseline_y = box_y + (box_h + value_size[1]) // 2 - 2
+        label_x = box_x + pad_x
+        value_x = label_x + label_size[0] + gap
+
+        cv2.putText(canvas, label_text, (label_x, baseline_y), font, 0.85, (245, 245, 245), 2)
+        cv2.putText(canvas, value_text, (value_x, baseline_y), font, font_scale, (255, 255, 255), thickness)
+        return canvas
+
     def draw_reset_progress(self, canvas):
         """Draw modal loading screen with progress while resetting dataset."""
         if not self.reset_in_progress:
@@ -2291,6 +2477,9 @@ class DisplayWindow:
                 and not self.sync_in_progress
                 and not self.reset_in_progress
             ):
+                if key in {3, ord('c'), ord('C')}:
+                    self._copy_current_historic_jsn()
+                    return True
                 if key_ex in left_arrow_keys:
                     self._emit_action("prev_historic_batch")
                     return True
@@ -2569,44 +2758,30 @@ class DisplayWindow:
             canvas = self.draw_exit_button(canvas)
         else:
             # Historic mode: show JSN in upper blue bar
+            self.historic_jsn_rect = None
             if self.historic_images and len(self.historic_images) > 0:
-                # Get JSN from current batch
                 current_batch = self.historic_images[self.historic_offset]
-                jsn = current_batch[0].split('_')[0] if '_' in current_batch[0] else 'Unknown'
-                
-                # Check if batch is incomplete
                 is_incomplete = len(current_batch) < 7
-                
-                # Draw JSN in upper blue bar
-                font = cv2.FONT_HERSHEY_SIMPLEX
-                font_scale = 1.5
-                thickness = 3
-                
-                # Only show JSN at top
-                text = f"JSN: {jsn}"
-                
-                # Get text size to center it
-                text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-                text_x = (self.width - text_size[0]) // 2
-                text_y = 60  # Vertical position in blue bar
-                
-                # Draw text in white
-                cv2.putText(canvas, text, (text_x, text_y), font, font_scale, 
-                           (255, 255, 255), thickness)
-                
-                # If batch is incomplete, show message at bottom
+
+                canvas = self.draw_historic_jsn_banner(canvas)
+
                 if is_incomplete:
                     incomplete_text = f"INCOMPLETE BATCH ({len(current_batch)}/7)"
-                    
-                    # Use same font and size as JSN
-                    # Get text size to center it
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 1.5
+                    thickness = 3
                     text_size_bottom = cv2.getTextSize(incomplete_text, font, font_scale, thickness)[0]
                     text_x_bottom = (self.width - text_size_bottom[0]) // 2
-                    text_y_bottom = self.height - 30  # Closer to bottom edge
-                    
-                    # Draw text in red
-                    cv2.putText(canvas, incomplete_text, (text_x_bottom, text_y_bottom), font, 
-                               font_scale, (0, 0, 255), thickness)
+                    text_y_bottom = self.height - 30
+                    cv2.putText(
+                        canvas,
+                        incomplete_text,
+                        (text_x_bottom, text_y_bottom),
+                        font,
+                        font_scale,
+                        (0, 0, 255),
+                        thickness,
+                    )
             
             # Historic mode: navigation arrows, search elements and BACK button
             # Only show left arrow if not at first batch
@@ -2641,6 +2816,7 @@ class DisplayWindow:
             canvas = self.draw_reset_progress(canvas)
         else:
             canvas = self.draw_sync_message(canvas)
+            canvas = self.draw_toast_message(canvas)
         if self.db_blocking:
             canvas = self.draw_db_block_dialog(canvas)
 

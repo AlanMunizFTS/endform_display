@@ -1300,6 +1300,10 @@ class MainController:
         d.show_delete_confirm = False
         d.show_rebuild_confirm = False
         d.show_piece_date_dialog = False
+        if hasattr(d, "historic_jsn_rect"):
+            d.historic_jsn_rect = None
+        if hasattr(d, "toast_message"):
+            d.toast_message = ""
 
     def next_historic_batch(self):
         d = self.display
@@ -1492,6 +1496,10 @@ class MainController:
         d._historic_jsn_cache = []
         d._db_result_cache.clear()
         d._image_cache.clear()
+        if hasattr(d, "historic_jsn_rect"):
+            d.historic_jsn_rect = None
+        if hasattr(d, "toast_message"):
+            d.toast_message = ""
 
     def _clear_final_classification_dir(self):
         base_dir = str(FINAL_CLASSIFICATION_DIR)
