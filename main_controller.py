@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from collections import defaultdict
@@ -420,6 +421,12 @@ class ControllerConfig:
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
+    remote_db_polling_enabled: bool = True
+    remote_db_table: str = "model_results"
+    remote_db_columns: tuple = ("img_name", "class_name", "confidence")
+    remote_db_query_limit: int = 10
+    remote_db_success_interval_sec: float = 0.0
+    remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
     remote_command: str = (
         "sh -lc 'echo $$; "
@@ -480,6 +487,9 @@ class MainController:
         self.sync_worker_thread = None
         self.reset_worker_thread = None
         self.rebuild_worker_thread = None
+        self.remote_db_poll_thread = None
+        self.remote_db_stop_event = None
+        self._remote_db_placeholder_warned = False
         self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
@@ -540,6 +550,7 @@ class MainController:
             self.try_connect_db("startup")
         if self.db_connected:
             self._register_historic_local_dir_on_startup()
+        self.start_remote_db_polling()
 
         if self.sftp_credentials is not None and self.sftp_app is None:
             self.sftp_app = SFTPApp(
@@ -567,6 +578,137 @@ class MainController:
         else:
             self.logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
             self.display.set_sftp_client(None)
+
+    def _resolve_remote_db_ssh_credentials(self):
+        if self.sftp_credentials is not None:
+            return dict(self.sftp_credentials)
+
+        try:
+            from settings import get_sftp_settings
+
+            return get_sftp_settings()
+        except Exception as exc:
+            self.logger.warn(
+                f"[REMOTE_DB] SSH credentials unavailable for remote DB polling: {exc}",
+                allow_repeat=True,
+            )
+            return None
+
+    def _is_remote_db_table_placeholder(self):
+        table_name = str(getattr(self.config, "remote_db_table", "") or "").strip()
+        return not table_name
+
+    def _quote_remote_db_identifier(self, identifier):
+        parts = [part.strip() for part in str(identifier).split(".")]
+        if not parts or any(not part for part in parts):
+            raise ValueError(f"Invalid SQL identifier: {identifier!r}")
+        return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
+
+    def _build_remote_db_query(self):
+        if self._is_remote_db_table_placeholder():
+            return None
+
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        selected_columns = ", ".join(
+            self._quote_remote_db_identifier(column_name)
+            for column_name in self.config.remote_db_columns
+        )
+        limit = max(1, int(self.config.remote_db_query_limit))
+        return f"SELECT {selected_columns} FROM {table_name} LIMIT {limit}"
+
+    def _serialize_remote_db_row(self, row):
+        return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
+
+    def _run_remote_db_poll_iteration(self):
+        query = self._build_remote_db_query()
+        if query is None:
+            if not self._remote_db_placeholder_warned:
+                self.logger.warn(
+                    "[REMOTE_DB] Polling skipped: configure ControllerConfig.remote_db_table before querying PostgreSQL.",
+                    allow_repeat=True,
+                )
+                self._remote_db_placeholder_warned = True
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        self._remote_db_placeholder_warned = False
+        ssh_credentials = self._resolve_remote_db_ssh_credentials()
+        if not ssh_credentials:
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        remote_db = None
+        try:
+            from db import get_remote_db_connection_via_ssh
+
+            self.logger.info(
+                f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
+                allow_repeat=True,
+            )
+            remote_db = get_remote_db_connection_via_ssh(
+                ssh_host=ssh_credentials["hostname"],
+                ssh_port=ssh_credentials["port"],
+                ssh_username=ssh_credentials["username"],
+                ssh_password=ssh_credentials["password"],
+            )
+            self.logger.info("[REMOTE_DB] Remote PostgreSQL connection successful", allow_repeat=True)
+            self.logger.info(f"[REMOTE_DB] Executing query: {query}", allow_repeat=True)
+            rows = remote_db.fetch(query)
+            self.logger.info(
+                f"[REMOTE_DB] Retrieved {len(rows)} rows using LIMIT {self.config.remote_db_query_limit}",
+                allow_repeat=True,
+            )
+            for idx, row in enumerate(rows, start=1):
+                self.logger.info(
+                    f"[REMOTE_DB] Row {idx}: {self._serialize_remote_db_row(row)}",
+                    allow_repeat=True,
+                )
+            return max(0.0, float(self.config.remote_db_success_interval_sec))
+        except Exception as exc:
+            self.logger.error(f"[REMOTE_DB] Poll iteration failed: {exc}", allow_repeat=True)
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+        finally:
+            if remote_db is not None:
+                try:
+                    remote_db.close()
+                except Exception:
+                    pass
+
+    def _remote_db_polling_worker(self):
+        self.logger.info("[REMOTE_DB] Polling worker started", allow_repeat=True)
+        try:
+            while self.remote_db_stop_event is not None and not self.remote_db_stop_event.is_set():
+                delay_sec = self._run_remote_db_poll_iteration()
+                if self.remote_db_stop_event is not None and self.remote_db_stop_event.is_set():
+                    break
+                _sleep_with_stop(self.remote_db_stop_event, delay_sec)
+        finally:
+            self.logger.info("[REMOTE_DB] Polling worker stopped", allow_repeat=True)
+
+    def start_remote_db_polling(self):
+        if not getattr(self.config, "remote_db_polling_enabled", False):
+            self.logger.info("[REMOTE_DB] Polling disabled by config", allow_repeat=True)
+            return False
+        if self.remote_db_poll_thread is not None and self.remote_db_poll_thread.is_alive():
+            return False
+
+        self.remote_db_stop_event = Event()
+        self.remote_db_poll_thread = Thread(
+            target=self._remote_db_polling_worker,
+            name="remote-db-polling",
+            daemon=True,
+        )
+        self.remote_db_poll_thread.start()
+        return True
+
+    def stop_remote_db_polling(self):
+        if self.remote_db_stop_event is not None:
+            self.remote_db_stop_event.set()
+        if self.remote_db_poll_thread is not None:
+            try:
+                self.remote_db_poll_thread.join(timeout=5)
+            except Exception:
+                pass
+        self.remote_db_poll_thread = None
+        self.remote_db_stop_event = None
 
     def _db_block_message(self):
         return "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
@@ -3041,6 +3183,7 @@ class MainController:
             self.shutdown()
 
     def shutdown(self):
+        self.stop_remote_db_polling()
         self.stop_remote_process("exit")
         if self.sftp_app:
             self.sftp_app.disconnect_sftp()
