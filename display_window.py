@@ -110,7 +110,7 @@ class DisplayWindow:
         self.reset_progress = 0
         self.reset_stage = ""
         self.reset_progress_title = "Resetting Dataset"
-        self.reset_progress_helper_text = "Please wait until reset finishes."
+        self.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
         self.exit_requested = False
         self.trigger_active = False  # Trigger status for normal view
         self.trash_icon = None
@@ -1625,9 +1625,10 @@ class DisplayWindow:
         text_x = dialog_x + 120
         text_y = dialog_y + 70
         
-        warning_text1 = "Warning: This will"
-        warning_text2 = "permanently delete all data"
-        warning_text3 = "Confirm reset operation?"
+        warning_text1 = "Warning: This will reset DB and"
+        warning_text2 = "delete images in historic, annotated,"
+        warning_text3 = "classified, and final_classification."
+        warning_text4 = "Confirm reset operation?"
         
         font_scale = 1.0
         thickness = 2
@@ -1635,6 +1636,7 @@ class DisplayWindow:
         cv2.putText(canvas, warning_text1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
         cv2.putText(canvas, warning_text2, (text_x, text_y + 40), font, font_scale, (0, 0, 0), thickness)
         cv2.putText(canvas, warning_text3, (text_x, text_y + 80), font, font_scale, (0, 0, 0), thickness)
+        cv2.putText(canvas, warning_text4, (text_x, text_y + 120), font, font_scale, (0, 0, 0), thickness)
         
         # Buttons
         button_width = 150
@@ -1743,11 +1745,10 @@ class DisplayWindow:
         thickness = 2
 
         warning_lines = [
-            "Rebuild the app database from historic images?",
+            "Rebuild the app database from annotated historic images?",
             "This clears img_results, classified_images,",
-            "and piece_result before rebuilding from HISTORIC_LOCAL_DIR.",
-            "FINAL_CLASSIFICATION_DIR will also be emptied.",
-            "SYNC_IMAGES_BASE_DIR will keep only empty folders.",
+            "and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
+            "Classified and final folders will be preserved.",
             "Historic images will be preserved.",
         ]
 

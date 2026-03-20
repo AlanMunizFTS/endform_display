@@ -5,8 +5,6 @@ from unittest.mock import MagicMock, patch
 
 from file_manager import FileManager
 from main_controller import MainController
-from paths_config import STATUS_SYNC_DIRS
-
 
 class TestMainControllerRebuild(unittest.TestCase):
     def _build_display(self, db):
@@ -14,23 +12,19 @@ class TestMainControllerRebuild(unittest.TestCase):
         display.db = db
         return display
 
-    def test_rebuild_clears_sync_images_base_dir_and_keeps_expected_empty_folders(self):
+    def test_rebuild_preserves_classified_and_final_classification_folders(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            historic_dir = tmp_path / "historic"
-            historic_dir.mkdir()
-            (historic_dir / "JSN001_side_OK.png").write_bytes(b"test-image")
+            annotated_dir = tmp_path / "annotated"
+            annotated_dir.mkdir()
+            (annotated_dir / "JSN001_side_OK.png").write_bytes(b"test-image")
 
             sync_base_dir = tmp_path / "classified"
             (sync_base_dir / "side_ok").mkdir(parents=True)
             (sync_base_dir / "side_ok" / "old_side.png").write_bytes(b"old")
-            (sync_base_dir / "front_nok").mkdir(parents=True)
-            (sync_base_dir / "front_nok" / "nested").mkdir()
-            (sync_base_dir / "front_nok" / "nested" / "old_front.png").write_bytes(b"old")
-            (sync_base_dir / "diag_ok").mkdir(parents=True)
-            (sync_base_dir / "unexpected_folder").mkdir(parents=True)
-            (sync_base_dir / "unexpected_folder" / "junk.txt").write_text("junk", encoding="utf-8")
-            (sync_base_dir / "stray_file.txt").write_text("junk", encoding="utf-8")
+            final_classification_dir = tmp_path / "final_classification"
+            (final_classification_dir / "Side_P").mkdir(parents=True)
+            (final_classification_dir / "Side_P" / "old_side.png").write_bytes(b"old")
 
             db = MagicMock()
             db.truncate_app_tables.return_value = 3
@@ -43,14 +37,17 @@ class TestMainControllerRebuild(unittest.TestCase):
             controller._register_local_images_in_db = MagicMock()
             controller._backfill_piece_result = MagicMock()
             controller._clear_final_classification_dir = MagicMock(return_value=0)
+            controller._clear_sync_images_base_dir = MagicMock(return_value=0)
             controller._invalidate_dataset_runtime_state = MagicMock()
             controller.enter_historic_mode = MagicMock()
             controller.exit_historic_mode = MagicMock()
 
             progress_updates = []
 
-            with patch("main_controller.HISTORIC_LOCAL_DIR", historic_dir), patch(
+            with patch("main_controller.ANNOTATED_LOCAL_DIR", annotated_dir), patch(
                 "main_controller.SYNC_IMAGES_BASE_DIR", sync_base_dir
+            ), patch(
+                "main_controller.FINAL_CLASSIFICATION_DIR", final_classification_dir
             ):
                 result = controller.perform_rebuild_db_from_historic(
                     progress_callback=lambda done, total, stage: progress_updates.append(
@@ -59,22 +56,12 @@ class TestMainControllerRebuild(unittest.TestCase):
                 )
 
             self.assertTrue(result["ok"])
-            self.assertIn(
-                (5, 6, "Clearing classified folders"),
-                progress_updates,
-            )
-
-            expected_folders = {
-                folder_name
-                for position_dirs in STATUS_SYNC_DIRS.values()
-                for folder_name in position_dirs.values()
-            }
-
-            self.assertEqual(set(p.name for p in sync_base_dir.iterdir()), expected_folders)
-            for folder_name in expected_folders:
-                folder_path = sync_base_dir / folder_name
-                self.assertTrue(folder_path.is_dir(), f"{folder_name} should exist")
-                self.assertEqual(list(folder_path.iterdir()), [], f"{folder_name} should be empty")
+            self.assertNotIn((3, 4, "Clearing final classification"), progress_updates)
+            self.assertNotIn((4, 4, "Clearing classified folders"), progress_updates)
+            controller._clear_final_classification_dir.assert_not_called()
+            controller._clear_sync_images_base_dir.assert_not_called()
+            self.assertTrue((sync_base_dir / "side_ok" / "old_side.png").exists())
+            self.assertTrue((final_classification_dir / "Side_P" / "old_side.png").exists())
 
 
 if __name__ == "__main__":

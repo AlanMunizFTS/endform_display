@@ -7,6 +7,7 @@ from threading import Thread
 
 from file_manager import FileManager
 from paths_config import (
+    ANNOTATED_LOCAL_DIR,
     ANNOTATED_SUBDIR_NAME,
     FINAL_CLASSIFICATION_DIR,
     FINAL_CLASSIFICATION_DIRS,
@@ -493,6 +494,32 @@ class MainController:
             if hasattr(self.display, "set_db_connection"):
                 self.display.set_db_connection(self.display.db)
 
+    def _resolve_temp_subdir(self, subdir_name, default_path):
+        if self.config.temp_dir == str(TMP_DISPLAY_DIR):
+            return str(default_path)
+        return self.file_manager.join(self.config.temp_dir, subdir_name)
+
+    def _get_visible_historic_dir(self):
+        return self._resolve_temp_subdir(ANNOTATED_SUBDIR_NAME, ANNOTATED_LOCAL_DIR)
+
+    def _get_export_historic_dir(self):
+        return self._resolve_temp_subdir(HISTORIC_SUBDIR_NAME, HISTORIC_LOCAL_DIR)
+
+    def _list_local_image_names(self, directory, require_jsn_prefix=False):
+        if not self.file_manager.exists(directory):
+            return []
+        images = [
+            name
+            for name in self.file_manager.listdir(directory)
+            if name.lower().endswith(self.config.image_extensions)
+        ]
+        if require_jsn_prefix:
+            images = [name for name in images if name.startswith("11861")]
+        return images
+
+    def _get_visible_historic_image_set(self):
+        return set(self._list_local_image_names(self._get_visible_historic_dir()))
+
     def _clear_tmp_display(self):
         tmp_dir = self.config.temp_dir
         if not self.file_manager.exists(tmp_dir):
@@ -582,12 +609,12 @@ class MainController:
             return False
 
     def _register_historic_local_dir_on_startup(self):
-        """Register all images in historic dir on startup if not already in img_results."""
+        """Register all visible historic images on startup if not already in img_results."""
         if not self.db_connected:
             return
 
-        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-        if not self.file_manager.exists(historic_dir):
+        visible_dir = self._get_visible_historic_dir()
+        if not self.file_manager.exists(visible_dir):
             self.historic_bootstrap_complete = True
             return
 
@@ -596,16 +623,13 @@ class MainController:
         self.historic_bootstrap_thread.start()
 
     def _register_historic_local_dir_worker(self):
-        """Worker thread for registering historic images on startup."""
+        """Worker thread for registering visible historic images on startup."""
         try:
-            historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-            if not self.file_manager.exists(historic_dir):
+            visible_dir = self._get_visible_historic_dir()
+            if not self.file_manager.exists(visible_dir):
                 return
 
-            local_images = [
-                f for f in self.file_manager.listdir(historic_dir)
-                if f.lower().endswith(self.config.image_extensions)
-            ]
+            local_images = self._list_local_image_names(visible_dir)
 
             if not local_images:
                 return
@@ -631,13 +655,13 @@ class MainController:
             self.historic_bootstrap_complete = True
 
     def _check_and_register_new_historic_images(self):
-        """Check for new images in historic dir and register them in DB, then update piece_result."""
-        historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-        if not self.file_manager.exists(historic_dir):
+        """Check for new visible historic images and register them in DB."""
+        visible_dir = self._get_visible_historic_dir()
+        if not self.file_manager.exists(visible_dir):
             return
 
         try:
-            current_mtime = self.file_manager.getmtime(historic_dir)
+            current_mtime = self.file_manager.getmtime(visible_dir)
         except Exception:
             return
 
@@ -650,7 +674,7 @@ class MainController:
             # Run heavy DB/file work in background to avoid freezing the main loop
             if not getattr(self, '_register_worker_running', False):
                 self._register_worker_running = True
-                captured_dir = historic_dir
+                captured_dir = visible_dir
 
                 def _register_worker():
                     worker_db = None
@@ -659,7 +683,10 @@ class MainController:
                         worker_db = get_db_connection()
                         self._register_local_images_in_db(captured_dir, db_client=worker_db)
                         self._backfill_piece_result(db_client=worker_db)
-                        self.save_classification_results(historic_dir=captured_dir, db_client=worker_db)
+                        self.save_classification_results(
+                            historic_dir=self._get_export_historic_dir(),
+                            db_client=worker_db,
+                        )
                     except Exception as exc:
                         print(f"Error in register worker: {exc}")
                     finally:
@@ -676,7 +703,7 @@ class MainController:
         if not self.db_connected:
             return
 
-        historic_dir = str(HISTORIC_LOCAL_DIR)
+        visible_dir = self._get_visible_historic_dir()
         self.historic_bootstrap_loading = True
         self.logger.info("[DB] Historic startup bootstrap started", allow_repeat=True)
 
@@ -688,7 +715,7 @@ class MainController:
 
                 worker_db = get_db_connection()
                 self._register_local_images_in_db(
-                    historic_dir,
+                    visible_dir,
                     db_client=worker_db,
                     track_registered=False,
                 )
@@ -873,7 +900,7 @@ class MainController:
         d.reset_progress = 0
         d.reset_stage = "Preparing reset..."
         d.reset_progress_title = "Resetting Dataset"
-        d.reset_progress_helper_text = "Please wait until reset finishes."
+        d.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -896,7 +923,7 @@ class MainController:
                         stage_text,
                         phase_percent,
                         title="Resetting Dataset",
-                        helper_text="Please wait until reset finishes.",
+                        helper_text="Clearing historic, annotated, classified, and final folders.",
                     )
 
                 result = self.perform_reset(
@@ -1135,8 +1162,8 @@ class MainController:
     def _load_historic_index(self, force_rescan=False):
         d = self.display
 
-        local_historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-        if not self.file_manager.exists(local_historic_dir):
+        visible_dir = self._get_visible_historic_dir()
+        if not self.file_manager.exists(visible_dir):
             d._historic_index_cache = []
             d._historic_jsn_cache = []
             d._historic_index_mtime = None
@@ -1145,7 +1172,7 @@ class MainController:
 
         current_mtime = None
         try:
-            current_mtime = self.file_manager.getmtime(local_historic_dir)
+            current_mtime = self.file_manager.getmtime(visible_dir)
         except Exception:
             pass
 
@@ -1162,7 +1189,7 @@ class MainController:
         if use_cache:
             return d._historic_index_cache
 
-        files = self.file_manager.listdir(local_historic_dir)
+        files = self.file_manager.listdir(visible_dir)
         images_with_jsn = [
             name
             for name in files
@@ -1384,45 +1411,57 @@ class MainController:
         print(f"STARTING PIECE DELETE (JSN {jsn})")
         print("=" * 70)
 
-        local_historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-
+        local_sources = [
+            ("annotated", self._get_visible_historic_dir()),
+            ("historic", self._get_export_historic_dir()),
+        ]
         local_deleted = 0
         local_candidates = []
-        if self.file_manager.exists(local_historic_dir):
-            try:
-                for name in self.file_manager.listdir(local_historic_dir):
-                    if name.startswith(jsn) and name.lower().endswith(self.config.image_extensions):
-                        local_candidates.append(self.file_manager.join(local_historic_dir, name))
-                for path in local_candidates:
-                    try:
-                        self.file_manager.remove(path)
-                        local_deleted += 1
-                    except Exception as exc:
-                        print(f"Error deleting local file {path}: {exc}")
-                print(f"Local delete: {local_deleted}/{len(local_candidates)}")
-            except Exception as exc:
-                print(f"Error reading local historic folder: {exc}")
-        else:
-            print("Local historic folder does not exist")
+        for label, local_dir in local_sources:
+            folder_candidates = []
+            if self.file_manager.exists(local_dir):
+                try:
+                    for name in self.file_manager.listdir(local_dir):
+                        if name.startswith(jsn) and name.lower().endswith(self.config.image_extensions):
+                            folder_candidates.append(self.file_manager.join(local_dir, name))
+                    for path in folder_candidates:
+                        try:
+                            self.file_manager.remove(path)
+                            local_deleted += 1
+                        except Exception as exc:
+                            print(f"Error deleting local {label} file {path}: {exc}")
+                    print(f"Local {label} delete: {len(folder_candidates)} candidates")
+                    local_candidates.extend(folder_candidates)
+                except Exception as exc:
+                    print(f"Error reading local {label} folder: {exc}")
+            else:
+                print(f"Local {label} folder does not exist")
 
         remote_deleted = 0
+        remote_sources = [
+            ("annotated", self.config.remote_annotated_dir),
+            ("historic", self.config.remote_hist_dir),
+        ]
         if d.sftp_client:
-            try:
-                self.file_manager.sftp_chdir(d.sftp_client, self.config.remote_hist_dir)
-                remote_files = self.file_manager.sftp_listdir(d.sftp_client)
-                remote_candidates = [
-                    f for f in remote_files if f.startswith(jsn) and f.lower().endswith(self.config.image_extensions)
-                ]
-                for remote_file in remote_candidates:
-                    try:
-                        file_path = f"{self.config.remote_hist_dir}/{remote_file}"
-                        self.file_manager.sftp_remove(d.sftp_client, file_path)
-                        remote_deleted += 1
-                    except Exception as exc:
-                        print(f"Error deleting remote file {remote_file}: {exc}")
-                print(f"Remote delete: {remote_deleted}/{len(remote_candidates)}")
-            except Exception as exc:
-                print(f"Error accessing remote historic folder: {exc}")
+            for label, remote_dir in remote_sources:
+                try:
+                    self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
+                    remote_files = self.file_manager.sftp_listdir(d.sftp_client)
+                    remote_candidates = [
+                        f
+                        for f in remote_files
+                        if f.startswith(jsn) and f.lower().endswith(self.config.image_extensions)
+                    ]
+                    for remote_file in remote_candidates:
+                        try:
+                            file_path = f"{remote_dir}/{remote_file}"
+                            self.file_manager.sftp_remove(d.sftp_client, file_path)
+                            remote_deleted += 1
+                        except Exception as exc:
+                            print(f"Error deleting remote {label} file {remote_file}: {exc}")
+                    print(f"Remote {label} delete: {len(remote_candidates)} candidates")
+                except Exception as exc:
+                    print(f"Error accessing remote {label} folder: {exc}")
         else:
             print("No SFTP connection available")
 
@@ -1452,12 +1491,12 @@ class MainController:
         d._historic_jsn_cache = []
 
         remaining_images = []
-        if self.file_manager.exists(local_historic_dir):
-            remaining_images = [
-                f
-                for f in self.file_manager.listdir(local_historic_dir)
-                if f.lower().endswith(self.config.image_extensions) and f.startswith("11861")
-            ]
+        visible_dir = self._get_visible_historic_dir()
+        if self.file_manager.exists(visible_dir):
+            remaining_images = self._list_local_image_names(
+                visible_dir,
+                require_jsn_prefix=True,
+            )
 
         if not remaining_images:
             d.historic_images = []
@@ -1494,10 +1533,20 @@ class MainController:
         base_dir = str(FINAL_CLASSIFICATION_DIR)
         self.file_manager.makedirs(base_dir, exist_ok=True)
 
+        expected_folders = {
+            folder_name
+            for position_dirs in FINAL_CLASSIFICATION_DIRS.values()
+            for folder_name in position_dirs.values()
+        }
+
         removed_entries = 0
         for entry_name in list(self.file_manager.listdir(base_dir)):
             entry_path = self.file_manager.join(base_dir, entry_name)
             if self.file_manager.is_dir(entry_path):
+                if entry_name not in expected_folders:
+                    self.file_manager.rmtree(entry_path)
+                    removed_entries += 1
+                    continue
                 for child_name in list(self.file_manager.listdir(entry_path)):
                     child_path = self.file_manager.join(entry_path, child_name)
                     if self.file_manager.is_dir(child_path):
@@ -1560,12 +1609,12 @@ class MainController:
         d = self.display
         db = db_client or d.db
         print("\n" + "=" * 70)
-        print("STARTING DATABASE REBUILD FROM HISTORIC")
+        print("STARTING DATABASE REBUILD FROM ANNOTATED HISTORIC SOURCE")
         print("=" * 70)
 
-        historic_dir = str(HISTORIC_LOCAL_DIR)
+        visible_dir = self._get_visible_historic_dir()
         errors = []
-        total_steps = 6
+        total_steps = 4
         completed_steps = 0
 
         def _advance(stage):
@@ -1582,12 +1631,12 @@ class MainController:
             print(message)
             return {"ok": False, "error": message}
 
-        if not self.file_manager.exists(historic_dir):
+        if not self.file_manager.exists(visible_dir):
             try:
-                self.file_manager.makedirs(historic_dir, exist_ok=True)
-                print(f"Historic directory not found; created empty folder: {historic_dir}")
+                self.file_manager.makedirs(visible_dir, exist_ok=True)
+                print(f"Annotated directory not found; created empty folder: {visible_dir}")
             except Exception as exc:
-                message = f"Unable to create historic directory: {exc}"
+                message = f"Unable to create annotated directory: {exc}"
                 print(message)
                 return {"ok": False, "error": message}
 
@@ -1595,16 +1644,16 @@ class MainController:
             historic_images = sorted(
                 [
                     name
-                    for name in self.file_manager.listdir(historic_dir)
+                    for name in self.file_manager.listdir(visible_dir)
                     if name.lower().endswith(self.config.image_extensions)
                 ]
             )
         except Exception as exc:
-            message = f"Unable to scan historic directory: {exc}"
+            message = f"Unable to scan annotated directory: {exc}"
             print(message)
             return {"ok": False, "error": message}
 
-        _advance("Scanning historic images")
+        _advance("Scanning annotated images")
 
         try:
             truncated_tables = db.truncate_app_tables()
@@ -1617,7 +1666,7 @@ class MainController:
 
         try:
             self._register_local_images_in_db(
-                historic_dir,
+                visible_dir,
                 image_names=historic_images,
                 db_client=db,
                 track_registered=False,
@@ -1625,34 +1674,18 @@ class MainController:
             self._backfill_piece_result(db_client=db)
             count_rows = db.fetch("SELECT COUNT(*) AS cnt FROM img_results")
             inserted_count = int(count_rows[0]["cnt"]) if count_rows else 0
-            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from historic")
+            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from annotated")
             if inserted_count != len(historic_images):
                 errors.append(
                     f"Expected {len(historic_images)} img_results rows after rebuild, found {inserted_count}"
                 )
             if not historic_images:
-                print("Historic directory is empty; database remains empty after rebuild")
+                print("Annotated directory is empty; database remains empty after rebuild")
         except Exception as exc:
-            message = f"Error rebuilding database from historic: {exc}"
+            message = f"Error rebuilding database from annotated: {exc}"
             print(message)
             return {"ok": False, "error": message}
-        _advance("Rebuilding database from historic")
-
-        try:
-            removed_entries = self._clear_final_classification_dir()
-            print(f"Cleared {removed_entries} entries from final_classification")
-        except Exception as exc:
-            errors.append(f"Error clearing final_classification: {exc}")
-            print(f"Error clearing final_classification: {exc}")
-        _advance("Clearing final classification")
-
-        try:
-            removed_entries = self._clear_sync_images_base_dir()
-            print(f"Cleared {removed_entries} entries from sync_images base directory")
-        except Exception as exc:
-            errors.append(f"Error clearing sync_images base directory: {exc}")
-            print(f"Error clearing sync_images base directory: {exc}")
-        _advance("Clearing classified folders")
+        _advance("Rebuilding database from annotated")
 
         self._invalidate_dataset_runtime_state(clear_historic_images=False)
         if historic_images:
@@ -1681,33 +1714,56 @@ class MainController:
         print("STARTING COMPLETE RESET")
         print("=" * 70)
 
-        local_historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        local_targets = [
+            ("annotated", self._get_visible_historic_dir()),
+            ("historic", self._get_export_historic_dir()),
+        ]
+        remote_targets = [
+            ("annotated", self.config.remote_annotated_dir),
+            ("historic", self.config.remote_hist_dir),
+        ]
         errors = []
 
-        local_entries = []
-        if self.file_manager.exists(local_historic_dir):
-            try:
-                local_entries = list(self.file_manager.listdir(local_historic_dir))
-            except Exception as exc:
-                errors.append(f"Unable to scan local historic folder: {exc}")
-                print(f"Error scanning local historic folder: {exc}")
-                local_entries = []
+        local_entries_by_target = {}
+        for label, local_dir in local_targets:
+            entries = []
+            if self.file_manager.exists(local_dir):
+                try:
+                    entries = list(self.file_manager.listdir(local_dir))
+                except Exception as exc:
+                    errors.append(f"Unable to scan local {label} folder: {exc}")
+                    print(f"Error scanning local {label} folder: {exc}")
+            local_entries_by_target[label] = entries
 
-        remote_files = []
+        remote_files_by_target = {}
         if d.sftp_client:
-            try:
-                self.file_manager.sftp_chdir(d.sftp_client, self.config.remote_hist_dir)
-                remote_files = list(self.file_manager.sftp_listdir(d.sftp_client))
-            except Exception as exc:
-                errors.append(f"Unable to access remote folder: {exc}")
-                print(f"Error accessing remote folder: {exc}")
-                remote_files = []
+            for label, remote_dir in remote_targets:
+                files = []
+                try:
+                    self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
+                    files = list(self.file_manager.sftp_listdir(d.sftp_client))
+                except Exception as exc:
+                    errors.append(f"Unable to access remote {label} folder: {exc}")
+                    print(f"Error accessing remote {label} folder: {exc}")
+                remote_files_by_target[label] = files
+        else:
+            for label, _remote_dir in remote_targets:
+                remote_files_by_target[label] = []
 
-        local_steps = max(1, len(local_entries))
-        remote_steps = max(1, len(remote_files))
+        local_steps = sum(max(1, len(entries)) for entries in local_entries_by_target.values())
+        remote_steps = sum(max(1, len(files)) for files in remote_files_by_target.values())
         db_steps = 1
+        classified_steps = 1
+        final_classification_steps = 1
         final_steps = 1
-        total_steps = local_steps + remote_steps + db_steps + final_steps
+        total_steps = (
+            local_steps
+            + remote_steps
+            + db_steps
+            + classified_steps
+            + final_classification_steps
+            + final_steps
+        )
         completed_steps = 0
 
         def _advance(stage):
@@ -1719,57 +1775,62 @@ class MainController:
         if callable(progress_callback):
             progress_callback(0, total_steps, "Preparing reset")
 
-        if self.file_manager.exists(local_historic_dir):
-            if local_entries:
-                for idx, entry_name in enumerate(local_entries, start=1):
-                    entry_path = self.file_manager.join(local_historic_dir, entry_name)
-                    try:
-                        if self.file_manager.is_dir(entry_path):
-                            self.file_manager.rmtree(entry_path)
-                        else:
-                            self.file_manager.remove(entry_path)
-                    except Exception as exc:
-                        errors.append(f"Error removing local file '{entry_name}': {exc}")
-                        print(f"Error removing local entry {entry_name}: {exc}")
-                    _advance(f"Clearing local historic folder ({idx}/{len(local_entries)})")
-                print("Local historic folder cleared")
+        for label, local_dir in local_targets:
+            local_entries = local_entries_by_target[label]
+            if self.file_manager.exists(local_dir):
+                if local_entries:
+                    for idx, entry_name in enumerate(local_entries, start=1):
+                        entry_path = self.file_manager.join(local_dir, entry_name)
+                        try:
+                            if self.file_manager.is_dir(entry_path):
+                                self.file_manager.rmtree(entry_path)
+                            else:
+                                self.file_manager.remove(entry_path)
+                        except Exception as exc:
+                            errors.append(f"Error removing local {label} entry '{entry_name}': {exc}")
+                            print(f"Error removing local {label} entry {entry_name}: {exc}")
+                        _advance(f"Clearing local {label} folder ({idx}/{len(local_entries)})")
+                    print(f"Local {label} folder cleared")
+                else:
+                    print(f"Local {label} folder is already empty")
+                    _advance(f"Local {label} folder is already empty")
+                try:
+                    self.file_manager.makedirs(local_dir, exist_ok=True)
+                except Exception as exc:
+                    errors.append(f"Error recreating local {label} folder: {exc}")
+                    print(f"Error recreating local {label} folder: {exc}")
             else:
-                print("Local historic folder is already empty")
-                _advance("Local historic folder is already empty")
-            try:
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-            except Exception as exc:
-                errors.append(f"Error recreating local historic folder: {exc}")
-                print(f"Error recreating local historic folder: {exc}")
-        else:
-            try:
-                self.file_manager.makedirs(local_historic_dir, exist_ok=True)
-                print("Local historic folder did not exist and was created")
-            except Exception as exc:
-                errors.append(f"Error creating local historic folder: {exc}")
-                print(f"Error creating local historic folder: {exc}")
-            _advance("Preparing local historic folder")
+                try:
+                    self.file_manager.makedirs(local_dir, exist_ok=True)
+                    print(f"Local {label} folder did not exist and was created")
+                except Exception as exc:
+                    errors.append(f"Error creating local {label} folder: {exc}")
+                    print(f"Error creating local {label} folder: {exc}")
+                _advance(f"Preparing local {label} folder")
 
         if d.sftp_client:
-            if remote_files:
-                print(f"Deleting {len(remote_files)} files from remote server...")
-                deleted_count = 0
-                for idx, remote_file in enumerate(remote_files, start=1):
-                    try:
-                        file_path = f"{self.config.remote_hist_dir}/{remote_file}"
-                        self.file_manager.sftp_remove(d.sftp_client, file_path)
-                        deleted_count += 1
-                    except Exception as exc:
-                        errors.append(f"Error deleting remote file '{remote_file}': {exc}")
-                        print(f"Error deleting {remote_file}: {exc}")
-                    _advance(f"Clearing remote historic folder ({idx}/{len(remote_files)})")
-                print(f"Deleted {deleted_count}/{len(remote_files)} remote files")
-            else:
-                print("Remote folder is already empty")
-                _advance("Remote historic folder is already empty")
+            for label, remote_dir in remote_targets:
+                remote_files = remote_files_by_target[label]
+                if remote_files:
+                    print(f"Deleting {len(remote_files)} files from remote {label} folder...")
+                    deleted_count = 0
+                    for idx, remote_file in enumerate(remote_files, start=1):
+                        try:
+                            file_path = f"{remote_dir}/{remote_file}"
+                            self.file_manager.sftp_remove(d.sftp_client, file_path)
+                            deleted_count += 1
+                        except Exception as exc:
+                            errors.append(f"Error deleting remote {label} file '{remote_file}': {exc}")
+                            print(f"Error deleting remote {label} file {remote_file}: {exc}")
+                        _advance(f"Clearing remote {label} folder ({idx}/{len(remote_files)})")
+                    print(f"Deleted {deleted_count}/{len(remote_files)} remote {label} files")
+                else:
+                    print(f"Remote {label} folder is already empty")
+                    _advance(f"Remote {label} folder is already empty")
         else:
             print("No SFTP connection available")
-            _advance("Remote reset skipped (no SFTP connection)")
+            for label, _remote_dir in remote_targets:
+                _advance(f"Remote {label} reset skipped (no SFTP connection)")
 
         if db:
             try:
@@ -1784,6 +1845,22 @@ class MainController:
             errors.append(message)
             print(message)
         _advance("Resetting database")
+
+        try:
+            removed_entries = self._clear_sync_images_base_dir()
+            print(f"Cleared {removed_entries} entries from sync_images base directory")
+        except Exception as exc:
+            errors.append(f"Error clearing sync_images base directory: {exc}")
+            print(f"Error clearing sync_images base directory: {exc}")
+        _advance("Clearing classified folders")
+
+        try:
+            removed_entries = self._clear_final_classification_dir()
+            print(f"Cleared {removed_entries} entries from final_classification")
+        except Exception as exc:
+            errors.append(f"Error clearing final_classification: {exc}")
+            print(f"Error clearing final_classification: {exc}")
+        _advance("Clearing final classification")
 
         self._invalidate_dataset_runtime_state(clear_historic_images=True)
         _advance("Finalizing reset")
@@ -1911,19 +1988,19 @@ class MainController:
             return []
 
         try:
-            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+            annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
             batch_images = d.historic_images[d.historic_offset]
 
             downloaded_files = []
             for img in batch_images:
-                local_file = self.file_manager.join(historic_temp_dir, img)
+                local_file = self.file_manager.join(annotated_temp_dir, img)
                 if self.file_manager.exists(local_file):
                     downloaded_files.append(local_file)
 
             # Only register when the batch changes, not every loop iteration
             batch_key = (d.historic_offset, tuple(batch_images))
             if getattr(self, '_last_registered_batch_key', None) != batch_key:
-                self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
+                self._register_local_images_in_db(annotated_temp_dir, image_names=batch_images)
                 self._last_registered_batch_key = batch_key
 
             return downloaded_files
@@ -2127,8 +2204,9 @@ class MainController:
     ):
         d = self.display
         db = db_client or d.db
-        historic_dir = historic_dir or self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        historic_dir = historic_dir or self._get_export_historic_dir()
         base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
+        visible_images = self._get_visible_historic_image_set()
 
         position_dirs = {
             position: {
@@ -2181,6 +2259,11 @@ class MainController:
                     progress_callback(idx, total_rows, "Saving dataset")
                 continue
 
+            if visible_images and img_name not in visible_images:
+                if callable(progress_callback):
+                    progress_callback(idx, total_rows, "Saving dataset")
+                continue
+
             status = str(status).strip().upper()
             if status not in ("OK", "NOK"):
                 if callable(progress_callback):
@@ -2196,6 +2279,8 @@ class MainController:
 
             source_path = self.file_manager.join(historic_dir, img_name)
             if not self.file_manager.exists(source_path):
+                error_count += 1
+                print(f"Historic source missing for dataset sync: {img_name}")
                 if callable(progress_callback):
                     progress_callback(idx, total_rows, "Saving dataset")
                 continue
@@ -2239,6 +2324,7 @@ class MainController:
             "copied": copied_count,
             "removed": removed_count,
             "errors": error_count,
+            "visible_images": len(visible_images),
             "save_classification": save_res,
         }
 
@@ -2252,6 +2338,7 @@ class MainController:
         db = db_client or d.db
         if not db:
             return {"ok": False, "error": "No DB connection"}
+        visible_images = self._get_visible_historic_image_set()
 
         try:
             rows = db.fetch("SELECT img_name, result FROM img_results")
@@ -2267,6 +2354,8 @@ class MainController:
             img_name = row.get("img_name") or row.get("name")
             operator_result = row.get("result")
             if not img_name or operator_result is None:
+                continue
+            if visible_images and img_name not in visible_images:
                 continue
 
             operator_result = str(operator_result).strip().upper()
@@ -2286,9 +2375,7 @@ class MainController:
             return {"ok": False, "error": "No valid images found"}
 
         # ---- copy images to final_classification folders ----
-        historic_dir = historic_dir or self.file_manager.join(
-            self.config.temp_dir, HISTORIC_SUBDIR_NAME
-        )
+        historic_dir = historic_dir or self._get_export_historic_dir()
         base_dir = str(FINAL_CLASSIFICATION_DIR)
 
         for position_dirs in FINAL_CLASSIFICATION_DIRS.values():
@@ -2397,8 +2484,9 @@ class MainController:
         rows_snapshot=None,
     ):
         db = db_client or self.display.db
-        historic_dir = historic_dir or self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
+        historic_dir = historic_dir or self._get_export_historic_dir()
         base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
+        visible_dir = self._get_visible_historic_dir()
 
         if not db:
             return {"verified": False, "issue_count": 1, "issues": {"db": ["No database connection"]}}
@@ -2419,25 +2507,40 @@ class MainController:
             }
 
         image_extensions = {".png", ".jpg", ".jpeg", ".bmp"}
+        visible_images = None
+        if self.file_manager.exists(visible_dir):
+            visible_images = sorted(
+                name
+                for name in self.file_manager.listdir(visible_dir)
+                if self.file_manager.is_file(self.file_manager.join(visible_dir, name))
+                and any(name.lower().endswith(ext) for ext in image_extensions)
+            )
+        elif rows_snapshot is None:
+            return {
+                "verified": False,
+                "issue_count": 1,
+                "issues": {"annotated": [f"Annotated folder not found: {visible_dir}"]},
+            }
+
         if rows_snapshot is not None:
-            historic_images = sorted(
+            row_images = sorted(
                 row.get("img_name") or row.get("name")
                 for row in rows_snapshot
                 if (row.get("img_name") or row.get("name"))
                 and any((row.get("img_name") or row.get("name", "")).lower().endswith(ext) for ext in image_extensions)
             )
+            if visible_images is None:
+                historic_images = row_images
+            else:
+                visible_set = set(visible_images)
+                historic_images = [img_name for img_name in row_images if img_name in visible_set]
         else:
-            historic_images = sorted(
-                name
-                for name in self.file_manager.listdir(historic_dir)
-                if self.file_manager.is_file(self.file_manager.join(historic_dir, name))
-                and any(name.lower().endswith(ext) for ext in image_extensions)
-            )
+            historic_images = visible_images or []
         if not historic_images:
             return {
                 "verified": False,
                 "issue_count": 1,
-                "issues": {"historic_images": ["No image files found in historic folder"]},
+                "issues": {"annotated_images": ["No image files found in annotated folder"]},
             }
 
         db_status_by_image = defaultdict(set)
@@ -2465,6 +2568,7 @@ class MainController:
         missing_db_status = []
         conflicting_db_status = []
         invalid_position = []
+        missing_historic_source = []
 
         for img_name in historic_images:
             statuses = db_status_by_image.get(img_name, set())
@@ -2484,6 +2588,14 @@ class MainController:
             match = re.search(r"(side|front|diag)", img_name, re.IGNORECASE)
             if not match:
                 invalid_position.append(img_name)
+                done += 1
+                if callable(progress_callback):
+                    progress_callback(done, total_steps, "Verifying classification")
+                continue
+
+            source_path = self.file_manager.join(historic_dir, img_name)
+            if not self.file_manager.exists(source_path):
+                missing_historic_source.append(img_name)
                 done += 1
                 if callable(progress_callback):
                     progress_callback(done, total_steps, "Verifying classification")
@@ -2534,6 +2646,7 @@ class MainController:
             "missing_db_status": missing_db_status,
             "conflicting_db_status": conflicting_db_status,
             "invalid_position": invalid_position,
+            "missing_historic_source": missing_historic_source,
             "duplicates": list(duplicates.keys()),
             "missing": missing,
             "wrong_folder": wrong_folder,
@@ -2563,8 +2676,8 @@ class MainController:
                 return "N/A"
 
             first_image = batch[0]
-            historic_dir = self.file_manager.join(self.config.temp_dir, HISTORIC_SUBDIR_NAME)
-            image_path = self.file_manager.join(historic_dir, first_image)
+            visible_dir = self._get_visible_historic_dir()
+            image_path = self.file_manager.join(visible_dir, first_image)
             if self.file_manager.exists(image_path):
                 import datetime
 
