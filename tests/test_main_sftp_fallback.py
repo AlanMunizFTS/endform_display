@@ -153,7 +153,7 @@ class TestMainSFTPFallback(unittest.TestCase):
         display.show_image_grid.side_effect = lambda *args, **kwargs: setattr(display, "exit_requested", True)
         display_cls.return_value = display
         logger_factory.return_value = MagicMock()
-        monotonic_mock.side_effect = [0.0, 11.0, 11.0]
+        monotonic_mock.side_effect = [0.0, 11.0, 11.0, 11.0, 11.0, 11.0]
 
         main.main()
 
@@ -194,7 +194,7 @@ class TestMainSFTPFallback(unittest.TestCase):
         display.show_image_grid.side_effect = lambda *args, **kwargs: setattr(display, "exit_requested", True)
         display_cls.return_value = display
         logger_factory.return_value = MagicMock()
-        monotonic_mock.side_effect = [0.0, 0.0, 0.0, 0.0, 0.0]
+        monotonic_mock.side_effect = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         main.main()
 
