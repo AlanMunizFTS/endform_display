@@ -26,6 +26,9 @@ class TestDisplayWindowSFTPState(unittest.TestCase):
         window.remote_requested = True
         window.remote_action_request = "start"
         window.trigger_active = True
+        window.capture_modal_visible = True
+        window.capture_modal_text = "capturing"
+        window.capture_modal_expires_at = 123.0
         window.set_sftp_client(None)
 
         self.assertIsNone(window.sftp_client)
@@ -33,6 +36,9 @@ class TestDisplayWindowSFTPState(unittest.TestCase):
         self.assertFalse(window.remote_requested)
         self.assertIsNone(window.remote_action_request)
         self.assertFalse(window.trigger_active)
+        self.assertFalse(window.capture_modal_visible)
+        self.assertEqual(window.capture_modal_text, "")
+        self.assertEqual(window.capture_modal_expires_at, 0.0)
 
 
 if __name__ == "__main__":

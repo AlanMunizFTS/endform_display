@@ -7,6 +7,10 @@ from main_controller import process_remote_event
 class _DisplayStub:
     def __init__(self):
         self.trigger_active = False
+        self.capture_modal_visible = False
+        self.capture_modal_text = ""
+        self.capture_modal_color = None
+        self.capture_modal_expires_at = 0.0
 
 
 class TestMainControllerRemoteEvents(unittest.TestCase):
@@ -38,6 +42,22 @@ class TestMainControllerRemoteEvents(unittest.TestCase):
 
         logger.info.assert_not_called()
         logger.warn.assert_not_called()
+
+    def test_stdout_done_signal_updates_capture_modal(self):
+        display = _DisplayStub()
+        logger = MagicMock()
+
+        process_remote_event(
+            {"type": "stdout", "line": "Done signal sent to PLC"},
+            display,
+            logger,
+        )
+
+        self.assertTrue(display.capture_modal_visible)
+        self.assertEqual(display.capture_modal_text, "captured")
+        self.assertEqual(display.capture_modal_color, (0, 150, 0))
+        self.assertGreater(display.capture_modal_expires_at, 0.0)
+        logger.info.assert_not_called()
 
 
 if __name__ == "__main__":

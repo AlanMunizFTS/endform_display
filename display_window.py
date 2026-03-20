@@ -149,6 +149,10 @@ class DisplayWindow:
         self.toast_message_is_error = False
         self.toast_message_time = 0.0
         self.toast_message_duration_sec = 1.8
+        self.capture_modal_visible = False
+        self.capture_modal_text = ""
+        self.capture_modal_color = (0, 0, 200)
+        self.capture_modal_expires_at = 0.0
         self.set_sftp_client(sftp_client)
 
     def set_db_connection(self, db_client):
@@ -176,6 +180,7 @@ class DisplayWindow:
             self.remote_action_request = None
             self.remote_requested = False
             self.trigger_active = False
+            self.clear_capture_modal()
 
     def set_controller(self, controller):
         self.controller = controller
@@ -255,6 +260,84 @@ class DisplayWindow:
         self.toast_message_is_error = bool(is_error)
         self.toast_message_time = time.time()
         self.toast_message_duration_sec = max(0.5, float(duration_sec))
+
+    def show_capture_modal(self, message, color, duration_sec=None):
+        """Show a large blocking-style modal for remote capture status."""
+        self.capture_modal_text = str(message or "").strip()
+        self.capture_modal_color = tuple(color) if color is not None else (0, 0, 200)
+        self.capture_modal_visible = bool(self.capture_modal_text)
+        if duration_sec is None:
+            self.capture_modal_expires_at = 0.0
+        else:
+            self.capture_modal_expires_at = time.time() + max(0.05, float(duration_sec))
+
+    def clear_capture_modal(self):
+        """Clear any active remote capture status modal."""
+        self.capture_modal_visible = False
+        self.capture_modal_text = ""
+        self.capture_modal_expires_at = 0.0
+
+    def draw_capture_modal(self, canvas):
+        """Draw a large centered modal for remote capture status."""
+        if not self.capture_modal_visible or not self.capture_modal_text:
+            return canvas
+
+        if self.capture_modal_expires_at and time.time() >= self.capture_modal_expires_at:
+            self.clear_capture_modal()
+            return canvas
+
+        dialog_width = max(320, int(self.width * 0.75))
+        dialog_height = max(240, int(self.height * 0.75))
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (245, 245, 245),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            4,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text = self.capture_modal_text
+        available_width = max(40, dialog_width - 80)
+        available_height = max(40, dialog_height - 80)
+        font_scale = 8.0
+        thickness = 10
+        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+
+        while (
+            font_scale > 0.6
+            and (text_size[0] > available_width or text_size[1] > available_height)
+        ):
+            font_scale -= 0.1
+            thickness = max(2, int(round(font_scale * 1.2)))
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+
+        text_x = dialog_x + (dialog_width - text_size[0]) // 2
+        text_y = dialog_y + (dialog_height + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            text,
+            (text_x, text_y),
+            font,
+            font_scale,
+            self.capture_modal_color,
+            thickness,
+        )
+        return canvas
 
     def _copy_text_to_clipboard(self, text):
         """Copy text to the system clipboard with a Windows-first fallback."""
@@ -2862,6 +2945,7 @@ class DisplayWindow:
         else:
             canvas = self.draw_sync_message(canvas)
             canvas = self.draw_toast_message(canvas)
+        canvas = self.draw_capture_modal(canvas)
         if self.db_blocking:
             canvas = self.draw_db_block_dialog(canvas)
 
