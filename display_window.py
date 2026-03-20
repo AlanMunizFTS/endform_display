@@ -1743,9 +1743,9 @@ class DisplayWindow:
         thickness = 2
 
         warning_lines = [
-            "Rebuild the app database from historic images?",
+            "Rebuild the app database from annotated historic images?",
             "This clears img_results, classified_images,",
-            "and piece_result before rebuilding from HISTORIC_LOCAL_DIR.",
+            "and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
             "FINAL_CLASSIFICATION_DIR will also be emptied.",
             "SYNC_IMAGES_BASE_DIR will keep only empty folders.",
             "Historic images will be preserved.",
