@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from file_manager import FileManager
 from main_controller import ControllerConfig, MainController
+from paths_config import FINAL_CLASSIFICATION_DIRS, STATUS_SYNC_DIRS
 
 
 class TestMainControllerAnnotatedHistoric(unittest.TestCase):
@@ -161,6 +162,93 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             self.assertTrue((annotated_dir / survivor_name).exists())
             self.assertTrue((historic_dir / survivor_name).exists())
             controller.enter_historic_mode.assert_called_once()
+
+    def test_perform_reset_clears_classified_and_final_dirs_and_keeps_live_root(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            annotated_dir = tmp_path / "annotated"
+            historic_dir = tmp_path / "historic"
+            annotated_dir.mkdir()
+            historic_dir.mkdir()
+            (annotated_dir / "annotated.png").write_bytes(b"annotated")
+            (historic_dir / "historic.png").write_bytes(b"historic")
+            live_root_file = tmp_path / "live_root.png"
+            live_root_file.write_bytes(b"live")
+
+            sync_base_dir = tmp_path / "classified"
+            (sync_base_dir / "side_ok").mkdir(parents=True)
+            (sync_base_dir / "side_ok" / "old_side.png").write_bytes(b"old")
+            (sync_base_dir / "unexpected_folder").mkdir(parents=True)
+            (sync_base_dir / "unexpected_folder" / "junk.txt").write_text("junk", encoding="utf-8")
+
+            final_classification_dir = tmp_path / "final_classification"
+            (final_classification_dir / "Side_P").mkdir(parents=True)
+            (final_classification_dir / "Side_P" / "old_side.png").write_bytes(b"old")
+            (final_classification_dir / "unexpected_folder").mkdir(parents=True)
+            (final_classification_dir / "unexpected_folder" / "junk.txt").write_text(
+                "junk",
+                encoding="utf-8",
+            )
+
+            db = MagicMock()
+            db.execute.return_value = 1
+            display = self._build_display(db=db)
+            display.sftp_client = object()
+
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(
+                    temp_dir=tmp_dir,
+                    remote_hist_dir="/remote/historic",
+                    remote_annotated_dir="/remote/annotated",
+                ),
+                file_manager=FileManager(),
+            )
+            controller.file_manager.sftp_chdir = MagicMock()
+            controller.file_manager.sftp_listdir = MagicMock(
+                side_effect=[["remote_annotated.png"], ["remote_historic.png"]]
+            )
+            controller.file_manager.sftp_remove = MagicMock()
+
+            with patch("main_controller.SYNC_IMAGES_BASE_DIR", sync_base_dir), patch(
+                "main_controller.FINAL_CLASSIFICATION_DIR", final_classification_dir
+            ):
+                result = controller.perform_reset(db_client=db)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(list(annotated_dir.iterdir()), [])
+            self.assertEqual(list(historic_dir.iterdir()), [])
+            self.assertTrue(live_root_file.exists())
+
+            expected_sync_folders = {
+                folder_name
+                for position_dirs in STATUS_SYNC_DIRS.values()
+                for folder_name in position_dirs.values()
+            }
+            self.assertEqual(set(p.name for p in sync_base_dir.iterdir()), expected_sync_folders)
+            for folder_name in expected_sync_folders:
+                self.assertEqual(list((sync_base_dir / folder_name).iterdir()), [])
+
+            expected_final_folders = {
+                folder_name
+                for position_dirs in FINAL_CLASSIFICATION_DIRS.values()
+                for folder_name in position_dirs.values()
+            }
+            self.assertEqual(
+                set(p.name for p in final_classification_dir.iterdir()),
+                expected_final_folders,
+            )
+            for folder_name in expected_final_folders:
+                self.assertEqual(list((final_classification_dir / folder_name).iterdir()), [])
+
+            controller.file_manager.sftp_remove.assert_any_call(
+                display.sftp_client,
+                "/remote/annotated/remote_annotated.png",
+            )
+            controller.file_manager.sftp_remove.assert_any_call(
+                display.sftp_client,
+                "/remote/historic/remote_historic.png",
+            )
 
 
 if __name__ == "__main__":
