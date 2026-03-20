@@ -520,6 +520,9 @@ class MainController:
     def _get_visible_historic_image_set(self):
         return set(self._list_local_image_names(self._get_visible_historic_dir()))
 
+    def _get_visible_historic_image_snapshot(self):
+        return sorted(self._get_visible_historic_image_set())
+
     def _clear_tmp_display(self):
         tmp_dir = self.config.temp_dir
         if not self.file_manager.exists(tmp_dir):
@@ -778,6 +781,9 @@ class MainController:
         def _sync_worker():
             worker_db = None
             try:
+                self.stop_historic_download_worker()
+                visible_images_snapshot = self._get_visible_historic_image_snapshot()
+
                 from db import get_db_connection
 
                 worker_db = get_db_connection()
@@ -796,6 +802,7 @@ class MainController:
                     base_dir=base_dir,
                     db_client=worker_db,
                     progress_callback=_sync_progress_cb,
+                    visible_images_snapshot=visible_images_snapshot,
                 )
 
                 if not sync_result.get("ok", False):
@@ -814,6 +821,7 @@ class MainController:
                     db_client=worker_db,
                     historic_dir=historic_dir,
                     progress_callback=_classification_progress_cb,
+                    visible_images_snapshot=visible_images_snapshot,
                 )
 
                 def _verify_progress_cb(done, total, stage):
@@ -831,6 +839,7 @@ class MainController:
                     db_client=worker_db,
                     progress_callback=_verify_progress_cb,
                     rows_snapshot=sync_result.get("rows_snapshot"),
+                    visible_images_snapshot=visible_images_snapshot,
                 )
 
                 self._set_sync_progress("Completed", 100)
@@ -876,6 +885,16 @@ class MainController:
                 d.sync_message_is_error = True
                 self.logger.error(f"[SYNC] Dataset sync failed: {exc}", allow_repeat=True)
             finally:
+                try:
+                    self.start_historic_download_on_startup(
+                        self.config.temp_dir,
+                        check_interval=self.config.historic_download_check_interval,
+                    )
+                except Exception as exc:
+                    self.logger.error(
+                        f"[SYNC] Error restarting historic download workers: {exc}",
+                        allow_repeat=True,
+                    )
                 d.sync_in_progress = False
                 d.sync_message_time = time.time()
                 if worker_db is not None:
@@ -2287,12 +2306,15 @@ class MainController:
         base_dir=None,
         db_client=None,
         progress_callback=None,
+        visible_images_snapshot=None,
     ):
         d = self.display
         db = db_client or d.db
         historic_dir = historic_dir or self._get_export_historic_dir()
         base_dir = base_dir or str(SYNC_IMAGES_BASE_DIR)
-        visible_images = self._get_visible_historic_image_set()
+        if visible_images_snapshot is None:
+            visible_images_snapshot = self._get_visible_historic_image_snapshot()
+        visible_images = set(visible_images_snapshot)
 
         position_dirs = {
             position: {
@@ -2399,7 +2421,11 @@ class MainController:
 
         # Ensure piece_result is up-to-date for the current dataset.
         # This updates FOK/FNOK counts in the stats card based on DB state.
-        save_res = self.save_classification_results(db_client=db, historic_dir=historic_dir)
+        save_res = self.save_classification_results(
+            db_client=db,
+            historic_dir=historic_dir,
+            visible_images_snapshot=visible_images_snapshot,
+        )
         if not save_res.get("ok", False):
             print(f"Warning: saving classification results failed: {save_res.get('error')}")
 
@@ -2411,10 +2437,17 @@ class MainController:
             "removed": removed_count,
             "errors": error_count,
             "visible_images": len(visible_images),
+            "visible_images_snapshot": visible_images_snapshot,
             "save_classification": save_res,
         }
 
-    def save_classification_results(self, db_client=None, historic_dir=None, progress_callback=None):
+    def save_classification_results(
+        self,
+        db_client=None,
+        historic_dir=None,
+        progress_callback=None,
+        visible_images_snapshot=None,
+    ):
         """Copy images to final_classification folders (P/N/FP/FN per position).
 
         DB writes happen at data arrival time (_upsert_classification).
@@ -2424,7 +2457,9 @@ class MainController:
         db = db_client or d.db
         if not db:
             return {"ok": False, "error": "No DB connection"}
-        visible_images = self._get_visible_historic_image_set()
+        if visible_images_snapshot is None:
+            visible_images_snapshot = self._get_visible_historic_image_snapshot()
+        visible_images = set(visible_images_snapshot)
 
         try:
             rows = db.fetch("SELECT img_name, result FROM img_results")
@@ -2568,6 +2603,7 @@ class MainController:
         db_client=None,
         progress_callback=None,
         rows_snapshot=None,
+        visible_images_snapshot=None,
     ):
         db = db_client or self.display.db
         historic_dir = historic_dir or self._get_export_historic_dir()
@@ -2594,7 +2630,9 @@ class MainController:
 
         image_extensions = {".png", ".jpg", ".jpeg", ".bmp"}
         visible_images = None
-        if self.file_manager.exists(visible_dir):
+        if visible_images_snapshot is not None:
+            visible_images = sorted(visible_images_snapshot)
+        elif self.file_manager.exists(visible_dir):
             visible_images = sorted(
                 name
                 for name in self.file_manager.listdir(visible_dir)
