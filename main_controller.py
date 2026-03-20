@@ -424,7 +424,7 @@ class ControllerConfig:
     remote_db_polling_enabled: bool = True
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
-    remote_db_query_limit: int = 10
+    remote_db_query_limit: int = 25
     remote_db_success_interval_sec: float = 0.0
     remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
@@ -614,10 +614,106 @@ class MainController:
             for column_name in self.config.remote_db_columns
         )
         limit = max(1, int(self.config.remote_db_query_limit))
-        return f"SELECT {selected_columns} FROM {table_name} LIMIT {limit}"
+        return (
+            f"SELECT {selected_columns} FROM {table_name} "
+            f"ORDER BY \"created_at\" ASC LIMIT {limit}"
+        )
 
     def _serialize_remote_db_row(self, row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
+
+    def _collect_remote_model_result_rows(self, remote_db, query):
+        self.logger.info(f"[REMOTE_DB] Executing query: {query}", allow_repeat=True)
+        rows = remote_db.fetch(query)
+        self.logger.info(
+            f"[REMOTE_DB] Retrieved {len(rows)} rows using LIMIT {self.config.remote_db_query_limit}",
+            allow_repeat=True,
+        )
+        for idx, row in enumerate(rows, start=1):
+            self.logger.info(
+                f"[REMOTE_DB] Row {idx}: {self._serialize_remote_db_row(row)}",
+                allow_repeat=True,
+            )
+        return rows
+
+    def _fetch_existing_local_classified_images(self, local_db, image_names):
+        if not image_names:
+            return set()
+
+        rows = local_db.fetch(
+            "SELECT img_name FROM classified_images WHERE img_name = ANY(%s)",
+            (image_names,),
+        )
+        return {row["img_name"] for row in rows or [] if row.get("img_name")}
+
+    def _update_local_classification_metadata(self, local_db, matched_rows):
+        updated_img_names = []
+        for row in matched_rows:
+            img_name = row["img_name"]
+            affected_rows = local_db.execute(
+                "UPDATE classified_images SET class_name = %s, confidence = %s WHERE img_name = %s",
+                (row.get("class_name"), row.get("confidence"), img_name),
+            )
+            if affected_rows:
+                updated_img_names.append(img_name)
+        return updated_img_names
+
+    def _delete_remote_model_results(self, remote_db, img_names):
+        if not img_names:
+            return 0
+
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        return remote_db.execute(
+            f"DELETE FROM {table_name} WHERE img_name = ANY(%s)",
+            (img_names,),
+        )
+
+    def _sync_remote_rows_into_local_classified_images(self, remote_rows, local_db, remote_db):
+        candidate_rows = []
+        for row in remote_rows:
+            img_name = str(row.get("img_name") or "").strip()
+            if not img_name:
+                continue
+            candidate_rows.append(
+                {
+                    "img_name": img_name,
+                    "class_name": row.get("class_name"),
+                    "confidence": row.get("confidence"),
+                }
+            )
+
+        if not candidate_rows:
+            return {
+                "candidate_count": 0,
+                "matched_count": 0,
+                "updated_count": 0,
+                "deleted_count": 0,
+                "missing_local": [],
+                "updated_img_names": [],
+            }
+
+        existing_img_names = self._fetch_existing_local_classified_images(
+            local_db,
+            [row["img_name"] for row in candidate_rows],
+        )
+        matched_rows = [
+            row for row in candidate_rows if row["img_name"] in existing_img_names
+        ]
+        missing_local = [
+            row["img_name"] for row in candidate_rows if row["img_name"] not in existing_img_names
+        ]
+
+        updated_img_names = self._update_local_classification_metadata(local_db, matched_rows)
+        deleted_count = self._delete_remote_model_results(remote_db, updated_img_names)
+
+        return {
+            "candidate_count": len(candidate_rows),
+            "matched_count": len(matched_rows),
+            "updated_count": len(updated_img_names),
+            "deleted_count": deleted_count,
+            "missing_local": missing_local,
+            "updated_img_names": updated_img_names,
+        }
 
     def _run_remote_db_poll_iteration(self):
         query = self._build_remote_db_query()
@@ -631,6 +727,14 @@ class MainController:
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
 
         self._remote_db_placeholder_warned = False
+        local_db = getattr(self.display, "db", None)
+        if not self.db_connected or local_db is None:
+            self.logger.warn(
+                "[REMOTE_DB] Local PostgreSQL unavailable; skipping remote metadata sync.",
+                allow_repeat=True,
+            )
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
         ssh_credentials = self._resolve_remote_db_ssh_credentials()
         if not ssh_credentials:
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
@@ -650,15 +754,24 @@ class MainController:
                 ssh_password=ssh_credentials["password"],
             )
             self.logger.info("[REMOTE_DB] Remote PostgreSQL connection successful", allow_repeat=True)
-            self.logger.info(f"[REMOTE_DB] Executing query: {query}", allow_repeat=True)
-            rows = remote_db.fetch(query)
+            rows = self._collect_remote_model_result_rows(remote_db, query)
+            sync_summary = self._sync_remote_rows_into_local_classified_images(
+                rows,
+                local_db=local_db,
+                remote_db=remote_db,
+            )
             self.logger.info(
-                f"[REMOTE_DB] Retrieved {len(rows)} rows using LIMIT {self.config.remote_db_query_limit}",
+                "[REMOTE_DB] Local sync summary: "
+                f"candidates={sync_summary['candidate_count']}, "
+                f"matched={sync_summary['matched_count']}, "
+                f"updated={sync_summary['updated_count']}, "
+                f"deleted_remote={sync_summary['deleted_count']}",
                 allow_repeat=True,
             )
-            for idx, row in enumerate(rows, start=1):
+            if sync_summary["missing_local"]:
                 self.logger.info(
-                    f"[REMOTE_DB] Row {idx}: {self._serialize_remote_db_row(row)}",
+                    "[REMOTE_DB] Missing local classified_images rows: "
+                    + ", ".join(sync_summary["missing_local"]),
                     allow_repeat=True,
                 )
             return max(0.0, float(self.config.remote_db_success_interval_sec))
