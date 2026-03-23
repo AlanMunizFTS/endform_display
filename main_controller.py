@@ -280,7 +280,6 @@ def _download_live_images_remote_impl(
     app,
     remote_path,
     local_path,
-    remote_hist_dir,
     rotation_state,
     logger,
     image_extensions,
@@ -316,8 +315,6 @@ def _download_live_images_remote_impl(
             (current_offset + 1) % total_batches if total_batches > 0 else 0
         )
 
-        app.ensure_remote_dir(remote_hist_dir)
-
         # Clear existing images from local_path before downloading new batch
         # so tmp_display never exceeds max_images files at any point
         try:
@@ -333,10 +330,8 @@ def _download_live_images_remote_impl(
         for img_name in selected_images:
             local_file = app.file_manager.join(local_path, img_name)
             remote_img_path = app.join_remote_path(remote_path, img_name)
-            remote_hist_path = app.join_remote_path(remote_hist_dir, img_name)
             try:
                 app.download_file(remote_img_path, local_file)
-                app.upload_file(local_file, remote_hist_path)
                 downloaded_files.append(local_file)
             except FileNotFoundError:
                 return []
@@ -389,7 +384,6 @@ def download_live_images_remote(
     app,
     remote_path,
     local_path,
-    remote_hist_dir,
     rotation_state,
     logger,
     max_images=7,
@@ -398,7 +392,6 @@ def download_live_images_remote(
         app=app,
         remote_path=remote_path,
         local_path=local_path,
-        remote_hist_dir=remote_hist_dir,
         rotation_state=rotation_state,
         logger=logger,
         image_extensions=(".png", ".jpg", ".jpeg", ".bmp"),
@@ -1581,7 +1574,6 @@ class MainController:
             app=self.sftp_app,
             remote_path=self.config.remote_live_dir,
             local_path=self.config.temp_dir,
-            remote_hist_dir=self.config.remote_hist_dir,
             rotation_state=self.live_rotation_state_remote,
             logger=self.logger,
             image_extensions=self.config.image_extensions,
