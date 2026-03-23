@@ -425,6 +425,9 @@ class ControllerConfig:
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
     remote_db_query_limit: int = 25
+    remote_db_target_sync_batch: int = 25
+    remote_db_max_scan_pages: int = 20
+    remote_db_forward_scan_ratio: float = 0.7
     remote_db_success_interval_sec: float = 0.0
     remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
@@ -490,6 +493,8 @@ class MainController:
         self.remote_db_poll_thread = None
         self.remote_db_stop_event = None
         self._remote_db_placeholder_warned = False
+        self.remote_db_forward_cursor_id = 0
+        self.remote_db_backfill_cursor_id = 0
         self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
@@ -613,69 +618,185 @@ class MainController:
             self._quote_remote_db_identifier(column_name)
             for column_name in self.config.remote_db_columns
         )
-        limit = max(1, int(self.config.remote_db_query_limit))
         return (
-            f"SELECT {selected_columns} FROM {table_name} "
-            f"ORDER BY \"created_at\" ASC LIMIT {limit}"
+            f"SELECT \"id\", {selected_columns} FROM {table_name} "
+            f"WHERE \"id\" > %s "
+            f"ORDER BY \"id\" ASC LIMIT %s"
         )
 
     def _serialize_remote_db_row(self, row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
 
-    def _collect_remote_model_result_rows(self, remote_db, query):
-        self.logger.info(f"[REMOTE_DB] Executing query: {query}", allow_repeat=True)
-        rows = remote_db.fetch(query)
+    def _collect_remote_model_result_rows(self, remote_db, query, after_id, limit, scan_label):
         self.logger.info(
-            f"[REMOTE_DB] Retrieved {len(rows)} rows using LIMIT {self.config.remote_db_query_limit}",
+            f"[REMOTE_DB] Executing {scan_label} query after id {after_id} with limit {limit}: {query}",
+            allow_repeat=True,
+        )
+        rows = remote_db.fetch(query, (after_id, limit))
+        self.logger.info(
+            f"[REMOTE_DB] Retrieved {len(rows)} rows for {scan_label} scan using LIMIT {limit}",
             allow_repeat=True,
         )
         for idx, row in enumerate(rows, start=1):
             self.logger.info(
-                f"[REMOTE_DB] Row {idx}: {self._serialize_remote_db_row(row)}",
+                f"[REMOTE_DB] {scan_label} row {idx}: {self._serialize_remote_db_row(row)}",
                 allow_repeat=True,
             )
         return rows
 
     def _fetch_existing_local_classified_images(self, local_db, image_names):
         if not image_names:
-            return set()
+            return {}
 
         rows = local_db.fetch(
-            "SELECT img_name FROM classified_images WHERE img_name = ANY(%s)",
+            "SELECT id, img_name FROM classified_images WHERE img_name = ANY(%s)",
             (image_names,),
         )
-        return {row["img_name"] for row in rows or [] if row.get("img_name")}
+        return {
+            row["img_name"]: {"id": row["id"]}
+            for row in rows or []
+            if row.get("img_name") and row.get("id") is not None
+        }
 
-    def _update_local_classification_metadata(self, local_db, matched_rows):
-        updated_img_names = []
+    def _insert_local_classification_defects(self, local_db, matched_rows):
+        synced_img_names = []
+        synced_remote_ids = []
+        recalculated_jsns = set()
         for row in matched_rows:
             img_name = row["img_name"]
-            affected_rows = local_db.execute(
-                "UPDATE classified_images SET class_name = %s, confidence = %s WHERE img_name = %s",
-                (row.get("class_name"), row.get("confidence"), img_name),
+            local_db.execute(
+                "INSERT INTO classified_image_defects "
+                "(classified_image_id, class_name, confidence) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+                (
+                    row["classified_image_id"],
+                    row.get("class_name"),
+                    row.get("confidence"),
+                ),
             )
-            if affected_rows:
-                updated_img_names.append(img_name)
-        return updated_img_names
+            synced_img_names.append(img_name)
+            synced_remote_ids.append(row["remote_id"])
+            recalculated_jsns.add(img_name.split("_")[0] if "_" in img_name else img_name)
 
-    def _delete_remote_model_results(self, remote_db, img_names):
-        if not img_names:
+        for jsn in sorted(recalculated_jsns):
+            self._recalculate_piece_result(jsn, db_client=local_db)
+
+        return synced_img_names, synced_remote_ids
+
+    def _delete_remote_model_results(self, remote_db, remote_ids):
+        if not remote_ids:
             return 0
 
         table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
         return remote_db.execute(
-            f"DELETE FROM {table_name} WHERE img_name = ANY(%s)",
-            (img_names,),
+            f"DELETE FROM {table_name} WHERE id = ANY(%s)",
+            (remote_ids,),
         )
 
-    def _sync_remote_rows_into_local_classified_images(self, remote_rows, local_db, remote_db):
+    def _scan_remote_rows_for_sync(
+        self,
+        remote_db,
+        local_db,
+        query,
+        start_after_id,
+        max_pages,
+        target_sync_batch,
+        scan_label,
+        excluded_remote_ids=None,
+    ):
+        page_limit = max(1, int(self.config.remote_db_query_limit))
+        seen_remote_ids = set(excluded_remote_ids or [])
+        matched_rows = []
+        missing_local = []
+        missing_local_seen = set()
+        scanned_count = 0
+        pages_scanned = 0
+        current_after_id = max(0, int(start_after_id or 0))
+
+        while pages_scanned < max_pages and len(matched_rows) < target_sync_batch:
+            rows = self._collect_remote_model_result_rows(
+                remote_db=remote_db,
+                query=query,
+                after_id=current_after_id,
+                limit=page_limit,
+                scan_label=scan_label,
+            )
+            pages_scanned += 1
+
+            if not rows:
+                current_after_id = 0
+                break
+
+            normalized_rows = []
+            for row in rows:
+                remote_id = row.get("id")
+                img_name = str(row.get("img_name") or "").strip()
+                if remote_id is None or not img_name:
+                    continue
+                normalized_rows.append(
+                    {
+                        "remote_id": int(remote_id),
+                        "img_name": img_name,
+                        "class_name": row.get("class_name"),
+                        "confidence": row.get("confidence"),
+                    }
+                )
+
+            if normalized_rows:
+                current_after_id = max(row["remote_id"] for row in normalized_rows)
+
+            scanned_count += len(normalized_rows)
+
+            page_image_names = [
+                row["img_name"]
+                for row in normalized_rows
+                if row["remote_id"] not in seen_remote_ids
+            ]
+            existing_images = self._fetch_existing_local_classified_images(local_db, page_image_names)
+
+            for row in normalized_rows:
+                if row["remote_id"] in seen_remote_ids:
+                    continue
+                seen_remote_ids.add(row["remote_id"])
+
+                local_image = existing_images.get(row["img_name"])
+                if local_image is None:
+                    if row["img_name"] not in missing_local_seen:
+                        missing_local_seen.add(row["img_name"])
+                        missing_local.append(row["img_name"])
+                    continue
+
+                matched_rows.append(
+                    {
+                        **row,
+                        "classified_image_id": local_image["id"],
+                    }
+                )
+
+            if len(rows) < page_limit:
+                current_after_id = 0
+                break
+
+        return {
+            "matched_rows": matched_rows,
+            "missing_local": missing_local,
+            "scanned_count": scanned_count,
+            "pages_scanned": pages_scanned,
+            "next_after_id": current_after_id,
+            "seen_remote_ids": seen_remote_ids,
+        }
+
+    def _sync_remote_rows_into_local_classified_images(self, matched_rows, missing_local, local_db, remote_db):
         candidate_rows = []
-        for row in remote_rows:
+        for row in matched_rows:
             img_name = str(row.get("img_name") or "").strip()
             if not img_name:
                 continue
             candidate_rows.append(
                 {
+                    "remote_id": row["remote_id"],
+                    "classified_image_id": row["classified_image_id"],
                     "img_name": img_name,
                     "class_name": row.get("class_name"),
                     "confidence": row.get("confidence"),
@@ -686,33 +807,22 @@ class MainController:
             return {
                 "candidate_count": 0,
                 "matched_count": 0,
-                "updated_count": 0,
+                "synced_count": 0,
                 "deleted_count": 0,
-                "missing_local": [],
-                "updated_img_names": [],
+                "missing_local": list(missing_local or []),
+                "synced_img_names": [],
             }
 
-        existing_img_names = self._fetch_existing_local_classified_images(
-            local_db,
-            [row["img_name"] for row in candidate_rows],
-        )
-        matched_rows = [
-            row for row in candidate_rows if row["img_name"] in existing_img_names
-        ]
-        missing_local = [
-            row["img_name"] for row in candidate_rows if row["img_name"] not in existing_img_names
-        ]
-
-        updated_img_names = self._update_local_classification_metadata(local_db, matched_rows)
-        deleted_count = self._delete_remote_model_results(remote_db, updated_img_names)
+        synced_img_names, synced_remote_ids = self._insert_local_classification_defects(local_db, candidate_rows)
+        deleted_count = self._delete_remote_model_results(remote_db, synced_remote_ids)
 
         return {
             "candidate_count": len(candidate_rows),
-            "matched_count": len(matched_rows),
-            "updated_count": len(updated_img_names),
+            "matched_count": len(candidate_rows),
+            "synced_count": len(synced_img_names),
             "deleted_count": deleted_count,
-            "missing_local": missing_local,
-            "updated_img_names": updated_img_names,
+            "missing_local": list(missing_local or []),
+            "synced_img_names": synced_img_names,
         }
 
     def _run_remote_db_poll_iteration(self):
@@ -743,6 +853,14 @@ class MainController:
         try:
             from db import get_remote_db_connection_via_ssh
 
+            total_page_budget = max(1, int(self.config.remote_db_max_scan_pages))
+            forward_page_budget = min(
+                total_page_budget,
+                max(1, int(round(total_page_budget * float(self.config.remote_db_forward_scan_ratio)))),
+            )
+            backfill_page_budget = max(0, total_page_budget - forward_page_budget)
+            target_sync_batch = max(1, int(self.config.remote_db_target_sync_batch))
+
             self.logger.info(
                 f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
                 allow_repeat=True,
@@ -754,17 +872,54 @@ class MainController:
                 ssh_password=ssh_credentials["password"],
             )
             self.logger.info("[REMOTE_DB] Remote PostgreSQL connection successful", allow_repeat=True)
-            rows = self._collect_remote_model_result_rows(remote_db, query)
+
+            forward_scan = self._scan_remote_rows_for_sync(
+                remote_db=remote_db,
+                local_db=local_db,
+                query=query,
+                start_after_id=self.remote_db_forward_cursor_id,
+                max_pages=forward_page_budget,
+                target_sync_batch=target_sync_batch,
+                scan_label="forward",
+            )
+            self.remote_db_forward_cursor_id = forward_scan["next_after_id"]
+
+            combined_matched_rows = list(forward_scan["matched_rows"])
+            combined_missing_local = list(forward_scan["missing_local"])
+            scanned_count = forward_scan["scanned_count"]
+            pages_scanned = forward_scan["pages_scanned"]
+
+            remaining_target = max(0, target_sync_batch - len(combined_matched_rows))
+            if remaining_target > 0 and backfill_page_budget > 0:
+                backfill_scan = self._scan_remote_rows_for_sync(
+                    remote_db=remote_db,
+                    local_db=local_db,
+                    query=query,
+                    start_after_id=self.remote_db_backfill_cursor_id,
+                    max_pages=backfill_page_budget,
+                    target_sync_batch=remaining_target,
+                    scan_label="backfill",
+                    excluded_remote_ids=forward_scan["seen_remote_ids"],
+                )
+                self.remote_db_backfill_cursor_id = backfill_scan["next_after_id"]
+                combined_matched_rows.extend(backfill_scan["matched_rows"])
+                combined_missing_local.extend(backfill_scan["missing_local"])
+                scanned_count += backfill_scan["scanned_count"]
+                pages_scanned += backfill_scan["pages_scanned"]
+
             sync_summary = self._sync_remote_rows_into_local_classified_images(
-                rows,
+                combined_matched_rows,
+                missing_local=combined_missing_local,
                 local_db=local_db,
                 remote_db=remote_db,
             )
             self.logger.info(
                 "[REMOTE_DB] Local sync summary: "
+                f"scanned={scanned_count}, "
+                f"pages={pages_scanned}, "
                 f"candidates={sync_summary['candidate_count']}, "
                 f"matched={sync_summary['matched_count']}, "
-                f"updated={sync_summary['updated_count']}, "
+                f"synced={sync_summary['synced_count']}, "
                 f"deleted_remote={sync_summary['deleted_count']}",
                 allow_repeat=True,
             )
@@ -2504,6 +2659,28 @@ class MainController:
                 "   WHERE piece_id = piece_result.id AND model_result = 'NOK' LIMIT 1), 'OK') "
                 "WHERE jsn = %s",
                 (jsn,),
+            )
+
+            piece_rows = db.fetch(
+                "SELECT id FROM piece_result WHERE jsn = %s",
+                (jsn,),
+            )
+            if not piece_rows:
+                return
+
+            piece_id = piece_rows[0]["id"]
+            db.execute(
+                "DELETE FROM piece_result_defects WHERE piece_result_id = %s",
+                (piece_id,),
+            )
+            db.execute(
+                "INSERT INTO piece_result_defects (piece_result_id, class_name, confidence) "
+                "SELECT %s, cid.class_name, MAX(cid.confidence) "
+                "FROM classified_image_defects cid "
+                "JOIN classified_images ci ON ci.id = cid.classified_image_id "
+                "WHERE ci.piece_id = %s "
+                "GROUP BY cid.class_name",
+                (piece_id, piece_id),
             )
         except Exception as exc:
             print(f"Error recalculating piece_result for {jsn}: {exc}")
