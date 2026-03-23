@@ -156,6 +156,7 @@ class DisplayWindow:
         self.capture_modal_text = ""
         self.capture_modal_color = (0, 0, 200)
         self.capture_modal_expires_at = 0.0
+        self.manual_capture_pending = False
         self.set_sftp_client(sftp_client)
 
     def set_db_connection(self, db_client):
@@ -183,6 +184,7 @@ class DisplayWindow:
             self.remote_action_request = None
             self.remote_requested = False
             self.trigger_active = False
+            self.manual_capture_pending = False
             self.clear_capture_modal()
 
     def set_controller(self, controller):

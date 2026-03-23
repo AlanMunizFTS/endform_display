@@ -363,7 +363,9 @@ def _process_remote_event_impl(msg, display, logger):
                 allow_repeat=True,
             )
         if "done signal sent to plc" in lower_line:
-            _show_capture_modal(display, "captured", (0, 150, 0), duration_sec=0.5)
+            if getattr(display, "manual_capture_pending", False):
+                display.manual_capture_pending = False
+                _show_capture_modal(display, "captured", (0, 150, 0), duration_sec=0.5)
 
     elif msg_type == "stderr":
         return
@@ -1561,6 +1563,7 @@ class MainController:
         )
         self.display.remote_requested = True
         self.display.trigger_active = False
+        self.display.manual_capture_pending = False
         _clear_capture_modal(self.display)
         try:
             self.remote_pid = self.pid_queue.get(timeout=5)
@@ -1572,6 +1575,7 @@ class MainController:
         if self.stop_event is None and self.remote_process is None and self.remote_pid is None:
             self.display.remote_requested = False
             self.display.trigger_active = False
+            self.display.manual_capture_pending = False
             _clear_capture_modal(self.display)
             return
         self.logger.info(f"[REMOTE] Stop requested ({reason})", allow_repeat=True)
@@ -1596,6 +1600,7 @@ class MainController:
         self.stdin_queue = None
         self.display.remote_requested = False
         self.display.trigger_active = False
+        self.display.manual_capture_pending = False
         _clear_capture_modal(self.display)
 
     def _process_remote_events(self):
@@ -3372,6 +3377,7 @@ class MainController:
         elif action == "send_remote_input":
             if self.stdin_queue is not None:
                 self.stdin_queue.put("t\n")
+                d.manual_capture_pending = True
                 _show_capture_modal(d, "capturing", (0, 0, 200))
         elif action == "next_historic_batch":
             self.next_historic_batch()
