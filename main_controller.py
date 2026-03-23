@@ -1856,6 +1856,49 @@ class MainController:
             return ""
         return "".join(ch for ch in str(value) if ch.isdigit())[:max_length]
 
+    def _find_historic_batch_index(self, historic_images, target_jsn):
+        """Return the historic batch index for a JSN, or None when absent."""
+        for idx, batch in enumerate(historic_images or []):
+            if not batch:
+                continue
+            batch_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+            if batch_jsn == target_jsn:
+                return idx
+        return None
+
+    def go_to_historic_jsn(self, jsn, show_missing_dialog=False, close_stats_modal=False):
+        """Navigate to a JSN in historic mode using the freshest local index available."""
+        d = self.display
+        target_jsn = self._sanitize_search_jsn(jsn)
+        if not target_jsn:
+            return False
+
+        if close_stats_modal:
+            d.show_stats_class_modal = False
+            if hasattr(d, "_reset_stats_class_modal_state"):
+                d._reset_stats_class_modal_state()
+
+        historic_index = self._load_historic_index(force_rescan=False) or []
+        target_idx = self._find_historic_batch_index(historic_index, target_jsn)
+
+        if target_idx is None:
+            historic_index = self._load_historic_index(force_rescan=True) or []
+            target_idx = self._find_historic_batch_index(historic_index, target_jsn)
+
+        if target_idx is None:
+            if show_missing_dialog:
+                self._show_no_images_dialog(f"JSN {target_jsn} not in historic folder")
+            return False
+
+        d.historic_images = historic_index
+        d.historic_mode = True
+        d.historic_offset = target_idx
+        d.search_active = False
+        d.filtered_suggestions = []
+        d.selected_suggestion_idx = -1
+        self._refresh_historic_index_async()
+        return True
+
     def perform_jsn_search(self):
         d = self.display
         if not d.search_jsn.strip():
@@ -1863,17 +1906,10 @@ class MainController:
             return
 
         search_term = d.search_jsn.strip()
-        for idx, batch in enumerate(d.historic_images):
-            jsn = batch[0].split("_")[0] if "_" in batch[0] else ""
-            if jsn == search_term:
-                d.historic_offset = idx
-                print(f"JSN {search_term} found at position {idx}")
-                d.search_active = False
-                d.filtered_suggestions = []
-                d.search_jsn = ""
-                return
-
-        print(f"JSN {search_term} not found in historic images")
+        if self.go_to_historic_jsn(search_term, show_missing_dialog=False, close_stats_modal=False):
+            print(f"JSN {search_term} found at position {d.historic_offset}")
+        else:
+            print(f"JSN {search_term} not found in historic images")
         d.search_active = False
         d.filtered_suggestions = []
         d.search_jsn = ""
@@ -3326,6 +3362,27 @@ class MainController:
             self.logger.error(f"Error fetching piece class summary: {exc}")
             return []
 
+    def get_piece_jsns_for_class(self, class_name, db_client=None):
+        db = db_client or self.display.db
+        normalized_class_name = str(class_name or "").strip()
+        if not db or not normalized_class_name:
+            return []
+
+        try:
+            return db.fetch(
+                "SELECT DISTINCT pr.jsn "
+                "FROM piece_result_defects prd "
+                "JOIN piece_result pr ON pr.id = prd.piece_result_id "
+                "WHERE prd.class_name = %s "
+                "AND pr.jsn IS NOT NULL "
+                "AND pr.jsn <> '' "
+                "ORDER BY pr.jsn DESC",
+                (normalized_class_name,),
+            )
+        except Exception as exc:
+            self.logger.error(f"Error fetching JSNs for class '{normalized_class_name}': {exc}")
+            return []
+
     def get_result_for_image(self, img_name):
         d = self.display
         if img_name in d.temp_results:
@@ -3388,10 +3445,42 @@ class MainController:
         elif action == "close_piece_date_dialog":
             d.show_piece_date_dialog = False
         elif action == "open_stats_class_modal":
+            if hasattr(d, "_reset_stats_class_modal_state"):
+                d._reset_stats_class_modal_state()
             d.stats_class_modal_rows = self.get_piece_class_summary()
             d.show_stats_class_modal = True
         elif action == "close_stats_class_modal":
             d.show_stats_class_modal = False
+            if hasattr(d, "_reset_stats_class_modal_state"):
+                d._reset_stats_class_modal_state()
+        elif action == "open_stats_class_detail":
+            class_name = str(payload.get("class_name") or "").strip()
+            d.stats_class_modal_view = "detail"
+            d.stats_class_modal_selected_class_name = class_name
+            d.stats_class_modal_detail_rows = self.get_piece_jsns_for_class(class_name)
+            d.stats_class_modal_detail_offset = 0
+        elif action == "close_stats_class_detail":
+            d.stats_class_modal_view = "summary"
+            d.stats_class_modal_selected_class_name = ""
+            d.stats_class_modal_detail_rows = []
+            d.stats_class_modal_detail_offset = 0
+            d.stats_class_modal_detail_visible_rows = 1
+        elif action == "open_historic_jsn_from_stats":
+            self.go_to_historic_jsn(
+                payload.get("jsn"),
+                show_missing_dialog=True,
+                close_stats_modal=True,
+            )
+        elif action == "copy_stats_jsn":
+            d._copy_stats_modal_jsn(payload.get("jsn"))
+        elif action == "stats_detail_scroll":
+            delta = int(payload.get("delta") or 0)
+            if delta:
+                steps = max(1, abs(delta) // 120)
+                direction = -1 if delta > 0 else 1
+                d.stats_class_modal_detail_offset += direction * steps
+                if hasattr(d, "_clamp_stats_class_modal_detail_offset"):
+                    d._clamp_stats_class_modal_detail_offset()
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False

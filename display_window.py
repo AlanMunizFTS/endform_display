@@ -126,6 +126,17 @@ class DisplayWindow:
         self.show_stats_class_modal = False
         self.stats_class_modal_close_rect = None
         self.stats_class_modal_rows = []
+        self.stats_class_modal_view = "summary"
+        self.stats_class_modal_selected_class_name = ""
+        self.stats_class_modal_detail_rows = []
+        self.stats_class_modal_detail_offset = 0
+        self.stats_class_modal_detail_visible_rows = 1
+        self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_jsn_row_rects = []
+        self.stats_class_modal_copy_rects = []
+        self.stats_class_modal_back_rect = None
+        self.stats_class_modal_list_rect = None
+        self.stats_class_modal_scrollbar_rect = None
         self.mouse_x = 0  # Current mouse X position
         self.mouse_y = 0  # Current mouse Y position
         self.mouse_button_down = False  # Track if left mouse button is down
@@ -416,6 +427,45 @@ class DisplayWindow:
             self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
         return copied
 
+    def _copy_stats_modal_jsn(self, jsn):
+        """Copy a JSN from the stats modal detail view and show operator feedback."""
+        jsn_text = str(jsn or "").strip()
+        if not jsn_text:
+            self._set_toast_message("No JSN available to copy", is_error=True)
+            return False
+
+        copied = self._copy_text_to_clipboard(jsn_text)
+        if copied:
+            self._set_toast_message(f"Copied JSN {jsn_text}", is_error=False)
+        else:
+            self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
+        return copied
+
+    def _reset_stats_class_modal_state(self):
+        """Reset the stats modal drill-down state."""
+        self.stats_class_modal_view = "summary"
+        self.stats_class_modal_selected_class_name = ""
+        self.stats_class_modal_detail_rows = []
+        self.stats_class_modal_detail_offset = 0
+        self.stats_class_modal_detail_visible_rows = 1
+        self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_jsn_row_rects = []
+        self.stats_class_modal_copy_rects = []
+        self.stats_class_modal_back_rect = None
+        self.stats_class_modal_list_rect = None
+        self.stats_class_modal_scrollbar_rect = None
+
+    def _clamp_stats_class_modal_detail_offset(self):
+        """Keep the detail-list offset within its valid range."""
+        total_rows = len(self.stats_class_modal_detail_rows or [])
+        visible_rows = max(1, int(getattr(self, "stats_class_modal_detail_visible_rows", 1) or 1))
+        max_offset = max(0, total_rows - visible_rows)
+        self.stats_class_modal_detail_offset = max(
+            0,
+            min(int(self.stats_class_modal_detail_offset or 0), max_offset),
+        )
+        return self.stats_class_modal_detail_offset
+
     def _paste_clipboard_into_search(self):
         """Paste numeric clipboard content into the historic JSN search field."""
         clipboard_text = self._read_text_from_clipboard()
@@ -538,6 +588,23 @@ class DisplayWindow:
         new_y = int(center_y - new_h / 2)
         return (new_x, new_y, new_w, new_h)
 
+    def _truncate_text_to_width(self, text, font, font_scale, thickness, max_width):
+        """Trim long text so it fits in the available pixel width."""
+        display_text = str(text or "")
+        if max_width <= 0:
+            return ""
+        if cv2.getTextSize(display_text, font, font_scale, thickness)[0][0] <= max_width:
+            return display_text
+
+        ellipsis = "..."
+        truncated = display_text
+        while truncated:
+            candidate = truncated + ellipsis
+            if cv2.getTextSize(candidate, font, font_scale, thickness)[0][0] <= max_width:
+                return candidate
+            truncated = truncated[:-1]
+        return ellipsis
+
     def _can_track_stats_long_press(self):
         return (
             self.stats_card_rect is not None
@@ -629,6 +696,8 @@ class DisplayWindow:
         table_y = dialog_y + 95
         table_w = dialog_width - 90
         table_h = dialog_height - 190
+        list_content_y = table_y + 54
+        list_content_h = table_h - 70
         cv2.rectangle(
             canvas,
             (table_x, table_y),
@@ -652,86 +721,220 @@ class DisplayWindow:
             (65, 65, 65),
             -1,
         )
-        cv2.putText(
-            canvas,
-            "Class Name",
-            (table_x + 20, table_y + 31),
-            font,
-            0.72,
-            (255, 255, 255),
-            2,
-        )
-        count_label = "Pieces"
-        count_label_size = cv2.getTextSize(count_label, font, 0.72, 2)[0]
-        cv2.putText(
-            canvas,
-            count_label,
-            (table_x + table_w - 20 - count_label_size[0], table_y + 31),
-            font,
-            0.72,
-            (255, 255, 255),
-            2,
-        )
+        self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_jsn_row_rects = []
+        self.stats_class_modal_copy_rects = []
+        self.stats_class_modal_back_rect = None
+        self.stats_class_modal_list_rect = None
+        self.stats_class_modal_scrollbar_rect = None
 
-        rows = list(self.stats_class_modal_rows or [])
-        row_h = 38
-        max_rows = max(1, (table_h - header_h - 18) // row_h)
-        visible_rows = rows[:max_rows]
+        if self.stats_class_modal_view == "detail":
+            back_width = 88
+            back_height = 34
+            back_x = dialog_x + 28
+            back_y = dialog_y + 20
+            self.stats_class_modal_back_rect = (back_x, back_y, back_width, back_height)
+            back_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.stats_class_modal_back_rect)
+            back_color = (90, 90, 90) if back_hovered else (110, 110, 110)
+            cv2.rectangle(canvas, (back_x, back_y), (back_x + back_width, back_y + back_height), back_color, -1)
+            cv2.rectangle(canvas, (back_x, back_y), (back_x + back_width, back_y + back_height), (0, 0, 0), 2)
+            cv2.putText(canvas, "Back", (back_x + 20, back_y + 23), font, 0.62, (255, 255, 255), 2)
 
-        if not visible_rows:
-            empty_text = "No class data available"
-            empty_size = cv2.getTextSize(empty_text, font, 0.85, 2)[0]
-            empty_x = table_x + (table_w - empty_size[0]) // 2
-            empty_y = table_y + header_h + (table_h - header_h) // 2
-            cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.85, (70, 70, 70), 2)
-        else:
-            for idx, row in enumerate(visible_rows):
-                row_top = table_y + header_h + 8 + idx * row_h
-                row_bottom = row_top + row_h - 4
-                fill_color = (248, 248, 248) if idx % 2 == 0 else (238, 238, 238)
-                cv2.rectangle(
-                    canvas,
-                    (table_x + 8, row_top),
-                    (table_x + table_w - 8, row_bottom),
-                    fill_color,
-                    -1,
-                )
+            header_left = "JSN"
+            header_right = "Action"
+            cv2.putText(canvas, header_left, (table_x + 20, table_y + 31), font, 0.72, (255, 255, 255), 2)
+            action_size = cv2.getTextSize(header_right, font, 0.72, 2)[0]
+            cv2.putText(
+                canvas,
+                header_right,
+                (table_x + table_w - 20 - action_size[0], table_y + 31),
+                font,
+                0.72,
+                (255, 255, 255),
+                2,
+            )
 
-                class_name = str(row.get("class_name") or "N/A")
-                piece_count = str(row.get("piece_count", 0))
+            detail_rows = [str(row.get("jsn") or "").strip() for row in (self.stats_class_modal_detail_rows or [])]
+            detail_rows = [row for row in detail_rows if row]
+            row_h = 42
+            visible_capacity = max(1, list_content_h // row_h)
+            self.stats_class_modal_detail_visible_rows = visible_capacity
+            self._clamp_stats_class_modal_detail_offset()
+            start_idx = self.stats_class_modal_detail_offset
+            visible_rows = detail_rows[start_idx:start_idx + visible_capacity]
+            self.stats_class_modal_list_rect = (table_x + 8, list_content_y, table_w - 16, list_content_h)
 
+            if not visible_rows:
+                empty_text = "No JSNs available for this class"
+                empty_size = cv2.getTextSize(empty_text, font, 0.8, 2)[0]
+                empty_x = table_x + (table_w - empty_size[0]) // 2
+                empty_y = table_y + header_h + (table_h - header_h) // 2
+                cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.8, (70, 70, 70), 2)
+            else:
+                copy_button_width = 96
+                scroll_track_width = 12 if len(detail_rows) > visible_capacity else 0
+                row_left = table_x + 8
+                row_right = table_x + table_w - 8 - scroll_track_width
+                jsn_max_width = max(80, (row_right - row_left) - copy_button_width - 42)
+
+                for visible_idx, jsn_value in enumerate(visible_rows):
+                    absolute_idx = start_idx + visible_idx
+                    row_top = list_content_y + visible_idx * row_h
+                    row_bottom = min(list_content_y + list_content_h - 4, row_top + row_h - 4)
+                    row_rect = (row_left, row_top, row_right - row_left, row_bottom - row_top)
+                    copy_rect = (row_right - copy_button_width - 8, row_top + 5, copy_button_width, row_bottom - row_top - 10)
+                    jsn_rect = (row_left, row_top, copy_rect[0] - row_left - 6, row_bottom - row_top)
+                    row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, jsn_rect)
+                    copy_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, copy_rect)
+                    fill_color = (242, 247, 255) if row_hovered else ((248, 248, 248) if absolute_idx % 2 == 0 else (238, 238, 238))
+                    cv2.rectangle(
+                        canvas,
+                        (row_rect[0], row_rect[1]),
+                        (row_rect[0] + row_rect[2], row_rect[1] + row_rect[3]),
+                        fill_color,
+                        -1,
+                    )
+
+                    jsn_text = self._truncate_text_to_width(jsn_value, font, 0.68, 2, jsn_max_width)
+                    cv2.putText(canvas, jsn_text, (row_left + 14, row_top + 26), font, 0.68, (30, 30, 30), 2)
+
+                    copy_fill = (70, 130, 70) if copy_hovered else (90, 150, 90)
+                    cv2.rectangle(
+                        canvas,
+                        (copy_rect[0], copy_rect[1]),
+                        (copy_rect[0] + copy_rect[2], copy_rect[1] + copy_rect[3]),
+                        copy_fill,
+                        -1,
+                    )
+                    cv2.rectangle(
+                        canvas,
+                        (copy_rect[0], copy_rect[1]),
+                        (copy_rect[0] + copy_rect[2], copy_rect[1] + copy_rect[3]),
+                        (0, 0, 0),
+                        2,
+                    )
+                    copy_label = "Copy"
+                    copy_size = cv2.getTextSize(copy_label, font, 0.6, 2)[0]
+                    cv2.putText(
+                        canvas,
+                        copy_label,
+                        (copy_rect[0] + (copy_rect[2] - copy_size[0]) // 2, copy_rect[1] + (copy_rect[3] + copy_size[1]) // 2),
+                        font,
+                        0.6,
+                        (255, 255, 255),
+                        2,
+                    )
+
+                    self.stats_class_modal_jsn_row_rects.append((jsn_rect, jsn_value))
+                    self.stats_class_modal_copy_rects.append((copy_rect, jsn_value))
+
+                footer_text = f"Showing {start_idx + 1}-{start_idx + len(visible_rows)} of {len(detail_rows)}"
                 cv2.putText(
                     canvas,
-                    class_name,
-                    (table_x + 22, row_top + 24),
+                    footer_text,
+                    (table_x + 14, table_y + table_h - 12),
                     font,
-                    0.68,
-                    (30, 30, 30),
-                    2,
-                )
-                piece_size = cv2.getTextSize(piece_count, font, 0.68, 2)[0]
-                cv2.putText(
-                    canvas,
-                    piece_count,
-                    (table_x + table_w - 22 - piece_size[0], row_top + 24),
-                    font,
-                    0.68,
-                    (30, 30, 30),
-                    2,
-                )
-
-            hidden_count = len(rows) - len(visible_rows)
-            if hidden_count > 0:
-                more_text = f"+{hidden_count} more"
-                cv2.putText(
-                    canvas,
-                    more_text,
-                    (table_x + 16, table_y + table_h - 14),
-                    font,
-                    0.6,
+                    0.55,
                     (90, 90, 90),
                     2,
                 )
+
+                if len(detail_rows) > visible_capacity:
+                    track_x = table_x + table_w - 20
+                    track_y = list_content_y
+                    track_h = list_content_h - 4
+                    thumb_h = max(30, int(track_h * (visible_capacity / len(detail_rows))))
+                    max_offset = max(1, len(detail_rows) - visible_capacity)
+                    thumb_y = track_y + int((track_h - thumb_h) * (start_idx / max_offset))
+                    self.stats_class_modal_scrollbar_rect = (track_x, thumb_y, 10, thumb_h)
+                    cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (210, 210, 210), -1)
+                    cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
+                    cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
+        else:
+            cv2.putText(
+                canvas,
+                "Class Name",
+                (table_x + 20, table_y + 31),
+                font,
+                0.72,
+                (255, 255, 255),
+                2,
+            )
+            count_label = "Pieces"
+            count_label_size = cv2.getTextSize(count_label, font, 0.72, 2)[0]
+            cv2.putText(
+                canvas,
+                count_label,
+                (table_x + table_w - 20 - count_label_size[0], table_y + 31),
+                font,
+                0.72,
+                (255, 255, 255),
+                2,
+            )
+
+            rows = list(self.stats_class_modal_rows or [])
+            row_h = 38
+            max_rows = max(1, (table_h - header_h - 18) // row_h)
+            visible_rows = rows[:max_rows]
+
+            if not visible_rows:
+                empty_text = "No class data available"
+                empty_size = cv2.getTextSize(empty_text, font, 0.85, 2)[0]
+                empty_x = table_x + (table_w - empty_size[0]) // 2
+                empty_y = table_y + header_h + (table_h - header_h) // 2
+                cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.85, (70, 70, 70), 2)
+            else:
+                class_max_width = table_w - 170
+                for idx, row in enumerate(visible_rows):
+                    row_top = table_y + header_h + 8 + idx * row_h
+                    row_bottom = row_top + row_h - 4
+                    row_rect = (table_x + 8, row_top, table_w - 16, row_bottom - row_top)
+                    class_name = str(row.get("class_name") or "N/A")
+                    piece_count = str(row.get("piece_count", 0))
+                    row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, row_rect)
+                    fill_color = (242, 247, 255) if row_hovered else ((248, 248, 248) if idx % 2 == 0 else (238, 238, 238))
+                    cv2.rectangle(
+                        canvas,
+                        (row_rect[0], row_rect[1]),
+                        (row_rect[0] + row_rect[2], row_rect[1] + row_rect[3]),
+                        fill_color,
+                        -1,
+                    )
+
+                    class_label = self._truncate_text_to_width(class_name, font, 0.68, 2, class_max_width)
+                    cv2.putText(
+                        canvas,
+                        class_label,
+                        (table_x + 22, row_top + 24),
+                        font,
+                        0.68,
+                        (30, 30, 30),
+                        2,
+                    )
+                    piece_size = cv2.getTextSize(piece_count, font, 0.68, 2)[0]
+                    cv2.putText(
+                        canvas,
+                        piece_count,
+                        (table_x + table_w - 22 - piece_size[0], row_top + 24),
+                        font,
+                        0.68,
+                        (30, 30, 30),
+                        2,
+                    )
+                    self.stats_class_modal_class_row_rects.append((row_rect, class_name))
+
+                hidden_count = len(rows) - len(visible_rows)
+                if hidden_count > 0:
+                    more_text = f"+{hidden_count} more"
+                    cv2.putText(
+                        canvas,
+                        more_text,
+                        (table_x + 16, table_y + table_h - 14),
+                        font,
+                        0.6,
+                        (90, 90, 90),
+                        2,
+                    )
 
         button_width = 110
         button_height = 38
@@ -754,6 +957,19 @@ class DisplayWindow:
         close_y = by + (bh + close_size[1]) // 2
         cv2.putText(canvas, close_text, (close_x, close_y), font, 0.7, (255, 255, 255), 2)
 
+        if self.stats_class_modal_view == "detail":
+            subtitle_text = self._truncate_text_to_width(
+                self.stats_class_modal_selected_class_name,
+                font,
+                0.72,
+                2,
+                dialog_width - 210,
+            )
+            subtitle_size = cv2.getTextSize(subtitle_text, font, 0.72, 2)[0]
+            subtitle_x = dialog_x + (dialog_width - subtitle_size[0]) // 2
+            subtitle_y = dialog_y + 84
+            cv2.putText(canvas, subtitle_text, (subtitle_x, subtitle_y), font, 0.72, (40, 40, 40), 2)
+
         return canvas
 
     def mouse_callback(self, event, x, y, flags, _param):
@@ -762,6 +978,23 @@ class DisplayWindow:
         self.mouse_x = x
         self.mouse_y = y
         self.mouse_button_down = (flags & cv2.EVENT_FLAG_LBUTTON) != 0
+
+        if (
+            event == getattr(cv2, "EVENT_MOUSEWHEEL", -1)
+            and self.show_stats_class_modal
+            and self.stats_class_modal_view == "detail"
+            and self._is_point_in_rect(x, y, self.stats_class_modal_list_rect)
+        ):
+            wheel_delta = 0
+            try:
+                wheel_delta = cv2.getMouseWheelDelta(flags)
+            except Exception:
+                wheel_delta = ((flags >> 16) & 0xFFFF)
+                if wheel_delta > 32767:
+                    wheel_delta -= 65536
+            if wheel_delta:
+                self._emit_action("stats_detail_scroll", delta=wheel_delta)
+            return
 
         if event == cv2.EVENT_LBUTTONUP:
             if (
@@ -799,6 +1032,33 @@ class DisplayWindow:
                 bx, by, bw, bh = self.stats_class_modal_close_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self._emit_action("close_stats_class_modal")
+                    return
+
+            if self.show_stats_class_modal:
+                if self.stats_class_modal_back_rect:
+                    bx, by, bw, bh = self.stats_class_modal_back_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("close_stats_class_detail")
+                        return
+
+                for rect, jsn_value in self.stats_class_modal_copy_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("copy_stats_jsn", jsn=jsn_value)
+                        return
+
+                for rect, jsn_value in self.stats_class_modal_jsn_row_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_historic_jsn_from_stats", jsn=jsn_value)
+                        return
+
+                for rect, class_name in self.stats_class_modal_class_row_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_stats_class_detail", class_name=class_name)
+                        return
+
                 return
 
             # No images dialog OK button (highest priority)
@@ -2792,7 +3052,14 @@ class DisplayWindow:
                     return True
 
             # Enter key sends "t\n" to remote process stdin when it's running
-            if key == 13 and not self.search_active and self.remote_requested:
+            if (
+                key == 13
+                and not self.search_active
+                and self.remote_requested
+                and not self.show_stats_class_modal
+                and not self.show_piece_date_dialog
+                and not self.show_no_images_dialog
+            ):
                 self._emit_action("send_remote_input")
 
             # Historic navigation with keyboard arrows (left/right)
@@ -2802,6 +3069,9 @@ class DisplayWindow:
                 and not self.search_active
                 and not self.sync_in_progress
                 and not self.reset_in_progress
+                and not self.show_stats_class_modal
+                and not self.show_piece_date_dialog
+                and not self.show_no_images_dialog
             ):
                 if key in {3, ord('c'), ord('C')}:
                     self._copy_current_historic_jsn()
