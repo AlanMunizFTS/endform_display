@@ -3463,11 +3463,8 @@ class MainController:
                                     except Exception:
                                         pass
                             self._pending_remote_images = remote_images
-                            # Register new images in DB
-                            self._register_local_images_in_db(
-                                self.config.temp_dir,
-                                image_names=[self.file_manager.basename(p) for p in remote_images]
-                            )
+                            # Live batches in tmp_display are display-only; DB state
+                            # must come from annotated images exclusively.
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()
