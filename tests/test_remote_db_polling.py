@@ -493,7 +493,11 @@ class TestRemoteDbPolling(unittest.TestCase):
         )
         self.assertIn("FROM classified_image_defects cid", insert_query)
         self.assertIn("JOIN classified_images ci ON ci.id = cid.classified_image_id", insert_query)
+        self.assertIn("UPPER(cid.class_name) <> 'OK'", insert_query)
+        self.assertIn("NOT EXISTS (", insert_query)
+        self.assertIn("ci_non_ok.piece_id = %s", insert_query)
         self.assertIn("GROUP BY cid.class_name", insert_query)
+        self.assertEqual(db.execute.call_args_list[2].args[1], (321, 321, 321))
 
 
 if __name__ == "__main__":

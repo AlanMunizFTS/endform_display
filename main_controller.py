@@ -2686,8 +2686,18 @@ class MainController:
                 "FROM classified_image_defects cid "
                 "JOIN classified_images ci ON ci.id = cid.classified_image_id "
                 "WHERE ci.piece_id = %s "
+                "AND ("
+                "  UPPER(cid.class_name) <> 'OK' "
+                "  OR NOT EXISTS ("
+                "    SELECT 1 "
+                "    FROM classified_image_defects cid_non_ok "
+                "    JOIN classified_images ci_non_ok ON ci_non_ok.id = cid_non_ok.classified_image_id "
+                "    WHERE ci_non_ok.piece_id = %s "
+                "    AND UPPER(cid_non_ok.class_name) <> 'OK'"
+                "  )"
+                ") "
                 "GROUP BY cid.class_name",
-                (piece_id, piece_id),
+                (piece_id, piece_id, piece_id),
             )
         except Exception as exc:
             print(f"Error recalculating piece_result for {jsn}: {exc}")
