@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from collections import defaultdict
@@ -279,7 +280,6 @@ def _download_live_images_remote_impl(
     app,
     remote_path,
     local_path,
-    remote_hist_dir,
     rotation_state,
     logger,
     image_extensions,
@@ -315,8 +315,6 @@ def _download_live_images_remote_impl(
             (current_offset + 1) % total_batches if total_batches > 0 else 0
         )
 
-        app.ensure_remote_dir(remote_hist_dir)
-
         # Clear existing images from local_path before downloading new batch
         # so tmp_display never exceeds max_images files at any point
         try:
@@ -332,10 +330,8 @@ def _download_live_images_remote_impl(
         for img_name in selected_images:
             local_file = app.file_manager.join(local_path, img_name)
             remote_img_path = app.join_remote_path(remote_path, img_name)
-            remote_hist_path = app.join_remote_path(remote_hist_dir, img_name)
             try:
                 app.download_file(remote_img_path, local_file)
-                app.upload_file(local_file, remote_hist_path)
                 downloaded_files.append(local_file)
             except FileNotFoundError:
                 return []
@@ -422,7 +418,6 @@ def download_live_images_remote(
     app,
     remote_path,
     local_path,
-    remote_hist_dir,
     rotation_state,
     logger,
     max_images=7,
@@ -431,7 +426,6 @@ def download_live_images_remote(
         app=app,
         remote_path=remote_path,
         local_path=local_path,
-        remote_hist_dir=remote_hist_dir,
         rotation_state=rotation_state,
         logger=logger,
         image_extensions=(".png", ".jpg", ".jpeg", ".bmp"),
@@ -454,6 +448,16 @@ class ControllerConfig:
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
+    remote_db_polling_enabled: bool = True
+    remote_db_table: str = "model_results"
+    remote_db_columns: tuple = ("img_name", "class_name", "confidence")
+    remote_db_query_limit: int = 25
+    remote_db_target_sync_batch: int = 25
+    remote_db_max_scan_pages: int = 20
+    remote_db_forward_scan_ratio: float = 0.7
+    remote_db_success_interval_sec: float = 0.0
+    remote_db_idle_backoff_sec: float = 2.0
+    remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
     remote_command: str = (
         "sh -lc 'echo $$; "
@@ -514,6 +518,12 @@ class MainController:
         self.sync_worker_thread = None
         self.reset_worker_thread = None
         self.rebuild_worker_thread = None
+        self.remote_db_poll_thread = None
+        self.remote_db_stop_event = None
+        self._remote_db_placeholder_warned = False
+        self._remote_db_idle_logged = False
+        self.remote_db_forward_cursor_id = 0
+        self.remote_db_backfill_cursor_id = 0
         self.last_historic_check = 0.0
 
         if hasattr(self.display, "set_controller"):
@@ -574,6 +584,7 @@ class MainController:
             self.try_connect_db("startup")
         if self.db_connected:
             self._register_historic_local_dir_on_startup()
+        self.start_remote_db_polling()
 
         if self.sftp_credentials is not None and self.sftp_app is None:
             self.sftp_app = SFTPApp(
@@ -601,6 +612,413 @@ class MainController:
         else:
             self.logger.info("[LOCAL] Running in local-only mode (SFTP disabled)", allow_repeat=True)
             self.display.set_sftp_client(None)
+
+    def _resolve_remote_db_ssh_credentials(self):
+        if self.sftp_credentials is not None:
+            return dict(self.sftp_credentials)
+
+        try:
+            from settings import get_sftp_settings
+
+            return get_sftp_settings()
+        except Exception as exc:
+            self.logger.warn(
+                f"[REMOTE_DB] SSH credentials unavailable for remote DB polling: {exc}",
+                allow_repeat=True,
+            )
+            return None
+
+    def _is_remote_db_table_placeholder(self):
+        table_name = str(getattr(self.config, "remote_db_table", "") or "").strip()
+        return not table_name
+
+    def _quote_remote_db_identifier(self, identifier):
+        parts = [part.strip() for part in str(identifier).split(".")]
+        if not parts or any(not part for part in parts):
+            raise ValueError(f"Invalid SQL identifier: {identifier!r}")
+        return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
+
+    def _build_remote_db_query(self):
+        if self._is_remote_db_table_placeholder():
+            return None
+
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        selected_columns = ", ".join(
+            self._quote_remote_db_identifier(column_name)
+            for column_name in self.config.remote_db_columns
+        )
+        return (
+            f"SELECT \"id\", {selected_columns} FROM {table_name} "
+            f"WHERE \"id\" > %s "
+            f"ORDER BY \"id\" ASC LIMIT %s"
+        )
+
+    def _serialize_remote_db_row(self, row):
+        return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
+
+    def _collect_remote_model_result_rows(self, remote_db, query, after_id, limit, scan_label):
+        rows = remote_db.fetch(query, (after_id, limit))
+        if rows:
+            self.logger.info(
+                f"[REMOTE_DB] Retrieved {len(rows)} rows for {scan_label} scan using LIMIT {limit}",
+            )
+        for idx, row in enumerate(rows, start=1):
+            self.logger.info(
+                f"[REMOTE_DB] {scan_label} row {idx}: {self._serialize_remote_db_row(row)}",
+            )
+        return rows
+
+    def _fetch_existing_local_classified_images(self, local_db, image_names):
+        if not image_names:
+            return {}
+
+        rows = local_db.fetch(
+            "SELECT id, img_name FROM classified_images WHERE img_name = ANY(%s)",
+            (image_names,),
+        )
+        return {
+            row["img_name"]: {"id": row["id"]}
+            for row in rows or []
+            if row.get("img_name") and row.get("id") is not None
+        }
+
+    def _insert_local_classification_defects(self, local_db, matched_rows):
+        synced_img_names = []
+        synced_remote_ids = []
+        recalculated_jsns = set()
+        for row in matched_rows:
+            img_name = row["img_name"]
+            local_db.execute(
+                "INSERT INTO classified_image_defects "
+                "(classified_image_id, class_name, confidence) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+                (
+                    row["classified_image_id"],
+                    row.get("class_name"),
+                    row.get("confidence"),
+                ),
+            )
+            synced_img_names.append(img_name)
+            synced_remote_ids.append(row["remote_id"])
+            recalculated_jsns.add(img_name.split("_")[0] if "_" in img_name else img_name)
+
+        for jsn in sorted(recalculated_jsns):
+            self._recalculate_piece_result(jsn, db_client=local_db)
+
+        return synced_img_names, synced_remote_ids
+
+    def _delete_remote_model_results(self, remote_db, remote_ids):
+        if not remote_ids:
+            return 0
+
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        return remote_db.execute(
+            f"DELETE FROM {table_name} WHERE id = ANY(%s)",
+            (remote_ids,),
+        )
+
+    def _scan_remote_rows_for_sync(
+        self,
+        remote_db,
+        local_db,
+        query,
+        start_after_id,
+        max_pages,
+        target_sync_batch,
+        scan_label,
+        excluded_remote_ids=None,
+    ):
+        page_limit = max(1, int(self.config.remote_db_query_limit))
+        seen_remote_ids = set(excluded_remote_ids or [])
+        matched_rows = []
+        missing_local = []
+        missing_local_seen = set()
+        scanned_count = 0
+        pages_scanned = 0
+        current_after_id = max(0, int(start_after_id or 0))
+
+        while pages_scanned < max_pages and len(matched_rows) < target_sync_batch:
+            rows = self._collect_remote_model_result_rows(
+                remote_db=remote_db,
+                query=query,
+                after_id=current_after_id,
+                limit=page_limit,
+                scan_label=scan_label,
+            )
+            pages_scanned += 1
+
+            if not rows:
+                current_after_id = 0
+                break
+
+            normalized_rows = []
+            for row in rows:
+                remote_id = row.get("id")
+                img_name = str(row.get("img_name") or "").strip()
+                if remote_id is None or not img_name:
+                    continue
+                normalized_rows.append(
+                    {
+                        "remote_id": int(remote_id),
+                        "img_name": img_name,
+                        "class_name": row.get("class_name"),
+                        "confidence": row.get("confidence"),
+                    }
+                )
+
+            if normalized_rows:
+                current_after_id = max(row["remote_id"] for row in normalized_rows)
+
+            scanned_count += len(normalized_rows)
+
+            page_image_names = [
+                row["img_name"]
+                for row in normalized_rows
+                if row["remote_id"] not in seen_remote_ids
+            ]
+            existing_images = self._fetch_existing_local_classified_images(local_db, page_image_names)
+
+            for row in normalized_rows:
+                if row["remote_id"] in seen_remote_ids:
+                    continue
+                seen_remote_ids.add(row["remote_id"])
+
+                local_image = existing_images.get(row["img_name"])
+                if local_image is None:
+                    if row["img_name"] not in missing_local_seen:
+                        missing_local_seen.add(row["img_name"])
+                        missing_local.append(row["img_name"])
+                    continue
+
+                matched_rows.append(
+                    {
+                        **row,
+                        "classified_image_id": local_image["id"],
+                    }
+                )
+
+            if len(rows) < page_limit:
+                current_after_id = 0
+                break
+
+        return {
+            "matched_rows": matched_rows,
+            "missing_local": missing_local,
+            "scanned_count": scanned_count,
+            "pages_scanned": pages_scanned,
+            "next_after_id": current_after_id,
+            "seen_remote_ids": seen_remote_ids,
+        }
+
+    def _sync_remote_rows_into_local_classified_images(self, matched_rows, missing_local, local_db, remote_db):
+        candidate_rows = []
+        for row in matched_rows:
+            img_name = str(row.get("img_name") or "").strip()
+            if not img_name:
+                continue
+            candidate_rows.append(
+                {
+                    "remote_id": row["remote_id"],
+                    "classified_image_id": row["classified_image_id"],
+                    "img_name": img_name,
+                    "class_name": row.get("class_name"),
+                    "confidence": row.get("confidence"),
+                }
+            )
+
+        if not candidate_rows:
+            return {
+                "candidate_count": 0,
+                "matched_count": 0,
+                "synced_count": 0,
+                "deleted_count": 0,
+                "missing_local": list(missing_local or []),
+                "synced_img_names": [],
+            }
+
+        synced_img_names, synced_remote_ids = self._insert_local_classification_defects(local_db, candidate_rows)
+        deleted_count = self._delete_remote_model_results(remote_db, synced_remote_ids)
+
+        return {
+            "candidate_count": len(candidate_rows),
+            "matched_count": len(candidate_rows),
+            "synced_count": len(synced_img_names),
+            "deleted_count": deleted_count,
+            "missing_local": list(missing_local or []),
+            "synced_img_names": synced_img_names,
+        }
+
+    def _run_remote_db_poll_iteration(self):
+        query = self._build_remote_db_query()
+        if query is None:
+            if not self._remote_db_placeholder_warned:
+                self.logger.warn(
+                    "[REMOTE_DB] Polling skipped: configure ControllerConfig.remote_db_table before querying PostgreSQL.",
+                    allow_repeat=True,
+                )
+                self._remote_db_placeholder_warned = True
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        self._remote_db_placeholder_warned = False
+        local_db = getattr(self.display, "db", None)
+        if not self.db_connected or local_db is None:
+            self.logger.warn(
+                "[REMOTE_DB] Local PostgreSQL unavailable; skipping remote metadata sync.",
+            )
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        ssh_credentials = self._resolve_remote_db_ssh_credentials()
+        if not ssh_credentials:
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        remote_db = None
+        try:
+            from db import get_remote_db_connection_via_ssh
+
+            total_page_budget = max(1, int(self.config.remote_db_max_scan_pages))
+            forward_page_budget = min(
+                total_page_budget,
+                max(1, int(round(total_page_budget * float(self.config.remote_db_forward_scan_ratio)))),
+            )
+            backfill_page_budget = max(0, total_page_budget - forward_page_budget)
+            target_sync_batch = max(1, int(self.config.remote_db_target_sync_batch))
+
+            self.logger.debug(
+                f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
+            )
+            remote_db = get_remote_db_connection_via_ssh(
+                ssh_host=ssh_credentials["hostname"],
+                ssh_port=ssh_credentials["port"],
+                ssh_username=ssh_credentials["username"],
+                ssh_password=ssh_credentials["password"],
+            )
+            self.logger.debug("[REMOTE_DB] Remote PostgreSQL connection successful")
+
+            forward_scan = self._scan_remote_rows_for_sync(
+                remote_db=remote_db,
+                local_db=local_db,
+                query=query,
+                start_after_id=self.remote_db_forward_cursor_id,
+                max_pages=forward_page_budget,
+                target_sync_batch=target_sync_batch,
+                scan_label="forward",
+            )
+            self.remote_db_forward_cursor_id = forward_scan["next_after_id"]
+
+            combined_matched_rows = list(forward_scan["matched_rows"])
+            combined_missing_local = list(forward_scan["missing_local"])
+            scanned_count = forward_scan["scanned_count"]
+            pages_scanned = forward_scan["pages_scanned"]
+
+            remaining_target = max(0, target_sync_batch - len(combined_matched_rows))
+            if remaining_target > 0 and backfill_page_budget > 0:
+                backfill_scan = self._scan_remote_rows_for_sync(
+                    remote_db=remote_db,
+                    local_db=local_db,
+                    query=query,
+                    start_after_id=self.remote_db_backfill_cursor_id,
+                    max_pages=backfill_page_budget,
+                    target_sync_batch=remaining_target,
+                    scan_label="backfill",
+                    excluded_remote_ids=forward_scan["seen_remote_ids"],
+                )
+                self.remote_db_backfill_cursor_id = backfill_scan["next_after_id"]
+                combined_matched_rows.extend(backfill_scan["matched_rows"])
+                combined_missing_local.extend(backfill_scan["missing_local"])
+                scanned_count += backfill_scan["scanned_count"]
+                pages_scanned += backfill_scan["pages_scanned"]
+
+            sync_summary = self._sync_remote_rows_into_local_classified_images(
+                combined_matched_rows,
+                missing_local=combined_missing_local,
+                local_db=local_db,
+                remote_db=remote_db,
+            )
+            has_activity = (
+                scanned_count > 0
+                or sync_summary["candidate_count"] > 0
+                or sync_summary["synced_count"] > 0
+                or sync_summary["deleted_count"] > 0
+                or bool(sync_summary["missing_local"])
+            )
+            if has_activity:
+                self._remote_db_idle_logged = False
+                self.logger.info(
+                    "[REMOTE_DB] Local sync summary: "
+                    f"scanned={scanned_count}, "
+                    f"pages={pages_scanned}, "
+                    f"candidates={sync_summary['candidate_count']}, "
+                    f"matched={sync_summary['matched_count']}, "
+                    f"synced={sync_summary['synced_count']}, "
+                    f"deleted_remote={sync_summary['deleted_count']}",
+                )
+            if sync_summary["missing_local"]:
+                self.logger.info(
+                    "[REMOTE_DB] Missing local classified_images rows: "
+                    + ", ".join(sync_summary["missing_local"][:10]),
+                )
+            elif not has_activity and not self._remote_db_idle_logged:
+                idle_backoff = max(0.0, float(self.config.remote_db_idle_backoff_sec))
+                self.logger.info(
+                    f"[REMOTE_DB] No remote metadata available to sync; retrying in {idle_backoff:.1f}s"
+                )
+                self._remote_db_idle_logged = True
+
+            if sync_summary["synced_count"] > 0 or sync_summary["deleted_count"] > 0:
+                return max(0.0, float(self.config.remote_db_success_interval_sec))
+            return max(
+                float(self.config.remote_db_success_interval_sec),
+                float(self.config.remote_db_idle_backoff_sec),
+            )
+        except Exception as exc:
+            self._remote_db_idle_logged = False
+            self.logger.error(f"[REMOTE_DB] Poll iteration failed: {exc}", allow_repeat=True)
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+        finally:
+            if remote_db is not None:
+                try:
+                    remote_db.close()
+                except Exception:
+                    pass
+
+    def _remote_db_polling_worker(self):
+        self.logger.info("[REMOTE_DB] Polling worker started", allow_repeat=True)
+        try:
+            while self.remote_db_stop_event is not None and not self.remote_db_stop_event.is_set():
+                delay_sec = self._run_remote_db_poll_iteration()
+                if self.remote_db_stop_event is not None and self.remote_db_stop_event.is_set():
+                    break
+                _sleep_with_stop(self.remote_db_stop_event, delay_sec)
+        finally:
+            self.logger.info("[REMOTE_DB] Polling worker stopped", allow_repeat=True)
+
+    def start_remote_db_polling(self):
+        if not getattr(self.config, "remote_db_polling_enabled", False):
+            self.logger.info("[REMOTE_DB] Polling disabled by config", allow_repeat=True)
+            return False
+        if self.remote_db_poll_thread is not None and self.remote_db_poll_thread.is_alive():
+            return False
+
+        self.remote_db_stop_event = Event()
+        self.remote_db_poll_thread = Thread(
+            target=self._remote_db_polling_worker,
+            name="remote-db-polling",
+            daemon=True,
+        )
+        self.remote_db_poll_thread.start()
+        return True
+
+    def stop_remote_db_polling(self):
+        if self.remote_db_stop_event is not None:
+            self.remote_db_stop_event.set()
+        if self.remote_db_poll_thread is not None:
+            try:
+                self.remote_db_poll_thread.join(timeout=5)
+            except Exception:
+                pass
+        self.remote_db_poll_thread = None
+        self.remote_db_stop_event = None
 
     def _db_block_message(self):
         return "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
@@ -1210,7 +1628,6 @@ class MainController:
             app=self.sftp_app,
             remote_path=self.config.remote_live_dir,
             local_path=self.config.temp_dir,
-            remote_hist_dir=self.config.remote_hist_dir,
             rotation_state=self.live_rotation_state_remote,
             logger=self.logger,
             image_extensions=self.config.image_extensions,
@@ -2289,6 +2706,42 @@ class MainController:
                 "WHERE jsn = %s",
                 (jsn,),
             )
+
+            piece_rows = db.fetch(
+                "SELECT id FROM piece_result WHERE jsn = %s",
+                (jsn,),
+            )
+            if not piece_rows:
+                return
+
+            piece_id = piece_rows[0]["id"]
+            db.execute(
+                "DELETE FROM piece_result_defects WHERE piece_result_id = %s",
+                (piece_id,),
+            )
+            db.execute(
+                "INSERT INTO piece_result_defects (piece_result_id, class_name, confidence) "
+                "SELECT %s, selected.class_name, selected.confidence "
+                "FROM ("
+                "  SELECT cid.class_name, cid.confidence "
+                "  FROM classified_image_defects cid "
+                "  JOIN classified_images ci ON ci.id = cid.classified_image_id "
+                "  WHERE ci.piece_id = %s "
+                "  AND ("
+                "    UPPER(cid.class_name) <> 'OK' "
+                "    OR NOT EXISTS ("
+                "      SELECT 1 "
+                "      FROM classified_image_defects cid_non_ok "
+                "      JOIN classified_images ci_non_ok ON ci_non_ok.id = cid_non_ok.classified_image_id "
+                "      WHERE ci_non_ok.piece_id = %s "
+                "      AND UPPER(cid_non_ok.class_name) <> 'OK'"
+                "    )"
+                "  ) "
+                "  ORDER BY cid.confidence DESC, cid.created_at DESC, cid.id DESC "
+                "  LIMIT 1"
+                ") AS selected",
+                (piece_id, piece_id, piece_id),
+            )
         except Exception as exc:
             print(f"Error recalculating piece_result for {jsn}: {exc}")
 
@@ -2852,6 +3305,22 @@ class MainController:
             print(f"Error getting piece date: {exc}")
             return "N/A"
 
+    def get_piece_class_summary(self, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return []
+
+        try:
+            return db.fetch(
+                "SELECT class_name, COUNT(DISTINCT piece_result_id) AS piece_count "
+                "FROM piece_result_defects "
+                "GROUP BY class_name "
+                "ORDER BY piece_count DESC, class_name ASC"
+            )
+        except Exception as exc:
+            self.logger.error(f"Error fetching piece class summary: {exc}")
+            return []
+
     def get_result_for_image(self, img_name):
         d = self.display
         if img_name in d.temp_results:
@@ -2912,6 +3381,11 @@ class MainController:
             d.show_piece_date_dialog = True
         elif action == "close_piece_date_dialog":
             d.show_piece_date_dialog = False
+        elif action == "open_stats_class_modal":
+            d.stats_class_modal_rows = self.get_piece_class_summary()
+            d.show_stats_class_modal = True
+        elif action == "close_stats_class_modal":
+            d.show_stats_class_modal = False
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False
@@ -3058,11 +3532,8 @@ class MainController:
                                     except Exception:
                                         pass
                             self._pending_remote_images = remote_images
-                            # Register new images in DB
-                            self._register_local_images_in_db(
-                                self.config.temp_dir,
-                                image_names=[self.file_manager.basename(p) for p in remote_images]
-                            )
+                            # Live batches in tmp_display are display-only; DB state
+                            # must come from annotated images exclusively.
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()
@@ -3081,6 +3552,7 @@ class MainController:
             self.shutdown()
 
     def shutdown(self):
+        self.stop_remote_db_polling()
         self.stop_remote_process("exit")
         if self.sftp_app:
             self.sftp_app.disconnect_sftp()
