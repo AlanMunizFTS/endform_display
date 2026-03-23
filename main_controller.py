@@ -3245,6 +3245,22 @@ class MainController:
             print(f"Error getting piece date: {exc}")
             return "N/A"
 
+    def get_piece_class_summary(self, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return []
+
+        try:
+            return db.fetch(
+                "SELECT class_name, COUNT(DISTINCT piece_result_id) AS piece_count "
+                "FROM piece_result_defects "
+                "GROUP BY class_name "
+                "ORDER BY piece_count DESC, class_name ASC"
+            )
+        except Exception as exc:
+            self.logger.error(f"Error fetching piece class summary: {exc}")
+            return []
+
     def get_result_for_image(self, img_name):
         d = self.display
         if img_name in d.temp_results:
@@ -3304,6 +3320,11 @@ class MainController:
             d.show_piece_date_dialog = True
         elif action == "close_piece_date_dialog":
             d.show_piece_date_dialog = False
+        elif action == "open_stats_class_modal":
+            d.stats_class_modal_rows = self.get_piece_class_summary()
+            d.show_stats_class_modal = True
+        elif action == "close_stats_class_modal":
+            d.show_stats_class_modal = False
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False

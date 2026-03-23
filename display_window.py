@@ -123,6 +123,9 @@ class DisplayWindow:
         self.info_icon_rect = None  # Info icon rect (top right in historic mode)
         self.show_piece_date_dialog = False  # Show piece date dialog
         self.piece_date_dialog_close_rect = None  # Close button rect for date dialog
+        self.show_stats_class_modal = False
+        self.stats_class_modal_close_rect = None
+        self.stats_class_modal_rows = []
         self.mouse_x = 0  # Current mouse X position
         self.mouse_y = 0  # Current mouse Y position
         self.mouse_button_down = False  # Track if left mouse button is down
@@ -458,6 +461,7 @@ class DisplayWindow:
             and not self.reset_in_progress
             and not self.show_no_images_dialog
             and not self.show_piece_date_dialog
+            and not self.show_stats_class_modal
             and not self.show_reset_confirm
             and not self.show_delete_confirm
             and not self.show_rebuild_confirm
@@ -493,6 +497,180 @@ class DisplayWindow:
         self._emit_action("open_rebuild_db_confirm")
         return True
 
+    def draw_stats_class_modal(self, canvas):
+        """Draw modal dialog showing distinct piece counts by class name."""
+        dialog_width = 760
+        dialog_height = 620
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        canvas = cv2.addWeighted(canvas, 0.3, overlay, 0.7, 0)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (245, 245, 245),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        title = "Pieces by Class"
+        title_scale = 1.0
+        title_thickness = 3
+        title_size = cv2.getTextSize(title, font, title_scale, title_thickness)[0]
+        title_x = dialog_x + (dialog_width - title_size[0]) // 2
+        title_y = dialog_y + 52
+        cv2.putText(
+            canvas,
+            title,
+            (title_x, title_y),
+            font,
+            title_scale,
+            (0, 0, 0),
+            title_thickness,
+        )
+
+        table_x = dialog_x + 45
+        table_y = dialog_y + 95
+        table_w = dialog_width - 90
+        table_h = dialog_height - 190
+        cv2.rectangle(
+            canvas,
+            (table_x, table_y),
+            (table_x + table_w, table_y + table_h),
+            (230, 230, 230),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (table_x, table_y),
+            (table_x + table_w, table_y + table_h),
+            (120, 120, 120),
+            2,
+        )
+
+        header_h = 46
+        cv2.rectangle(
+            canvas,
+            (table_x + 2, table_y + 2),
+            (table_x + table_w - 2, table_y + header_h),
+            (65, 65, 65),
+            -1,
+        )
+        cv2.putText(
+            canvas,
+            "Class Name",
+            (table_x + 20, table_y + 31),
+            font,
+            0.72,
+            (255, 255, 255),
+            2,
+        )
+        count_label = "Pieces"
+        count_label_size = cv2.getTextSize(count_label, font, 0.72, 2)[0]
+        cv2.putText(
+            canvas,
+            count_label,
+            (table_x + table_w - 20 - count_label_size[0], table_y + 31),
+            font,
+            0.72,
+            (255, 255, 255),
+            2,
+        )
+
+        rows = list(self.stats_class_modal_rows or [])
+        row_h = 38
+        max_rows = max(1, (table_h - header_h - 18) // row_h)
+        visible_rows = rows[:max_rows]
+
+        if not visible_rows:
+            empty_text = "No class data available"
+            empty_size = cv2.getTextSize(empty_text, font, 0.85, 2)[0]
+            empty_x = table_x + (table_w - empty_size[0]) // 2
+            empty_y = table_y + header_h + (table_h - header_h) // 2
+            cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.85, (70, 70, 70), 2)
+        else:
+            for idx, row in enumerate(visible_rows):
+                row_top = table_y + header_h + 8 + idx * row_h
+                row_bottom = row_top + row_h - 4
+                fill_color = (248, 248, 248) if idx % 2 == 0 else (238, 238, 238)
+                cv2.rectangle(
+                    canvas,
+                    (table_x + 8, row_top),
+                    (table_x + table_w - 8, row_bottom),
+                    fill_color,
+                    -1,
+                )
+
+                class_name = str(row.get("class_name") or "N/A")
+                piece_count = str(row.get("piece_count", 0))
+
+                cv2.putText(
+                    canvas,
+                    class_name,
+                    (table_x + 22, row_top + 24),
+                    font,
+                    0.68,
+                    (30, 30, 30),
+                    2,
+                )
+                piece_size = cv2.getTextSize(piece_count, font, 0.68, 2)[0]
+                cv2.putText(
+                    canvas,
+                    piece_count,
+                    (table_x + table_w - 22 - piece_size[0], row_top + 24),
+                    font,
+                    0.68,
+                    (30, 30, 30),
+                    2,
+                )
+
+            hidden_count = len(rows) - len(visible_rows)
+            if hidden_count > 0:
+                more_text = f"+{hidden_count} more"
+                cv2.putText(
+                    canvas,
+                    more_text,
+                    (table_x + 16, table_y + table_h - 14),
+                    font,
+                    0.6,
+                    (90, 90, 90),
+                    2,
+                )
+
+        button_width = 110
+        button_height = 38
+        button_x = dialog_x + (dialog_width - button_width) // 2
+        button_y = dialog_y + dialog_height - 58
+        self.stats_class_modal_close_rect = (button_x, button_y, button_width, button_height)
+
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.stats_class_modal_close_rect)
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        scaled_rect = self._scale_rect(self.stats_class_modal_close_rect, scale_factor)
+        bx, by, bw, bh = scaled_rect
+
+        cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (100, 100, 100), -1)
+        cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (0, 0, 0), 2)
+
+        close_text = "Close"
+        close_size = cv2.getTextSize(close_text, font, 0.7, 2)[0]
+        close_x = bx + (bw - close_size[0]) // 2
+        close_y = by + (bh + close_size[1]) // 2
+        cv2.putText(canvas, close_text, (close_x, close_y), font, 0.7, (255, 255, 255), 2)
+
+        return canvas
+
     def mouse_callback(self, event, x, y, flags, _param):
         """Callback to handle mouse events"""
         # Track mouse position and button state
@@ -501,6 +679,15 @@ class DisplayWindow:
         self.mouse_button_down = (flags & cv2.EVENT_FLAG_LBUTTON) != 0
 
         if event == cv2.EVENT_LBUTTONUP:
+            if (
+                self._stats_long_press_active
+                and not self._stats_long_press_fired
+                and self._can_track_stats_long_press()
+                and self._is_point_in_rect(x, y, self.stats_card_rect)
+            ):
+                self._cancel_stats_long_press()
+                self._emit_action("open_stats_class_modal")
+                return
             self._cancel_stats_long_press()
             return
 
@@ -521,7 +708,14 @@ class DisplayWindow:
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self._emit_action("close_piece_date_dialog")
                 return  # Exit early to prevent other clicks
-            
+
+            # Stats class modal close button (highest priority)
+            if self.show_stats_class_modal and self.stats_class_modal_close_rect:
+                bx, by, bw, bh = self.stats_class_modal_close_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._emit_action("close_stats_class_modal")
+                return
+
             # No images dialog OK button (highest priority)
             if self.show_no_images_dialog and self.no_images_ok_button_rect:
                 bx, by, bw, bh = self.no_images_ok_button_rect
@@ -2849,6 +3043,9 @@ class DisplayWindow:
                 canvas = self.draw_reset_confirmation_dialog(canvas)
             elif self.show_delete_confirm:
                 canvas = self.draw_delete_confirmation_dialog(canvas)
+
+        if self.show_stats_class_modal:
+            canvas = self.draw_stats_class_modal(canvas)
 
         if self.show_rebuild_confirm:
             canvas = self.draw_rebuild_confirmation_dialog(canvas)
