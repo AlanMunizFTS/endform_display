@@ -122,6 +122,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             remote_db_max_scan_pages=1,
             remote_db_forward_scan_ratio=1.0,
             remote_db_success_interval_sec=0.0,
+            remote_db_idle_backoff_sec=2.0,
             remote_db_error_backoff_sec=7.0,
         )
         controller = MainController(
@@ -177,13 +178,6 @@ class TestRemoteDbPolling(unittest.TestCase):
         )
         remote_db.close.assert_called_once_with()
         self.assertTrue(
-            any(
-                'Executing forward query after id 0 with limit 25: SELECT "id", "img_name", "class_name", "confidence" FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s'
-                in call.args[0]
-                for call in logger.info.call_args_list
-            )
-        )
-        self.assertTrue(
             any("Retrieved 1 rows for forward scan using LIMIT 25" in call.args[0] for call in logger.info.call_args_list)
         )
         self.assertTrue(
@@ -226,6 +220,7 @@ class TestRemoteDbPolling(unittest.TestCase):
                 remote_db_target_sync_batch=1,
                 remote_db_max_scan_pages=1,
                 remote_db_forward_scan_ratio=1.0,
+                remote_db_idle_backoff_sec=2.0,
             ),
             sftp_credentials={
                 "hostname": "192.168.1.179",
@@ -242,7 +237,7 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         delay = controller._run_remote_db_poll_iteration()
 
-        self.assertEqual(delay, 0.0)
+        self.assertEqual(delay, 2.0)
         local_db.execute.assert_not_called()
         remote_db.execute.assert_not_called()
         self.assertTrue(
@@ -255,6 +250,46 @@ class TestRemoteDbPolling(unittest.TestCase):
                 for call in logger.info.call_args_list
             )
         )
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_uses_idle_backoff_and_logs_idle_once_when_empty(self, remote_db_factory):
+        display = self._build_display()
+        display.db = self._build_db_client()
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=2,
+                remote_db_forward_scan_ratio=0.5,
+                remote_db_success_interval_sec=0.0,
+                remote_db_idle_backoff_sec=3.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = []
+        remote_db_factory.return_value = remote_db
+
+        first_delay = controller._run_remote_db_poll_iteration()
+        second_delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(first_delay, 3.0)
+        self.assertEqual(second_delay, 3.0)
+        idle_logs = [
+            call.args[0]
+            for call in logger.info.call_args_list
+            if "No remote metadata available to sync" in call.args[0]
+        ]
+        self.assertEqual(len(idle_logs), 1)
 
     @patch("db.get_remote_db_connection_via_ssh", side_effect=RuntimeError("boom"))
     def test_remote_db_poll_iteration_uses_error_backoff_on_failure(self, remote_db_factory):

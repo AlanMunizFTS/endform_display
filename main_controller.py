@@ -422,6 +422,7 @@ class ControllerConfig:
     remote_db_max_scan_pages: int = 20
     remote_db_forward_scan_ratio: float = 0.7
     remote_db_success_interval_sec: float = 0.0
+    remote_db_idle_backoff_sec: float = 2.0
     remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
     remote_command: str = (
@@ -486,6 +487,7 @@ class MainController:
         self.remote_db_poll_thread = None
         self.remote_db_stop_event = None
         self._remote_db_placeholder_warned = False
+        self._remote_db_idle_logged = False
         self.remote_db_forward_cursor_id = 0
         self.remote_db_backfill_cursor_id = 0
         self.last_historic_check = 0.0
@@ -621,19 +623,14 @@ class MainController:
         return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
 
     def _collect_remote_model_result_rows(self, remote_db, query, after_id, limit, scan_label):
-        self.logger.info(
-            f"[REMOTE_DB] Executing {scan_label} query after id {after_id} with limit {limit}: {query}",
-            allow_repeat=True,
-        )
         rows = remote_db.fetch(query, (after_id, limit))
-        self.logger.info(
-            f"[REMOTE_DB] Retrieved {len(rows)} rows for {scan_label} scan using LIMIT {limit}",
-            allow_repeat=True,
-        )
+        if rows:
+            self.logger.info(
+                f"[REMOTE_DB] Retrieved {len(rows)} rows for {scan_label} scan using LIMIT {limit}",
+            )
         for idx, row in enumerate(rows, start=1):
             self.logger.info(
                 f"[REMOTE_DB] {scan_label} row {idx}: {self._serialize_remote_db_row(row)}",
-                allow_repeat=True,
             )
         return rows
 
@@ -834,7 +831,6 @@ class MainController:
         if not self.db_connected or local_db is None:
             self.logger.warn(
                 "[REMOTE_DB] Local PostgreSQL unavailable; skipping remote metadata sync.",
-                allow_repeat=True,
             )
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
 
@@ -854,9 +850,8 @@ class MainController:
             backfill_page_budget = max(0, total_page_budget - forward_page_budget)
             target_sync_batch = max(1, int(self.config.remote_db_target_sync_batch))
 
-            self.logger.info(
+            self.logger.debug(
                 f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
-                allow_repeat=True,
             )
             remote_db = get_remote_db_connection_via_ssh(
                 ssh_host=ssh_credentials["hostname"],
@@ -864,7 +859,7 @@ class MainController:
                 ssh_username=ssh_credentials["username"],
                 ssh_password=ssh_credentials["password"],
             )
-            self.logger.info("[REMOTE_DB] Remote PostgreSQL connection successful", allow_repeat=True)
+            self.logger.debug("[REMOTE_DB] Remote PostgreSQL connection successful")
 
             forward_scan = self._scan_remote_rows_for_sync(
                 remote_db=remote_db,
@@ -906,24 +901,44 @@ class MainController:
                 local_db=local_db,
                 remote_db=remote_db,
             )
-            self.logger.info(
-                "[REMOTE_DB] Local sync summary: "
-                f"scanned={scanned_count}, "
-                f"pages={pages_scanned}, "
-                f"candidates={sync_summary['candidate_count']}, "
-                f"matched={sync_summary['matched_count']}, "
-                f"synced={sync_summary['synced_count']}, "
-                f"deleted_remote={sync_summary['deleted_count']}",
-                allow_repeat=True,
+            has_activity = (
+                scanned_count > 0
+                or sync_summary["candidate_count"] > 0
+                or sync_summary["synced_count"] > 0
+                or sync_summary["deleted_count"] > 0
+                or bool(sync_summary["missing_local"])
             )
+            if has_activity:
+                self._remote_db_idle_logged = False
+                self.logger.info(
+                    "[REMOTE_DB] Local sync summary: "
+                    f"scanned={scanned_count}, "
+                    f"pages={pages_scanned}, "
+                    f"candidates={sync_summary['candidate_count']}, "
+                    f"matched={sync_summary['matched_count']}, "
+                    f"synced={sync_summary['synced_count']}, "
+                    f"deleted_remote={sync_summary['deleted_count']}",
+                )
             if sync_summary["missing_local"]:
                 self.logger.info(
                     "[REMOTE_DB] Missing local classified_images rows: "
-                    + ", ".join(sync_summary["missing_local"]),
-                    allow_repeat=True,
+                    + ", ".join(sync_summary["missing_local"][:10]),
                 )
-            return max(0.0, float(self.config.remote_db_success_interval_sec))
+            elif not has_activity and not self._remote_db_idle_logged:
+                idle_backoff = max(0.0, float(self.config.remote_db_idle_backoff_sec))
+                self.logger.info(
+                    f"[REMOTE_DB] No remote metadata available to sync; retrying in {idle_backoff:.1f}s"
+                )
+                self._remote_db_idle_logged = True
+
+            if sync_summary["synced_count"] > 0 or sync_summary["deleted_count"] > 0:
+                return max(0.0, float(self.config.remote_db_success_interval_sec))
+            return max(
+                float(self.config.remote_db_success_interval_sec),
+                float(self.config.remote_db_idle_backoff_sec),
+            )
         except Exception as exc:
+            self._remote_db_idle_logged = False
             self.logger.error(f"[REMOTE_DB] Poll iteration failed: {exc}", allow_repeat=True)
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
         finally:

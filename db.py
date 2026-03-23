@@ -159,7 +159,6 @@ class PostgresDB:
         try:
             logger.info(
                 f"[DB] Connecting to PostgreSQL at {host}:{port}, database={database}, user={user}",
-                allow_repeat=True,
             )
             self.connection_pool = psycopg2.pool.SimpleConnectionPool(
                 1, 10,
@@ -172,9 +171,9 @@ class PostgresDB:
             # Validate a live connection early so startup errors are explicit.
             connection = self.connection_pool.getconn()
             self.connection_pool.putconn(connection)
-            logger.info("[DB] Connection successful", allow_repeat=True)
+            logger.info("[DB] Connection successful")
         except Exception as e:
-            logger.error(f"[DB] Connection error: {e}", allow_repeat=True)
+            logger.error(f"[DB] Connection error: {e}")
             raise
     
     @contextmanager
@@ -294,7 +293,7 @@ def get_db_connection():
             password=db_settings["password"],
         )
     except Exception as e:
-        logger.error(f"[DB] Failed to initialize DB connection: {e}", allow_repeat=True)
+        logger.error(f"[DB] Failed to initialize DB connection: {e}")
         raise
 
 
