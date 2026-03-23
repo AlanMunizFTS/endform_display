@@ -470,7 +470,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             db_client=local_db,
         )
 
-    def test_recalculate_piece_result_refreshes_piece_result_defects(self):
+    def test_recalculate_piece_result_refreshes_piece_result_defects_with_single_best_defect(self):
         display = self._build_display()
         logger = self._build_logger()
         db = self._build_db_client()
@@ -491,12 +491,14 @@ class TestRemoteDbPolling(unittest.TestCase):
             "INSERT INTO piece_result_defects (piece_result_id, class_name, confidence)",
             insert_query,
         )
+        self.assertIn("FROM (", insert_query)
         self.assertIn("FROM classified_image_defects cid", insert_query)
         self.assertIn("JOIN classified_images ci ON ci.id = cid.classified_image_id", insert_query)
         self.assertIn("UPPER(cid.class_name) <> 'OK'", insert_query)
         self.assertIn("NOT EXISTS (", insert_query)
         self.assertIn("ci_non_ok.piece_id = %s", insert_query)
-        self.assertIn("GROUP BY cid.class_name", insert_query)
+        self.assertIn("ORDER BY cid.confidence DESC, cid.created_at DESC, cid.id DESC", insert_query)
+        self.assertIn("LIMIT 1", insert_query)
         self.assertEqual(db.execute.call_args_list[2].args[1], (321, 321, 321))
 
 

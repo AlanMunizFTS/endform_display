@@ -2682,21 +2682,25 @@ class MainController:
             )
             db.execute(
                 "INSERT INTO piece_result_defects (piece_result_id, class_name, confidence) "
-                "SELECT %s, cid.class_name, MAX(cid.confidence) "
-                "FROM classified_image_defects cid "
-                "JOIN classified_images ci ON ci.id = cid.classified_image_id "
-                "WHERE ci.piece_id = %s "
-                "AND ("
-                "  UPPER(cid.class_name) <> 'OK' "
-                "  OR NOT EXISTS ("
-                "    SELECT 1 "
-                "    FROM classified_image_defects cid_non_ok "
-                "    JOIN classified_images ci_non_ok ON ci_non_ok.id = cid_non_ok.classified_image_id "
-                "    WHERE ci_non_ok.piece_id = %s "
-                "    AND UPPER(cid_non_ok.class_name) <> 'OK'"
-                "  )"
-                ") "
-                "GROUP BY cid.class_name",
+                "SELECT %s, selected.class_name, selected.confidence "
+                "FROM ("
+                "  SELECT cid.class_name, cid.confidence "
+                "  FROM classified_image_defects cid "
+                "  JOIN classified_images ci ON ci.id = cid.classified_image_id "
+                "  WHERE ci.piece_id = %s "
+                "  AND ("
+                "    UPPER(cid.class_name) <> 'OK' "
+                "    OR NOT EXISTS ("
+                "      SELECT 1 "
+                "      FROM classified_image_defects cid_non_ok "
+                "      JOIN classified_images ci_non_ok ON ci_non_ok.id = cid_non_ok.classified_image_id "
+                "      WHERE ci_non_ok.piece_id = %s "
+                "      AND UPPER(cid_non_ok.class_name) <> 'OK'"
+                "    )"
+                "  ) "
+                "  ORDER BY cid.confidence DESC, cid.created_at DESC, cid.id DESC "
+                "  LIMIT 1"
+                ") AS selected",
                 (piece_id, piece_id, piece_id),
             )
         except Exception as exc:
