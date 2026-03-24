@@ -11,6 +11,7 @@ class _DisplayStub:
         self.capture_modal_text = ""
         self.capture_modal_color = None
         self.capture_modal_expires_at = 0.0
+        self.manual_capture_pending = False
 
 
 class TestMainControllerRemoteEvents(unittest.TestCase):
@@ -45,6 +46,7 @@ class TestMainControllerRemoteEvents(unittest.TestCase):
 
     def test_stdout_done_signal_updates_capture_modal(self):
         display = _DisplayStub()
+        display.manual_capture_pending = True
         logger = MagicMock()
 
         process_remote_event(
@@ -57,6 +59,7 @@ class TestMainControllerRemoteEvents(unittest.TestCase):
         self.assertEqual(display.capture_modal_text, "captured")
         self.assertEqual(display.capture_modal_color, (0, 150, 0))
         self.assertGreater(display.capture_modal_expires_at, 0.0)
+        self.assertFalse(display.manual_capture_pending)
         logger.info.assert_not_called()
 
 

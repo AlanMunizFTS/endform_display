@@ -22,6 +22,7 @@ from paths_config import (
     TMP_DISPLAY_DIR,
 )
 from sftp_app import SFTPApp
+from settings import is_remote_db_enabled
 from utilities.log import get_logger, install_print_logger
 
 
@@ -450,7 +451,7 @@ class ControllerConfig:
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
-    remote_db_polling_enabled: bool = True
+    remote_db_polling_enabled: bool = field(default_factory=is_remote_db_enabled)
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
     remote_db_query_limit: int = 25
@@ -997,10 +998,15 @@ class MainController:
 
     def start_remote_db_polling(self):
         if not getattr(self.config, "remote_db_polling_enabled", False):
-            self.logger.info("[REMOTE_DB] Polling disabled by config", allow_repeat=True)
+            self.logger.info(
+                "[REMOTE_DB] Polling disabled by APP_REMOTE_DB_ENABLED/config",
+                allow_repeat=True,
+            )
             return False
-        if self.remote_db_poll_thread is not None and self.remote_db_poll_thread.is_alive():
-            return False
+        if self.remote_db_poll_thread is not None:
+            if self.remote_db_poll_thread.is_alive() or self.remote_db_stop_event is not None:
+                return False
+            self.remote_db_poll_thread = None
 
         self.remote_db_stop_event = Event()
         self.remote_db_poll_thread = Thread(

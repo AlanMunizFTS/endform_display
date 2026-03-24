@@ -88,6 +88,24 @@ class TestSettings(unittest.TestCase):
                 },
             )
 
+    def test_is_remote_db_enabled_defaults_to_true_when_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(settings.is_remote_db_enabled())
+
+    def test_is_remote_db_enabled_honors_truthy_and_falsey_values(self):
+        truthy_values = ("1", "true", "True", "yes", "on")
+        falsey_values = ("0", "false", "False", "no", "off", "")
+
+        for value in truthy_values:
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"APP_REMOTE_DB_ENABLED": value}, clear=True):
+                    self.assertTrue(settings.is_remote_db_enabled())
+
+        for value in falsey_values:
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"APP_REMOTE_DB_ENABLED": value}, clear=True):
+                    self.assertFalse(settings.is_remote_db_enabled())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

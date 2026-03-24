@@ -68,6 +68,14 @@ def _get_required_int_env(name):
         ) from exc
 
 
+def _is_env_flag_enabled(name, default=False):
+    load_env_file()
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def get_sftp_settings():
     """Return validated SFTP settings from environment variables."""
     return {
@@ -80,11 +88,12 @@ def get_sftp_settings():
 
 def is_sftp_enabled():
     """Return whether SFTP mode is explicitly enabled by environment flag."""
-    load_env_file()
-    raw_value = os.getenv("APP_SFTP_ENABLED")
-    if raw_value is None:
-        return False
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+    return _is_env_flag_enabled("APP_SFTP_ENABLED", default=False)
+
+
+def is_remote_db_enabled():
+    """Return whether remote DB communication is enabled by environment flag."""
+    return _is_env_flag_enabled("APP_REMOTE_DB_ENABLED", default=True)
 
 
 def get_optional_sftp_settings():

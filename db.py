@@ -8,7 +8,7 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from utilities.log import get_logger
-from settings import get_db_settings
+from settings import get_db_settings, is_remote_db_enabled
 
 logger = get_logger()
 
@@ -305,6 +305,9 @@ def get_remote_db_connection_via_ssh(
     db_settings=None,
 ):
     """Open a dedicated SSH tunnel and return a Postgres client through it."""
+    if not is_remote_db_enabled():
+        raise RuntimeError("Remote DB communication is disabled by APP_REMOTE_DB_ENABLED")
+
     resolved_db_settings = dict(db_settings or get_db_settings())
     tunnel = SSHTunnelForwarder(
         ssh_host=ssh_host,
