@@ -127,6 +127,37 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             self.assertIn("classification_folder_errors", result)
             self.assertIn(f"Source missing: {img_name}", result["classification_folder_errors"])
 
+    def test_save_classification_results_returns_stats_report_path(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            (historic_dir / img_name).write_bytes(b"historic")
+
+            db = MagicMock()
+            db.fetch.return_value = [{"img_name": img_name, "result": "OK"}]
+
+            controller = MainController(
+                display=self._build_display(db=db),
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+
+            report_path = tmp_path / "reports" / "reporte_20260325_20260325_0900_1200.xlsx"
+            with patch("main_controller.FINAL_CLASSIFICATION_DIR", tmp_path / "final_classification"), patch(
+                "report_exporter.export_stats_report",
+                return_value=str(report_path),
+            ) as mock_export:
+                result = controller.save_classification_results(
+                    db_client=db,
+                    historic_dir=str(historic_dir),
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["stats_report_path"], str(report_path))
+            mock_export.assert_called_once()
+
     def test_perform_delete_current_piece_removes_annotated_and_historic(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

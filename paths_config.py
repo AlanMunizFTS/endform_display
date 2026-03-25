@@ -39,6 +39,7 @@ STATUS_SYNC_DIRS = {
 # Final classification folders (model vs operator)
 # --------------------------------------------------
 FINAL_CLASSIFICATION_DIR = Path("./final_classification")
+REPORTS_DIR = Path("./reports")
 
 FINAL_CLASSIFICATION_DIRS = {
     "side": {"P": "Side_P", "N": "Side_N", "FP": "Side_FP", "FN": "Side_FN"},

@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import time
 from collections import defaultdict
@@ -1299,13 +1300,44 @@ class MainController:
                 self._set_sync_progress("Completed", 100)
                 classification = classification or {}
                 folder_errors = classification.get("classification_folder_errors", [])
-                if verify_result.get("verified") and classification.get("ok") and not folder_errors:
+                report_path = classification.get("stats_report_path")
+                report_error = classification.get("stats_report_error")
+                report_name = os.path.basename(str(report_path)) if report_path else ""
+                if (
+                    verify_result.get("verified")
+                    and classification.get("ok")
+                    and not folder_errors
+                    and not report_error
+                ):
+                    images = classification.get("images", 0)
+                    copied = classification.get("files_copied", 0)
+                    if report_name:
+                        d.sync_message = (
+                            f"Dataset saved: {images} images, {copied} files copied. "
+                            f"Report: {report_name}"
+                        )
+                    else:
+                        d.sync_message = (
+                            f"Dataset saved: {images} images, {copied} files copied"
+                        )
+                    d.sync_message_is_error = False
+                elif (
+                    verify_result.get("verified")
+                    and classification.get("ok")
+                    and not folder_errors
+                    and report_error
+                ):
                     images = classification.get("images", 0)
                     copied = classification.get("files_copied", 0)
                     d.sync_message = (
-                        f"Dataset saved: {images} images, {copied} files copied"
+                        f"Dataset saved: {images} images, {copied} files copied. "
+                        f"Report warning: {report_error}"
                     )
-                    d.sync_message_is_error = False
+                    d.sync_message_is_error = True
+                    self.logger.warn(
+                        f"[SYNC] Stats report warning: {report_error}",
+                        allow_repeat=True,
+                    )
                 elif verify_result.get("verified") and classification.get("ok") and folder_errors:
                     n_errors = len(folder_errors)
                     d.sync_message = (
@@ -3125,6 +3157,20 @@ class MainController:
             print(
                 f"save_classification_results: {len(all_errors)} folder issues: "
                 + "; ".join(all_errors[:5])
+            )
+
+        try:
+            from report_exporter import export_stats_report
+
+            result["stats_report_path"] = export_stats_report(
+                self,
+                db_client=db,
+            )
+        except Exception as exc:
+            result["stats_report_error"] = str(exc)
+            self.logger.warn(
+                f"[SYNC] Stats report export failed: {exc}",
+                allow_repeat=True,
             )
 
         return result

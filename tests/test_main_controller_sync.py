@@ -61,7 +61,12 @@ class TestMainControllerSync(unittest.TestCase):
             )
             controller.save_classification_results = MagicMock(
                 side_effect=lambda **kwargs: events.append("classify")
-                or {"ok": True, "images": 3, "files_copied": 3}
+                or {
+                    "ok": True,
+                    "images": 3,
+                    "files_copied": 3,
+                    "stats_report_path": "reports/reporte_20260325_20260325_0900_1200.xlsx",
+                }
             )
             controller.verify_sync_images_by_status = MagicMock(
                 side_effect=lambda **kwargs: events.append("verify") or {"verified": True}
@@ -89,9 +94,41 @@ class TestMainControllerSync(unittest.TestCase):
                 check_interval=17,
             )
             self.assertFalse(display.sync_in_progress)
-            self.assertEqual(display.sync_message, "Dataset saved: 3 images, 3 files copied")
+            self.assertEqual(
+                display.sync_message,
+                "Dataset saved: 3 images, 3 files copied. Report: reporte_20260325_20260325_0900_1200.xlsx",
+            )
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
+
+    @patch("main_controller.Thread", _ImmediateThread)
+    def test_start_sync_async_marks_report_warning_without_failing_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_db = MagicMock()
+            display = self._build_display(db=fake_db)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+            )
+            controller.stop_historic_download_worker = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+            controller._get_visible_historic_image_snapshot = MagicMock(return_value=["img_a.png"])
+            controller.sync_images_by_status = MagicMock(return_value={"ok": True, "rows_snapshot": []})
+            controller.save_classification_results = MagicMock(
+                return_value={
+                    "ok": True,
+                    "images": 2,
+                    "files_copied": 2,
+                    "stats_report_error": "Stats report requires a valid DB date range",
+                }
+            )
+            controller.verify_sync_images_by_status = MagicMock(return_value={"verified": True})
+
+            with patch("db.get_db_connection", return_value=fake_db):
+                controller.start_sync_images_by_status_async()
+
+            self.assertTrue(display.sync_message.startswith("Dataset saved: 2 images, 2 files copied. Report warning:"))
+            self.assertTrue(display.sync_message_is_error)
 
 
 if __name__ == "__main__":
