@@ -126,12 +126,15 @@ class DisplayWindow:
         self.show_stats_class_modal = False
         self.stats_class_modal_close_rect = None
         self.stats_class_modal_rows = []
+        self.stats_class_modal_status_rows = []
         self.stats_class_modal_view = "summary"
-        self.stats_class_modal_selected_class_name = ""
+        self.stats_class_modal_selected_kind = ""
+        self.stats_class_modal_selected_label = ""
         self.stats_class_modal_detail_rows = []
         self.stats_class_modal_detail_offset = 0
         self.stats_class_modal_detail_visible_rows = 1
         self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_status_row_rects = []
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
@@ -444,11 +447,13 @@ class DisplayWindow:
     def _reset_stats_class_modal_state(self):
         """Reset the stats modal drill-down state."""
         self.stats_class_modal_view = "summary"
-        self.stats_class_modal_selected_class_name = ""
+        self.stats_class_modal_selected_kind = ""
+        self.stats_class_modal_selected_label = ""
         self.stats_class_modal_detail_rows = []
         self.stats_class_modal_detail_offset = 0
         self.stats_class_modal_detail_visible_rows = 1
         self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_status_row_rects = []
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
@@ -519,6 +524,16 @@ class DisplayWindow:
                 return "NOK"
         return "OK"
 
+    def _get_stats_result_color(self, result_label):
+        """Return a stable BGR color for each final result row."""
+        palette = {
+            "OK": (34, 100, 34),
+            "NOK": (25, 25, 160),
+            "FNOK": (100, 30, 130),
+            "FOK": (10, 110, 200),
+        }
+        return palette.get(str(result_label or "").upper(), (90, 90, 90))
+
     def _draw_stats_card(self, canvas, x, y, size, ok_count, nok_count, fok_count, fnok_count):
         """Draw a stats card that fills the entire tile slot."""
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -543,10 +558,10 @@ class DisplayWindow:
 
         # Stat rows fill the remaining height
         stats = [
-            ("OK",   ok_count,   (34,  100,  34)),   # dark forest green
-            ("NOK",  nok_count,  (25,   25, 160)),   # dark crimson
-            ("FOK",  fok_count,  (10,  110, 200)),   # dark amber
-            ("FNOK", fnok_count, (100,  30, 130)),   # dark purple
+            ("OK", ok_count, self._get_stats_result_color("OK")),
+            ("NOK", nok_count, self._get_stats_result_color("NOK")),
+            ("FNOK", fnok_count, self._get_stats_result_color("FNOK")),
+            ("FOK", fok_count, self._get_stats_result_color("FOK")),
         ]
         remaining_h = size - title_area_h - 4
         row_h = remaining_h // len(stats)
@@ -650,8 +665,8 @@ class DisplayWindow:
         return True
 
     def draw_stats_class_modal(self, canvas):
-        """Draw modal dialog showing distinct piece counts by class name."""
-        dialog_width = 760
+        """Draw modal dialog showing piece breakdown by class and final result."""
+        dialog_width = 1120
         dialog_height = 620
         dialog_x = (self.width - dialog_width) // 2
         dialog_y = (self.height - dialog_height) // 2
@@ -676,7 +691,7 @@ class DisplayWindow:
         )
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        title = "Pieces by Class"
+        title = "Piece Breakdown"
         title_scale = 1.0
         title_thickness = 3
         title_size = cv2.getTextSize(title, font, title_scale, title_thickness)[0]
@@ -692,36 +707,8 @@ class DisplayWindow:
             title_thickness,
         )
 
-        table_x = dialog_x + 45
-        table_y = dialog_y + 95
-        table_w = dialog_width - 90
-        table_h = dialog_height - 190
-        list_content_y = table_y + 54
-        list_content_h = table_h - 70
-        cv2.rectangle(
-            canvas,
-            (table_x, table_y),
-            (table_x + table_w, table_y + table_h),
-            (230, 230, 230),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (table_x, table_y),
-            (table_x + table_w, table_y + table_h),
-            (120, 120, 120),
-            2,
-        )
-
-        header_h = 46
-        cv2.rectangle(
-            canvas,
-            (table_x + 2, table_y + 2),
-            (table_x + table_w - 2, table_y + header_h),
-            (65, 65, 65),
-            -1,
-        )
         self.stats_class_modal_class_row_rects = []
+        self.stats_class_modal_status_row_rects = []
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
@@ -729,6 +716,36 @@ class DisplayWindow:
         self.stats_class_modal_scrollbar_rect = None
 
         if self.stats_class_modal_view == "detail":
+            table_x = dialog_x + 45
+            table_y = dialog_y + 95
+            table_w = dialog_width - 90
+            table_h = dialog_height - 190
+            list_content_y = table_y + 54
+            list_content_h = table_h - 70
+            header_h = 46
+
+            cv2.rectangle(
+                canvas,
+                (table_x, table_y),
+                (table_x + table_w, table_y + table_h),
+                (230, 230, 230),
+                -1,
+            )
+            cv2.rectangle(
+                canvas,
+                (table_x, table_y),
+                (table_x + table_w, table_y + table_h),
+                (120, 120, 120),
+                2,
+            )
+            cv2.rectangle(
+                canvas,
+                (table_x + 2, table_y + 2),
+                (table_x + table_w - 2, table_y + header_h),
+                (65, 65, 65),
+                -1,
+            )
+
             back_width = 88
             back_height = 34
             back_x = dialog_x + 28
@@ -851,48 +868,94 @@ class DisplayWindow:
                     cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
                     cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
         else:
-            cv2.putText(
-                canvas,
-                "Class Name",
-                (table_x + 20, table_y + 31),
-                font,
-                0.72,
-                (255, 255, 255),
-                2,
-            )
-            count_label = "Pieces"
-            count_label_size = cv2.getTextSize(count_label, font, 0.72, 2)[0]
-            cv2.putText(
-                canvas,
-                count_label,
-                (table_x + table_w - 20 - count_label_size[0], table_y + 31),
-                font,
-                0.72,
-                (255, 255, 255),
-                2,
-            )
+            panel_gap = 28
+            panel_y = dialog_y + 95
+            panel_h = dialog_height - 190
+            panel_x = dialog_x + 35
+            panel_w = (dialog_width - 70 - panel_gap) // 2
+            header_h = 46
 
-            rows = list(self.stats_class_modal_rows or [])
-            row_h = 38
-            max_rows = max(1, (table_h - header_h - 18) // row_h)
-            visible_rows = rows[:max_rows]
+            def draw_summary_panel(panel_left, panel_title, left_header, rows, key_name, rect_target, empty_text, use_status_colors=False):
+                cv2.putText(
+                    canvas,
+                    panel_title,
+                    (panel_left + 6, panel_y - 14),
+                    font,
+                    0.76,
+                    (35, 35, 35),
+                    2,
+                )
 
-            if not visible_rows:
-                empty_text = "No class data available"
-                empty_size = cv2.getTextSize(empty_text, font, 0.85, 2)[0]
-                empty_x = table_x + (table_w - empty_size[0]) // 2
-                empty_y = table_y + header_h + (table_h - header_h) // 2
-                cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.85, (70, 70, 70), 2)
-            else:
-                class_max_width = table_w - 170
+                cv2.rectangle(
+                    canvas,
+                    (panel_left, panel_y),
+                    (panel_left + panel_w, panel_y + panel_h),
+                    (230, 230, 230),
+                    -1,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (panel_left, panel_y),
+                    (panel_left + panel_w, panel_y + panel_h),
+                    (120, 120, 120),
+                    2,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (panel_left + 2, panel_y + 2),
+                    (panel_left + panel_w - 2, panel_y + header_h),
+                    (65, 65, 65),
+                    -1,
+                )
+
+                cv2.putText(
+                    canvas,
+                    left_header,
+                    (panel_left + 20, panel_y + 31),
+                    font,
+                    0.72,
+                    (255, 255, 255),
+                    2,
+                )
+                count_label = "Pieces"
+                count_label_size = cv2.getTextSize(count_label, font, 0.72, 2)[0]
+                cv2.putText(
+                    canvas,
+                    count_label,
+                    (panel_left + panel_w - 20 - count_label_size[0], panel_y + 31),
+                    font,
+                    0.72,
+                    (255, 255, 255),
+                    2,
+                )
+
+                row_h = 38
+                max_rows = max(1, (panel_h - header_h - 18) // row_h)
+                visible_rows = rows[:max_rows]
+
+                if not visible_rows:
+                    empty_size = cv2.getTextSize(empty_text, font, 0.75, 2)[0]
+                    empty_x = panel_left + (panel_w - empty_size[0]) // 2
+                    empty_y = panel_y + header_h + (panel_h - header_h) // 2
+                    cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.75, (70, 70, 70), 2)
+                    return
+
+                label_max_width = panel_w - 170
                 for idx, row in enumerate(visible_rows):
-                    row_top = table_y + header_h + 8 + idx * row_h
+                    row_top = panel_y + header_h + 8 + idx * row_h
                     row_bottom = row_top + row_h - 4
-                    row_rect = (table_x + 8, row_top, table_w - 16, row_bottom - row_top)
-                    class_name = str(row.get("class_name") or "N/A")
+                    row_rect = (panel_left + 8, row_top, panel_w - 16, row_bottom - row_top)
+                    label_value = str(row.get(key_name) or "N/A")
                     piece_count = str(row.get("piece_count", 0))
                     row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, row_rect)
                     fill_color = (242, 247, 255) if row_hovered else ((248, 248, 248) if idx % 2 == 0 else (238, 238, 238))
+                    text_color = (30, 30, 30)
+
+                    if use_status_colors:
+                        status_fill = self._get_stats_result_color(label_value)
+                        fill_color = tuple(min(255, channel + 50) for channel in status_fill) if row_hovered else status_fill
+                        text_color = (255, 255, 255)
+
                     cv2.rectangle(
                         canvas,
                         (row_rect[0], row_rect[1]),
@@ -901,27 +964,27 @@ class DisplayWindow:
                         -1,
                     )
 
-                    class_label = self._truncate_text_to_width(class_name, font, 0.68, 2, class_max_width)
+                    label_text = self._truncate_text_to_width(label_value, font, 0.68, 2, label_max_width)
                     cv2.putText(
                         canvas,
-                        class_label,
-                        (table_x + 22, row_top + 24),
+                        label_text,
+                        (panel_left + 22, row_top + 24),
                         font,
                         0.68,
-                        (30, 30, 30),
+                        text_color,
                         2,
                     )
                     piece_size = cv2.getTextSize(piece_count, font, 0.68, 2)[0]
                     cv2.putText(
                         canvas,
                         piece_count,
-                        (table_x + table_w - 22 - piece_size[0], row_top + 24),
+                        (panel_left + panel_w - 22 - piece_size[0], row_top + 24),
                         font,
                         0.68,
-                        (30, 30, 30),
+                        text_color,
                         2,
                     )
-                    self.stats_class_modal_class_row_rects.append((row_rect, class_name))
+                    rect_target.append((row_rect, label_value))
 
                 hidden_count = len(rows) - len(visible_rows)
                 if hidden_count > 0:
@@ -929,12 +992,32 @@ class DisplayWindow:
                     cv2.putText(
                         canvas,
                         more_text,
-                        (table_x + 16, table_y + table_h - 14),
+                        (panel_left + 16, panel_y + panel_h - 14),
                         font,
                         0.6,
                         (90, 90, 90),
                         2,
                     )
+
+            draw_summary_panel(
+                panel_x,
+                "By Class Name",
+                "Class Name",
+                list(self.stats_class_modal_rows or []),
+                "class_name",
+                self.stats_class_modal_class_row_rects,
+                "No class data available",
+            )
+            draw_summary_panel(
+                panel_x + panel_w + panel_gap,
+                "By Final Result",
+                "Result",
+                list(self.stats_class_modal_status_rows or []),
+                "final_result",
+                self.stats_class_modal_status_row_rects,
+                "No result data available",
+                use_status_colors=True,
+            )
 
         button_width = 110
         button_height = 38
@@ -958,8 +1041,9 @@ class DisplayWindow:
         cv2.putText(canvas, close_text, (close_x, close_y), font, 0.7, (255, 255, 255), 2)
 
         if self.stats_class_modal_view == "detail":
+            detail_prefix = "Final Result: " if self.stats_class_modal_selected_kind == "status" else "Class: "
             subtitle_text = self._truncate_text_to_width(
-                self.stats_class_modal_selected_class_name,
+                f"{detail_prefix}{self.stats_class_modal_selected_label}",
                 font,
                 0.72,
                 2,
@@ -1057,6 +1141,12 @@ class DisplayWindow:
                     bx, by, bw, bh = rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
                         self._emit_action("open_stats_class_detail", class_name=class_name)
+                        return
+
+                for rect, final_result in self.stats_class_modal_status_row_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_stats_status_detail", final_result=final_result)
                         return
 
                 return

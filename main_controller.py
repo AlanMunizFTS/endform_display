@@ -3362,6 +3362,24 @@ class MainController:
             self.logger.error(f"Error fetching piece class summary: {exc}")
             return []
 
+    def get_piece_status_summary(self, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return []
+
+        try:
+            return db.fetch(
+                "SELECT statuses.final_result, COALESCE(COUNT(pr.id), 0) AS piece_count "
+                "FROM (VALUES ('OK', 1), ('NOK', 2), ('FNOK', 3), ('FOK', 4)) "
+                "AS statuses(final_result, sort_order) "
+                "LEFT JOIN piece_result pr ON pr.final_result = statuses.final_result "
+                "GROUP BY statuses.final_result, statuses.sort_order "
+                "ORDER BY statuses.sort_order ASC"
+            )
+        except Exception as exc:
+            self.logger.error(f"Error fetching piece status summary: {exc}")
+            return []
+
     def get_piece_jsns_for_class(self, class_name, db_client=None):
         db = db_client or self.display.db
         normalized_class_name = str(class_name or "").strip()
@@ -3381,6 +3399,28 @@ class MainController:
             )
         except Exception as exc:
             self.logger.error(f"Error fetching JSNs for class '{normalized_class_name}': {exc}")
+            return []
+
+    def get_piece_jsns_for_status(self, final_result, db_client=None):
+        db = db_client or self.display.db
+        normalized_result = str(final_result or "").strip().upper()
+        if not db or normalized_result not in {"OK", "NOK", "FNOK", "FOK"}:
+            return []
+
+        try:
+            return db.fetch(
+                "SELECT pr.jsn "
+                "FROM piece_result pr "
+                "WHERE pr.final_result = %s "
+                "AND pr.jsn IS NOT NULL "
+                "AND pr.jsn <> '' "
+                "ORDER BY pr.jsn DESC",
+                (normalized_result,),
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"Error fetching JSNs for final_result '{normalized_result}': {exc}"
+            )
             return []
 
     def get_result_for_image(self, img_name):
@@ -3448,6 +3488,7 @@ class MainController:
             if hasattr(d, "_reset_stats_class_modal_state"):
                 d._reset_stats_class_modal_state()
             d.stats_class_modal_rows = self.get_piece_class_summary()
+            d.stats_class_modal_status_rows = self.get_piece_status_summary()
             d.show_stats_class_modal = True
         elif action == "close_stats_class_modal":
             d.show_stats_class_modal = False
@@ -3456,12 +3497,21 @@ class MainController:
         elif action == "open_stats_class_detail":
             class_name = str(payload.get("class_name") or "").strip()
             d.stats_class_modal_view = "detail"
-            d.stats_class_modal_selected_class_name = class_name
+            d.stats_class_modal_selected_kind = "class"
+            d.stats_class_modal_selected_label = class_name
             d.stats_class_modal_detail_rows = self.get_piece_jsns_for_class(class_name)
+            d.stats_class_modal_detail_offset = 0
+        elif action == "open_stats_status_detail":
+            final_result = str(payload.get("final_result") or "").strip().upper()
+            d.stats_class_modal_view = "detail"
+            d.stats_class_modal_selected_kind = "status"
+            d.stats_class_modal_selected_label = final_result
+            d.stats_class_modal_detail_rows = self.get_piece_jsns_for_status(final_result)
             d.stats_class_modal_detail_offset = 0
         elif action == "close_stats_class_detail":
             d.stats_class_modal_view = "summary"
-            d.stats_class_modal_selected_class_name = ""
+            d.stats_class_modal_selected_kind = ""
+            d.stats_class_modal_selected_label = ""
             d.stats_class_modal_detail_rows = []
             d.stats_class_modal_detail_offset = 0
             d.stats_class_modal_detail_visible_rows = 1

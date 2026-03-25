@@ -23,6 +23,9 @@ class _DisplayStatsStub:
         self._historic_jsn_cache = []
         self._image_cache = {}
         self.stats_class_modal_rows = []
+        self.stats_class_modal_status_rows = []
+        self.stats_class_modal_selected_kind = ""
+        self.stats_class_modal_selected_label = ""
         self.show_stats_class_modal = False
 
 
@@ -100,6 +103,24 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         action_handler.assert_called_once_with("close_stats_class_modal")
 
     @patch("display_window.get_db_connection")
+    def test_stats_class_modal_status_row_click_emits_detail_action(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_status_row_rects = [((220, 240, 120, 40), "FNOK")]
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            240,
+            260,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("open_stats_status_detail", final_result="FNOK")
+
+    @patch("display_window.get_db_connection")
     def test_stats_class_modal_blocks_background_clicks(self, mock_get_db_connection):
         mock_get_db_connection.return_value = MagicMock()
         action_handler = MagicMock()
@@ -145,11 +166,37 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertIn("COUNT(DISTINCT piece_result_id) AS piece_count", query)
         self.assertIn("ORDER BY piece_count DESC, class_name ASC", query)
 
-    def test_open_stats_class_modal_populates_rows_and_shows_modal(self):
+    def test_get_piece_status_summary_queries_final_result_counts(self):
         display = _DisplayStatsStub()
         display.db.fetch.return_value = [
-            {"class_name": "dent", "piece_count": 4},
-            {"class_name": "scratch", "piece_count": 2},
+            {"final_result": "OK", "piece_count": 8},
+            {"final_result": "NOK", "piece_count": 2},
+            {"final_result": "FNOK", "piece_count": 1},
+            {"final_result": "FOK", "piece_count": 0},
+        ]
+        controller = MainController(display=display)
+
+        rows = controller.get_piece_status_summary()
+
+        self.assertEqual(rows[0]["final_result"], "OK")
+        query = display.db.fetch.call_args[0][0]
+        self.assertIn("FROM (VALUES ('OK', 1), ('NOK', 2), ('FNOK', 3), ('FOK', 4))", query)
+        self.assertIn("LEFT JOIN piece_result pr ON pr.final_result = statuses.final_result", query)
+        self.assertIn("ORDER BY statuses.sort_order ASC", query)
+
+    def test_open_stats_class_modal_populates_rows_and_shows_modal(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.side_effect = [
+            [
+                {"class_name": "dent", "piece_count": 4},
+                {"class_name": "scratch", "piece_count": 2},
+            ],
+            [
+                {"final_result": "OK", "piece_count": 5},
+                {"final_result": "NOK", "piece_count": 1},
+                {"final_result": "FNOK", "piece_count": 0},
+                {"final_result": "FOK", "piece_count": 0},
+            ],
         ]
         controller = MainController(display=display)
 
@@ -163,16 +210,41 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
                 {"class_name": "scratch", "piece_count": 2},
             ],
         )
+        self.assertEqual(
+            display.stats_class_modal_status_rows,
+            [
+                {"final_result": "OK", "piece_count": 5},
+                {"final_result": "NOK", "piece_count": 1},
+                {"final_result": "FNOK", "piece_count": 0},
+                {"final_result": "FOK", "piece_count": 0},
+            ],
+        )
 
     def test_open_stats_class_modal_handles_empty_summary(self):
         display = _DisplayStatsStub()
-        display.db.fetch.return_value = []
+        display.db.fetch.side_effect = [[], []]
         controller = MainController(display=display)
 
         controller.handle_ui_action("open_stats_class_modal")
 
         self.assertTrue(display.show_stats_class_modal)
         self.assertEqual(display.stats_class_modal_rows, [])
+        self.assertEqual(display.stats_class_modal_status_rows, [])
+
+    def test_open_stats_status_detail_populates_detail_rows(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.return_value = [{"jsn": "11861-0007"}, {"jsn": "11861-0003"}]
+        controller = MainController(display=display)
+
+        controller.handle_ui_action("open_stats_status_detail", final_result="FNOK")
+
+        self.assertEqual(display.stats_class_modal_view, "detail")
+        self.assertEqual(display.stats_class_modal_selected_kind, "status")
+        self.assertEqual(display.stats_class_modal_selected_label, "FNOK")
+        self.assertEqual(
+            display.stats_class_modal_detail_rows,
+            [{"jsn": "11861-0007"}, {"jsn": "11861-0003"}],
+        )
 
     def test_close_stats_class_modal_hides_modal(self):
         display = _DisplayStatsStub()
