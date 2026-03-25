@@ -24,6 +24,10 @@ class _DisplayStatsStub:
         self._image_cache = {}
         self.stats_class_modal_rows = []
         self.stats_class_modal_status_rows = []
+        self.stats_class_modal_matrix_rows = []
+        self.stats_class_modal_view = "summary"
+        self.stats_class_modal_matrix_offset = 0
+        self.stats_class_modal_matrix_visible_rows = 1
         self.stats_class_modal_selected_kind = ""
         self.stats_class_modal_selected_label = ""
         self.show_stats_class_modal = False
@@ -121,6 +125,25 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         action_handler.assert_called_once_with("open_stats_status_detail", final_result="FNOK")
 
     @patch("display_window.get_db_connection")
+    def test_stats_class_modal_matrix_tab_click_emits_view_action(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_summary_tab_rect = (120, 140, 120, 40)
+        display.stats_class_modal_matrix_tab_rect = (260, 140, 120, 40)
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            290,
+            160,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("open_stats_matrix_view")
+
+    @patch("display_window.get_db_connection")
     def test_stats_class_modal_blocks_background_clicks(self, mock_get_db_connection):
         mock_get_db_connection.return_value = MagicMock()
         action_handler = MagicMock()
@@ -151,6 +174,24 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertIsNotNone(display.stats_class_modal_close_rect)
 
+    @patch("display_window.get_db_connection")
+    def test_draw_stats_class_modal_matrix_handles_rows(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display.stats_class_modal_view = "matrix"
+        display.stats_class_modal_matrix_rows = [
+            {"class_name": "OK", "OK": 2, "NOK": 0, "FOK": 0, "FNOK": 0, "Total": 2},
+            {"class_name": "wrinkle", "OK": 0, "NOK": 1, "FOK": 0, "FNOK": 1, "Total": 2},
+            {"class_name": "Total", "OK": 2, "NOK": 1, "FOK": 0, "FNOK": 1, "Total": 4, "is_total": True},
+        ]
+
+        canvas = np.zeros((display.height, display.width, 3), dtype=np.uint8)
+        rendered = display.draw_stats_class_modal(canvas)
+
+        self.assertIsNotNone(rendered)
+        self.assertIsNotNone(display.stats_class_modal_list_rect)
+        self.assertIsNotNone(display.stats_class_modal_matrix_tab_rect)
+
 
 class TestMainControllerStatsClassModal(unittest.TestCase):
     def test_get_piece_class_summary_queries_distinct_piece_counts(self):
@@ -160,10 +201,18 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
 
         rows = controller.get_piece_class_summary()
 
-        self.assertEqual(rows, [{"class_name": "dent", "piece_count": 3}])
+        self.assertEqual(
+            rows,
+            [
+                {"class_name": "dent", "piece_count": 3, "is_total": False},
+                {"class_name": "Total", "piece_count": 3, "is_total": True},
+            ],
+        )
         query = display.db.fetch.call_args[0][0]
-        self.assertIn("FROM piece_result_defects", query)
-        self.assertIn("COUNT(DISTINCT piece_result_id) AS piece_count", query)
+        self.assertIn("FROM piece_result pr", query)
+        self.assertIn("LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id", query)
+        self.assertIn("COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name", query)
+        self.assertIn("COUNT(DISTINCT pr.id) AS piece_count", query)
         self.assertIn("ORDER BY piece_count DESC, class_name ASC", query)
 
     def test_get_piece_status_summary_queries_final_result_counts(self):
@@ -179,10 +228,71 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         rows = controller.get_piece_status_summary()
 
         self.assertEqual(rows[0]["final_result"], "OK")
+        self.assertEqual(rows[-1]["final_result"], "Total")
+        self.assertEqual(rows[-1]["piece_count"], 11)
         query = display.db.fetch.call_args[0][0]
         self.assertIn("FROM (VALUES ('OK', 1), ('NOK', 2), ('FNOK', 3), ('FOK', 4))", query)
         self.assertIn("LEFT JOIN piece_result pr ON pr.final_result = statuses.final_result", query)
         self.assertIn("ORDER BY statuses.sort_order ASC", query)
+
+    def test_build_piece_stats_report_builds_matrix_and_totals(self):
+        import datetime
+
+        display = _DisplayStatsStub()
+        display.db.fetch.side_effect = [
+            [
+                {"class_name": "wrinkle", "final_result": "NOK", "piece_count": 7},
+                {"class_name": "OK", "final_result": "OK", "piece_count": 15},
+                {"class_name": "wrinkle", "final_result": "FNOK", "piece_count": 5},
+                {"class_name": "split", "final_result": "NOK", "piece_count": 5},
+                {"class_name": "split", "final_result": "FNOK", "piece_count": 3},
+                {"class_name": "UNCLASSIFIED", "final_result": "FOK", "piece_count": 2},
+            ],
+            [
+                {
+                    "start_at": datetime.datetime(2026, 3, 25, 9, 0),
+                    "end_at": datetime.datetime(2026, 3, 25, 12, 0),
+                }
+            ],
+        ]
+        controller = MainController(display=display)
+
+        report = controller.build_piece_stats_report()
+
+        self.assertEqual(report["rows"][0]["class_name"], "OK")
+        self.assertEqual(report["rows"][0]["Total"], 15)
+        self.assertEqual(report["rows"][1]["class_name"], "wrinkle")
+        self.assertEqual(report["rows"][1]["FNOK"], 5)
+        self.assertEqual(report["rows"][-2]["class_name"], "UNCLASSIFIED")
+        self.assertEqual(report["rows"][-1]["class_name"], "Total")
+        self.assertEqual(report["rows"][-1]["OK"], 15)
+        self.assertEqual(report["rows"][-1]["NOK"], 12)
+        self.assertEqual(report["rows"][-1]["FOK"], 2)
+        self.assertEqual(report["rows"][-1]["FNOK"], 8)
+        self.assertEqual(report["rows"][-1]["Total"], 37)
+
+    def test_build_piece_stats_report_includes_unclassified_when_no_defect_row_exists(self):
+        import datetime
+
+        display = _DisplayStatsStub()
+        display.db.fetch.side_effect = [
+            [
+                {"class_name": "UNCLASSIFIED", "final_result": "OK", "piece_count": 4},
+            ],
+            [
+                {
+                    "start_at": datetime.datetime(2026, 3, 25, 9, 0),
+                    "end_at": datetime.datetime(2026, 3, 25, 10, 0),
+                }
+            ],
+        ]
+        controller = MainController(display=display)
+
+        report = controller.build_piece_stats_report()
+
+        self.assertEqual(report["rows"][0]["class_name"], "UNCLASSIFIED")
+        self.assertEqual(report["rows"][0]["OK"], 4)
+        self.assertEqual(report["rows"][-1]["Total"], 4)
 
     def test_attach_historic_indices_uses_historic_piece_numbering(self):
         display = _DisplayStatsStub()
@@ -215,6 +325,11 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
                 {"final_result": "FNOK", "piece_count": 0},
                 {"final_result": "FOK", "piece_count": 0},
             ],
+            [
+                {"class_name": "OK", "final_result": "OK", "piece_count": 5},
+                {"class_name": "scratch", "final_result": "NOK", "piece_count": 1},
+            ],
+            [{"start_at": None, "end_at": None}],
         ]
         controller = MainController(display=display)
 
@@ -224,23 +339,26 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertEqual(
             display.stats_class_modal_rows,
             [
-                {"class_name": "dent", "piece_count": 4},
-                {"class_name": "scratch", "piece_count": 2},
+                {"class_name": "dent", "piece_count": 4, "is_total": False},
+                {"class_name": "scratch", "piece_count": 2, "is_total": False},
+                {"class_name": "Total", "piece_count": 6, "is_total": True},
             ],
         )
         self.assertEqual(
             display.stats_class_modal_status_rows,
             [
-                {"final_result": "OK", "piece_count": 5},
-                {"final_result": "NOK", "piece_count": 1},
-                {"final_result": "FNOK", "piece_count": 0},
-                {"final_result": "FOK", "piece_count": 0},
+                {"final_result": "OK", "piece_count": 5, "is_total": False},
+                {"final_result": "NOK", "piece_count": 1, "is_total": False},
+                {"final_result": "FNOK", "piece_count": 0, "is_total": False},
+                {"final_result": "FOK", "piece_count": 0, "is_total": False},
+                {"final_result": "Total", "piece_count": 6, "is_total": True},
             ],
         )
+        self.assertEqual(display.stats_class_modal_matrix_rows[-1]["class_name"], "Total")
 
     def test_open_stats_class_modal_handles_empty_summary(self):
         display = _DisplayStatsStub()
-        display.db.fetch.side_effect = [[], []]
+        display.db.fetch.side_effect = [[], [], [], [{"start_at": None, "end_at": None}]]
         controller = MainController(display=display)
 
         controller.handle_ui_action("open_stats_class_modal")
@@ -248,6 +366,7 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertTrue(display.show_stats_class_modal)
         self.assertEqual(display.stats_class_modal_rows, [])
         self.assertEqual(display.stats_class_modal_status_rows, [])
+        self.assertEqual(display.stats_class_modal_matrix_rows, [])
 
     def test_open_stats_status_detail_populates_detail_rows(self):
         display = _DisplayStatsStub()
@@ -281,6 +400,14 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         controller.handle_ui_action("close_stats_class_modal")
 
         self.assertFalse(display.show_stats_class_modal)
+
+    def test_open_stats_matrix_view_switches_modal_view(self):
+        display = _DisplayStatsStub()
+        controller = MainController(display=display)
+
+        controller.handle_ui_action("open_stats_matrix_view")
+
+        self.assertEqual(display.stats_class_modal_view, "matrix")
 
 
 if __name__ == "__main__":

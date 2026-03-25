@@ -3352,12 +3352,16 @@ class MainController:
             return []
 
         try:
-            return db.fetch(
-                "SELECT class_name, COUNT(DISTINCT piece_result_id) AS piece_count "
-                "FROM piece_result_defects "
-                "GROUP BY class_name "
+            rows = db.fetch(
+                "SELECT COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name, "
+                "COUNT(DISTINCT pr.id) AS piece_count "
+                "FROM piece_result pr "
+                "LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id "
+                "WHERE pr.final_result IN ('OK', 'NOK', 'FOK', 'FNOK') "
+                "GROUP BY COALESCE(prd.class_name, 'UNCLASSIFIED') "
                 "ORDER BY piece_count DESC, class_name ASC"
             )
+            return self._append_summary_total_row(rows, "class_name")
         except Exception as exc:
             self.logger.error(f"Error fetching piece class summary: {exc}")
             return []
@@ -3368,7 +3372,7 @@ class MainController:
             return []
 
         try:
-            return db.fetch(
+            rows = db.fetch(
                 "SELECT statuses.final_result, COALESCE(COUNT(pr.id), 0) AS piece_count "
                 "FROM (VALUES ('OK', 1), ('NOK', 2), ('FNOK', 3), ('FOK', 4)) "
                 "AS statuses(final_result, sort_order) "
@@ -3376,9 +3380,143 @@ class MainController:
                 "GROUP BY statuses.final_result, statuses.sort_order "
                 "ORDER BY statuses.sort_order ASC"
             )
+            return self._append_summary_total_row(rows, "final_result")
         except Exception as exc:
             self.logger.error(f"Error fetching piece status summary: {exc}")
             return []
+
+    def _append_summary_total_row(self, rows, label_key):
+        normalized_rows = []
+        total_pieces = 0
+
+        for row in rows or []:
+            row_data = dict(row)
+            try:
+                piece_count = int(row_data.get("piece_count", 0) or 0)
+            except (TypeError, ValueError):
+                piece_count = 0
+            row_data["piece_count"] = piece_count
+            row_data["is_total"] = False
+            normalized_rows.append(row_data)
+            total_pieces += piece_count
+
+        if normalized_rows:
+            normalized_rows.append(
+                {
+                    label_key: "Total",
+                    "piece_count": total_pieces,
+                    "is_total": True,
+                }
+            )
+        return normalized_rows
+
+    def build_piece_stats_report(self, db_client=None):
+        db = db_client or self.display.db
+        statuses = ("OK", "NOK", "FOK", "FNOK")
+        if not db:
+            return {
+                "columns": list(statuses) + ["Total"],
+                "rows": [],
+                "start_at": None,
+                "end_at": None,
+            }
+
+        try:
+            aggregate_rows = db.fetch(
+                "SELECT COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name, "
+                "pr.final_result, COUNT(*) AS piece_count "
+                "FROM piece_result pr "
+                "LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id "
+                "WHERE pr.final_result IN ('OK', 'NOK', 'FOK', 'FNOK') "
+                "GROUP BY COALESCE(prd.class_name, 'UNCLASSIFIED'), pr.final_result"
+            )
+            date_range_rows = db.fetch(
+                "SELECT MIN(created_at) AS start_at, MAX(created_at) AS end_at "
+                "FROM piece_result"
+            )
+        except Exception as exc:
+            self.logger.error(f"Error building piece stats report: {exc}")
+            return {
+                "columns": list(statuses) + ["Total"],
+                "rows": [],
+                "start_at": None,
+                "end_at": None,
+                "error": str(exc),
+            }
+
+        row_map = {}
+        for row in aggregate_rows or []:
+            status = str(row.get("final_result") or "").strip().upper()
+            if status not in statuses:
+                continue
+
+            class_name = str(row.get("class_name") or "").strip() or "UNCLASSIFIED"
+            normalized_name = class_name.upper()
+            if normalized_name == "OK":
+                class_name = "OK"
+            elif normalized_name == "UNCLASSIFIED":
+                class_name = "UNCLASSIFIED"
+
+            row_entry = row_map.setdefault(
+                class_name,
+                {
+                    "class_name": class_name,
+                    "OK": 0,
+                    "NOK": 0,
+                    "FOK": 0,
+                    "FNOK": 0,
+                    "Total": 0,
+                    "is_total": False,
+                },
+            )
+            try:
+                piece_count = int(row.get("piece_count", 0) or 0)
+            except (TypeError, ValueError):
+                piece_count = 0
+            row_entry[status] += piece_count
+            row_entry["Total"] += piece_count
+
+        def _sort_key(label):
+            row_total = row_map[label]["Total"]
+            return (-row_total, str(label).lower())
+
+        ordered_labels = []
+        if "OK" in row_map:
+            ordered_labels.append("OK")
+
+        for label in sorted(
+            [
+                current
+                for current in row_map
+                if current not in {"OK", "UNCLASSIFIED"}
+            ],
+            key=_sort_key,
+        ):
+            ordered_labels.append(label)
+
+        if "UNCLASSIFIED" in row_map:
+            ordered_labels.append("UNCLASSIFIED")
+
+        ordered_rows = [row_map[label] for label in ordered_labels]
+        if ordered_rows:
+            total_row = {
+                "class_name": "Total",
+                "OK": sum(row["OK"] for row in ordered_rows),
+                "NOK": sum(row["NOK"] for row in ordered_rows),
+                "FOK": sum(row["FOK"] for row in ordered_rows),
+                "FNOK": sum(row["FNOK"] for row in ordered_rows),
+                "Total": sum(row["Total"] for row in ordered_rows),
+                "is_total": True,
+            }
+            ordered_rows.append(total_row)
+
+        range_row = (date_range_rows or [{}])[0]
+        return {
+            "columns": list(statuses) + ["Total"],
+            "rows": ordered_rows,
+            "start_at": range_row.get("start_at"),
+            "end_at": range_row.get("end_at"),
+        }
 
     def _get_historic_jsn_index_map(self):
         """Map each historic JSN to the 1-based piece number shown in historic mode."""
@@ -3519,11 +3657,17 @@ class MainController:
                 d._reset_stats_class_modal_state()
             d.stats_class_modal_rows = self.get_piece_class_summary()
             d.stats_class_modal_status_rows = self.get_piece_status_summary()
+            d.stats_class_modal_matrix_rows = self.build_piece_stats_report().get("rows", [])
             d.show_stats_class_modal = True
         elif action == "close_stats_class_modal":
             d.show_stats_class_modal = False
             if hasattr(d, "_reset_stats_class_modal_state"):
                 d._reset_stats_class_modal_state()
+        elif action == "open_stats_summary_view":
+            d.stats_class_modal_view = "summary"
+        elif action == "open_stats_matrix_view":
+            d.stats_class_modal_view = "matrix"
+            d.stats_class_modal_matrix_offset = 0
         elif action == "open_stats_class_detail":
             class_name = str(payload.get("class_name") or "").strip()
             d.stats_class_modal_view = "detail"
@@ -3561,6 +3705,14 @@ class MainController:
                 d.stats_class_modal_detail_offset += direction * steps
                 if hasattr(d, "_clamp_stats_class_modal_detail_offset"):
                     d._clamp_stats_class_modal_detail_offset()
+        elif action == "stats_matrix_scroll":
+            delta = int(payload.get("delta") or 0)
+            if delta:
+                steps = max(1, abs(delta) // 120)
+                direction = -1 if delta > 0 else 1
+                d.stats_class_modal_matrix_offset += direction * steps
+                if hasattr(d, "_clamp_stats_class_modal_matrix_offset"):
+                    d._clamp_stats_class_modal_matrix_offset()
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False

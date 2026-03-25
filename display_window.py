@@ -127,17 +127,22 @@ class DisplayWindow:
         self.stats_class_modal_close_rect = None
         self.stats_class_modal_rows = []
         self.stats_class_modal_status_rows = []
+        self.stats_class_modal_matrix_rows = []
         self.stats_class_modal_view = "summary"
         self.stats_class_modal_selected_kind = ""
         self.stats_class_modal_selected_label = ""
         self.stats_class_modal_detail_rows = []
         self.stats_class_modal_detail_offset = 0
         self.stats_class_modal_detail_visible_rows = 1
+        self.stats_class_modal_matrix_offset = 0
+        self.stats_class_modal_matrix_visible_rows = 1
         self.stats_class_modal_class_row_rects = []
         self.stats_class_modal_status_row_rects = []
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
+        self.stats_class_modal_summary_tab_rect = None
+        self.stats_class_modal_matrix_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
         self.mouse_x = 0  # Current mouse X position
@@ -452,11 +457,15 @@ class DisplayWindow:
         self.stats_class_modal_detail_rows = []
         self.stats_class_modal_detail_offset = 0
         self.stats_class_modal_detail_visible_rows = 1
+        self.stats_class_modal_matrix_offset = 0
+        self.stats_class_modal_matrix_visible_rows = 1
         self.stats_class_modal_class_row_rects = []
         self.stats_class_modal_status_row_rects = []
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
+        self.stats_class_modal_summary_tab_rect = None
+        self.stats_class_modal_matrix_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
 
@@ -470,6 +479,20 @@ class DisplayWindow:
             min(int(self.stats_class_modal_detail_offset or 0), max_offset),
         )
         return self.stats_class_modal_detail_offset
+
+    def _clamp_stats_class_modal_matrix_offset(self):
+        """Keep the matrix-list offset within its valid range."""
+        rows = list(self.stats_class_modal_matrix_rows or [])
+        if rows and rows[-1].get("is_total"):
+            rows = rows[:-1]
+        total_rows = len(rows)
+        visible_rows = max(1, int(getattr(self, "stats_class_modal_matrix_visible_rows", 1) or 1))
+        max_offset = max(0, total_rows - visible_rows)
+        self.stats_class_modal_matrix_offset = max(
+            0,
+            min(int(self.stats_class_modal_matrix_offset or 0), max_offset),
+        )
+        return self.stats_class_modal_matrix_offset
 
     def _paste_clipboard_into_search(self):
         """Paste numeric clipboard content into the historic JSN search field."""
@@ -712,8 +735,27 @@ class DisplayWindow:
         self.stats_class_modal_jsn_row_rects = []
         self.stats_class_modal_copy_rects = []
         self.stats_class_modal_back_rect = None
+        self.stats_class_modal_summary_tab_rect = None
+        self.stats_class_modal_matrix_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
+
+        tabs_y = dialog_y + 72
+        tabs_height = 38
+        tab_width = 130
+
+        def draw_tab_button(rect, label, is_active):
+            fill = (55, 55, 55) if is_active else (125, 125, 125)
+            hover = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+            if hover and not is_active:
+                fill = (105, 105, 105)
+            bx, by, bw, bh = rect
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), fill, -1)
+            cv2.rectangle(canvas, (bx, by), (bx + bw, by + bh), (0, 0, 0), 2)
+            text_size = cv2.getTextSize(label, font, 0.63, 2)[0]
+            text_x = bx + (bw - text_size[0]) // 2
+            text_y = by + (bh + text_size[1]) // 2
+            cv2.putText(canvas, label, (text_x, text_y), font, 0.63, (255, 255, 255), 2)
 
         if self.stats_class_modal_view == "detail":
             table_x = dialog_x + 45
@@ -905,14 +947,48 @@ class DisplayWindow:
                     cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
                     cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
         else:
+            summary_tab_x = dialog_x + (dialog_width // 2) - tab_width - 12
+            matrix_tab_x = dialog_x + (dialog_width // 2) + 12
+            self.stats_class_modal_summary_tab_rect = (
+                summary_tab_x,
+                tabs_y,
+                tab_width,
+                tabs_height,
+            )
+            self.stats_class_modal_matrix_tab_rect = (
+                matrix_tab_x,
+                tabs_y,
+                tab_width,
+                tabs_height,
+            )
+            draw_tab_button(
+                self.stats_class_modal_summary_tab_rect,
+                "Summary",
+                self.stats_class_modal_view == "summary",
+            )
+            draw_tab_button(
+                self.stats_class_modal_matrix_tab_rect,
+                "Matrix",
+                self.stats_class_modal_view == "matrix",
+            )
+
             panel_gap = 28
-            panel_y = dialog_y + 95
-            panel_h = dialog_height - 190
+            panel_y = dialog_y + 128
+            panel_h = dialog_height - 223
             panel_x = dialog_x + 35
             panel_w = (dialog_width - 70 - panel_gap) // 2
             header_h = 46
 
-            def draw_summary_panel(panel_left, panel_title, left_header, rows, key_name, rect_target, empty_text, use_status_colors=False):
+            def draw_summary_panel(
+                panel_left,
+                panel_title,
+                left_header,
+                rows,
+                key_name,
+                rect_target,
+                empty_text,
+                use_status_colors=False,
+            ):
                 cv2.putText(
                     canvas,
                     panel_title,
@@ -968,7 +1044,15 @@ class DisplayWindow:
 
                 row_h = 38
                 max_rows = max(1, (panel_h - header_h - 18) // row_h)
-                visible_rows = rows[:max_rows]
+                all_rows = list(rows or [])
+                total_row = all_rows[-1] if all_rows and all_rows[-1].get("is_total") else None
+                data_rows = all_rows[:-1] if total_row else all_rows
+                if total_row and max_rows >= 2:
+                    visible_rows = data_rows[: max_rows - 1] + [total_row]
+                    hidden_count = max(0, len(data_rows) - (max_rows - 1))
+                else:
+                    visible_rows = all_rows[:max_rows]
+                    hidden_count = max(0, len(all_rows) - len(visible_rows))
 
                 if not visible_rows:
                     empty_size = cv2.getTextSize(empty_text, font, 0.75, 2)[0]
@@ -984,11 +1068,15 @@ class DisplayWindow:
                     row_rect = (panel_left + 8, row_top, panel_w - 16, row_bottom - row_top)
                     label_value = str(row.get(key_name) or "N/A")
                     piece_count = str(row.get("piece_count", 0))
+                    is_total = bool(row.get("is_total"))
                     row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, row_rect)
                     fill_color = (242, 247, 255) if row_hovered else ((248, 248, 248) if idx % 2 == 0 else (238, 238, 238))
                     text_color = (30, 30, 30)
 
-                    if use_status_colors:
+                    if is_total:
+                        fill_color = (85, 85, 85)
+                        text_color = (255, 255, 255)
+                    elif use_status_colors:
                         status_fill = self._get_stats_result_color(label_value)
                         fill_color = tuple(min(255, channel + 50) for channel in status_fill) if row_hovered else status_fill
                         text_color = (255, 255, 255)
@@ -1021,9 +1109,9 @@ class DisplayWindow:
                         text_color,
                         2,
                     )
-                    rect_target.append((row_rect, label_value))
+                    if not is_total:
+                        rect_target.append((row_rect, label_value))
 
-                hidden_count = len(rows) - len(visible_rows)
                 if hidden_count > 0:
                     more_text = f"+{hidden_count} more"
                     cv2.putText(
@@ -1036,25 +1124,186 @@ class DisplayWindow:
                         2,
                     )
 
-            draw_summary_panel(
-                panel_x,
-                "By Class Name",
-                "Class Name",
-                list(self.stats_class_modal_rows or []),
-                "class_name",
-                self.stats_class_modal_class_row_rects,
-                "No class data available",
-            )
-            draw_summary_panel(
-                panel_x + panel_w + panel_gap,
-                "By Final Result",
-                "Result",
-                list(self.stats_class_modal_status_rows or []),
-                "final_result",
-                self.stats_class_modal_status_row_rects,
-                "No result data available",
-                use_status_colors=True,
-            )
+            if self.stats_class_modal_view == "summary":
+                draw_summary_panel(
+                    panel_x,
+                    "By Class Name",
+                    "Class Name",
+                    list(self.stats_class_modal_rows or []),
+                    "class_name",
+                    self.stats_class_modal_class_row_rects,
+                    "No class data available",
+                )
+                draw_summary_panel(
+                    panel_x + panel_w + panel_gap,
+                    "By Final Result",
+                    "Result",
+                    list(self.stats_class_modal_status_rows or []),
+                    "final_result",
+                    self.stats_class_modal_status_row_rects,
+                    "No result data available",
+                    use_status_colors=True,
+                )
+            else:
+                table_x = dialog_x + 45
+                table_y = dialog_y + 128
+                table_w = dialog_width - 90
+                table_h = dialog_height - 223
+                header_h = 46
+                list_content_y = table_y + header_h + 8
+                list_content_h = table_h - header_h - 26
+                self.stats_class_modal_list_rect = (table_x + 8, list_content_y, table_w - 16, list_content_h)
+
+                cv2.rectangle(
+                    canvas,
+                    (table_x, table_y),
+                    (table_x + table_w, table_y + table_h),
+                    (230, 230, 230),
+                    -1,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (table_x, table_y),
+                    (table_x + table_w, table_y + table_h),
+                    (120, 120, 120),
+                    2,
+                )
+
+                matrix_rows = list(self.stats_class_modal_matrix_rows or [])
+                total_row = matrix_rows[-1] if matrix_rows and matrix_rows[-1].get("is_total") else None
+                data_rows = matrix_rows[:-1] if total_row else matrix_rows
+                row_h = 40
+                total_reserved = 1 if total_row else 0
+                visible_capacity = max(1, list_content_h // row_h)
+                visible_data_capacity = max(1, visible_capacity - total_reserved) if total_reserved else visible_capacity
+                self.stats_class_modal_matrix_visible_rows = visible_data_capacity
+                self._clamp_stats_class_modal_matrix_offset()
+                start_idx = self.stats_class_modal_matrix_offset
+                visible_rows = data_rows[start_idx:start_idx + visible_data_capacity]
+                if total_row:
+                    visible_rows = visible_rows + [total_row]
+
+                label_col_w = 340
+                value_col_w = (table_w - 16 - label_col_w) // 5
+                header_labels = ["Class Name", "OK", "NOK", "FOK", "FNOK", "Total"]
+                header_x = table_x + 8
+                for idx, label in enumerate(header_labels):
+                    col_x = header_x if idx == 0 else header_x + label_col_w + (idx - 1) * value_col_w
+                    col_w = label_col_w if idx == 0 else value_col_w
+                    cv2.rectangle(
+                        canvas,
+                        (col_x, table_y + 2),
+                        (col_x + col_w, table_y + header_h),
+                        (65, 65, 65),
+                        -1,
+                    )
+                    text_size = cv2.getTextSize(label, font, 0.7, 2)[0]
+                    text_x = col_x + (col_w - text_size[0]) // 2
+                    cv2.putText(
+                        canvas,
+                        label,
+                        (text_x, table_y + 31),
+                        font,
+                        0.7,
+                        (255, 255, 255),
+                        2,
+                    )
+
+                if not visible_rows:
+                    empty_text = "No matrix data available"
+                    empty_size = cv2.getTextSize(empty_text, font, 0.8, 2)[0]
+                    empty_x = table_x + (table_w - empty_size[0]) // 2
+                    empty_y = table_y + header_h + (table_h - header_h) // 2
+                    cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.8, (70, 70, 70), 2)
+                else:
+                    scroll_track_width = 12 if len(data_rows) > visible_data_capacity else 0
+                    usable_row_w = table_w - 16 - scroll_track_width
+                    numeric_w = (usable_row_w - label_col_w) // 5
+                    label_w = usable_row_w - numeric_w * 5
+                    note_text = "Right and bottom totals should match."
+                    note_size = cv2.getTextSize(note_text, font, 0.58, 2)[0]
+                    cv2.putText(
+                        canvas,
+                        note_text,
+                        (table_x + table_w - 18 - note_size[0], table_y + table_h - 10),
+                        font,
+                        0.58,
+                        (80, 80, 80),
+                        2,
+                    )
+
+                    for row_idx, row in enumerate(visible_rows):
+                        row_top = list_content_y + row_idx * row_h
+                        row_bottom = min(table_y + table_h - 28, row_top + row_h - 4)
+                        is_total = bool(row.get("is_total"))
+                        fill = (88, 88, 88) if is_total else ((248, 248, 248) if row_idx % 2 == 0 else (238, 238, 238))
+                        text_color = (255, 255, 255) if is_total else (30, 30, 30)
+
+                        cv2.rectangle(
+                            canvas,
+                            (table_x + 8, row_top),
+                            (table_x + 8 + usable_row_w, row_bottom),
+                            fill,
+                            -1,
+                        )
+
+                        label_value = self._truncate_text_to_width(
+                            str(row.get("class_name") or ""),
+                            font,
+                            0.65,
+                            2,
+                            label_w - 18,
+                        )
+                        cv2.putText(
+                            canvas,
+                            label_value,
+                            (table_x + 20, row_top + 25),
+                            font,
+                            0.65,
+                            text_color,
+                            2,
+                        )
+
+                        for col_idx, key in enumerate(("OK", "NOK", "FOK", "FNOK", "Total")):
+                            cell_x = table_x + 8 + label_w + col_idx * numeric_w
+                            cell_text = str(row.get(key, 0))
+                            cell_size = cv2.getTextSize(cell_text, font, 0.65, 2)[0]
+                            text_x = cell_x + (numeric_w - cell_size[0]) // 2
+                            cv2.putText(
+                                canvas,
+                                cell_text,
+                                (text_x, row_top + 25),
+                                font,
+                                0.65,
+                                text_color,
+                                2,
+                            )
+
+                    shown_without_total = len(visible_rows) - (1 if total_row and visible_rows else 0)
+                    footer_text = f"Showing {start_idx + 1}-{start_idx + shown_without_total} of {len(data_rows)}"
+                    if not data_rows:
+                        footer_text = "Showing 0 of 0"
+                    cv2.putText(
+                        canvas,
+                        footer_text,
+                        (table_x + 14, table_y + table_h - 10),
+                        font,
+                        0.55,
+                        (90, 90, 90),
+                        2,
+                    )
+
+                    if len(data_rows) > visible_data_capacity:
+                        track_x = table_x + table_w - 20
+                        track_y = list_content_y
+                        track_h = list_content_h - 24
+                        thumb_h = max(30, int(track_h * (visible_data_capacity / len(data_rows))))
+                        max_offset = max(1, len(data_rows) - visible_data_capacity)
+                        thumb_y = track_y + int((track_h - thumb_h) * (start_idx / max_offset))
+                        self.stats_class_modal_scrollbar_rect = (track_x, thumb_y, 10, thumb_h)
+                        cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (210, 210, 210), -1)
+                        cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
+                        cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
 
         button_width = 110
         button_height = 38
@@ -1103,7 +1352,6 @@ class DisplayWindow:
         if (
             event == getattr(cv2, "EVENT_MOUSEWHEEL", -1)
             and self.show_stats_class_modal
-            and self.stats_class_modal_view == "detail"
             and self._is_point_in_rect(x, y, self.stats_class_modal_list_rect)
         ):
             wheel_delta = 0
@@ -1114,7 +1362,10 @@ class DisplayWindow:
                 if wheel_delta > 32767:
                     wheel_delta -= 65536
             if wheel_delta:
-                self._emit_action("stats_detail_scroll", delta=wheel_delta)
+                if self.stats_class_modal_view == "detail":
+                    self._emit_action("stats_detail_scroll", delta=wheel_delta)
+                elif self.stats_class_modal_view == "matrix":
+                    self._emit_action("stats_matrix_scroll", delta=wheel_delta)
             return
 
         if event == cv2.EVENT_LBUTTONUP:
@@ -1160,6 +1411,18 @@ class DisplayWindow:
                     bx, by, bw, bh = self.stats_class_modal_back_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
                         self._emit_action("close_stats_class_detail")
+                        return
+
+                if self.stats_class_modal_summary_tab_rect:
+                    bx, by, bw, bh = self.stats_class_modal_summary_tab_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_stats_summary_view")
+                        return
+
+                if self.stats_class_modal_matrix_tab_rect:
+                    bx, by, bw, bh = self.stats_class_modal_matrix_tab_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_stats_matrix_view")
                         return
 
                 for rect, jsn_value in self.stats_class_modal_copy_rects:
