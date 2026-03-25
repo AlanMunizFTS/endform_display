@@ -758,6 +758,7 @@ class DisplayWindow:
             cv2.putText(canvas, "Back", (back_x + 20, back_y + 23), font, 0.62, (255, 255, 255), 2)
 
             header_left = "JSN"
+            header_middle = "Hist #"
             header_right = "Action"
             cv2.putText(canvas, header_left, (table_x + 20, table_y + 31), font, 0.72, (255, 255, 255), 2)
             action_size = cv2.getTextSize(header_right, font, 0.72, 2)[0]
@@ -770,9 +771,17 @@ class DisplayWindow:
                 (255, 255, 255),
                 2,
             )
-
-            detail_rows = [str(row.get("jsn") or "").strip() for row in (self.stats_class_modal_detail_rows or [])]
-            detail_rows = [row for row in detail_rows if row]
+            detail_rows = []
+            for row in self.stats_class_modal_detail_rows or []:
+                jsn_value = str(row.get("jsn") or "").strip()
+                if not jsn_value:
+                    continue
+                detail_rows.append(
+                    {
+                        "jsn": jsn_value,
+                        "historic_index": row.get("historic_index"),
+                    }
+                )
             row_h = 42
             visible_capacity = max(1, list_content_h // row_h)
             self.stats_class_modal_detail_visible_rows = visible_capacity
@@ -789,17 +798,31 @@ class DisplayWindow:
                 cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.8, (70, 70, 70), 2)
             else:
                 copy_button_width = 96
+                index_col_width = 92
                 scroll_track_width = 12 if len(detail_rows) > visible_capacity else 0
                 row_left = table_x + 8
                 row_right = table_x + table_w - 8 - scroll_track_width
-                jsn_max_width = max(80, (row_right - row_left) - copy_button_width - 42)
+                copy_left = row_right - copy_button_width - 8
+                index_left = copy_left - index_col_width - 12
+                jsn_max_width = max(80, index_left - row_left - 18)
+                header_middle_size = cv2.getTextSize(header_middle, font, 0.72, 2)[0]
+                header_middle_x = index_left + (index_col_width - header_middle_size[0]) // 2
+                cv2.putText(
+                    canvas,
+                    header_middle,
+                    (header_middle_x, table_y + 31),
+                    font,
+                    0.72,
+                    (255, 255, 255),
+                    2,
+                )
 
-                for visible_idx, jsn_value in enumerate(visible_rows):
+                for visible_idx, detail_row in enumerate(visible_rows):
                     absolute_idx = start_idx + visible_idx
                     row_top = list_content_y + visible_idx * row_h
                     row_bottom = min(list_content_y + list_content_h - 4, row_top + row_h - 4)
                     row_rect = (row_left, row_top, row_right - row_left, row_bottom - row_top)
-                    copy_rect = (row_right - copy_button_width - 8, row_top + 5, copy_button_width, row_bottom - row_top - 10)
+                    copy_rect = (copy_left, row_top + 5, copy_button_width, row_bottom - row_top - 10)
                     jsn_rect = (row_left, row_top, copy_rect[0] - row_left - 6, row_bottom - row_top)
                     row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, jsn_rect)
                     copy_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, copy_rect)
@@ -812,8 +835,22 @@ class DisplayWindow:
                         -1,
                     )
 
+                    jsn_value = detail_row["jsn"]
+                    historic_index = detail_row.get("historic_index")
                     jsn_text = self._truncate_text_to_width(jsn_value, font, 0.68, 2, jsn_max_width)
                     cv2.putText(canvas, jsn_text, (row_left + 14, row_top + 26), font, 0.68, (30, 30, 30), 2)
+                    historic_text = str(historic_index) if historic_index is not None else "-"
+                    historic_size = cv2.getTextSize(historic_text, font, 0.68, 2)[0]
+                    historic_x = index_left + (index_col_width - historic_size[0]) // 2
+                    cv2.putText(
+                        canvas,
+                        historic_text,
+                        (historic_x, row_top + 26),
+                        font,
+                        0.68,
+                        (30, 30, 30),
+                        2,
+                    )
 
                     copy_fill = (70, 130, 70) if copy_hovered else (90, 150, 90)
                     cv2.rectangle(

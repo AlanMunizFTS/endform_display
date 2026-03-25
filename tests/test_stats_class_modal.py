@@ -184,6 +184,24 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertIn("LEFT JOIN piece_result pr ON pr.final_result = statuses.final_result", query)
         self.assertIn("ORDER BY statuses.sort_order ASC", query)
 
+    def test_attach_historic_indices_uses_historic_piece_numbering(self):
+        display = _DisplayStatsStub()
+        controller = MainController(display=display)
+        controller._load_historic_index = MagicMock(
+            return_value=[
+                ["118610007_side_OK.png"],
+                ["118610003_side_OK.png"],
+                ["118610001_side_OK.png"],
+            ]
+        )
+
+        rows = controller._attach_historic_indices(
+            [{"jsn": "118610007"}, {"jsn": "118610001"}]
+        )
+
+        self.assertEqual(rows[0]["historic_index"], 3)
+        self.assertEqual(rows[1]["historic_index"], 1)
+
     def test_open_stats_class_modal_populates_rows_and_shows_modal(self):
         display = _DisplayStatsStub()
         display.db.fetch.side_effect = [
@@ -235,6 +253,12 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         display = _DisplayStatsStub()
         display.db.fetch.return_value = [{"jsn": "11861-0007"}, {"jsn": "11861-0003"}]
         controller = MainController(display=display)
+        controller._load_historic_index = MagicMock(
+            return_value=[
+                ["11861-0007_side_OK.png"],
+                ["11861-0003_side_OK.png"],
+            ]
+        )
 
         controller.handle_ui_action("open_stats_status_detail", final_result="FNOK")
 
@@ -243,7 +267,10 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertEqual(display.stats_class_modal_selected_label, "FNOK")
         self.assertEqual(
             display.stats_class_modal_detail_rows,
-            [{"jsn": "11861-0007"}, {"jsn": "11861-0003"}],
+            [
+                {"jsn": "11861-0007", "historic_index": 2},
+                {"jsn": "11861-0003", "historic_index": 1},
+            ],
         )
 
     def test_close_stats_class_modal_hides_modal(self):

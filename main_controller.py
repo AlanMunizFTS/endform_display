@@ -3380,6 +3380,34 @@ class MainController:
             self.logger.error(f"Error fetching piece status summary: {exc}")
             return []
 
+    def _get_historic_jsn_index_map(self):
+        """Map each historic JSN to the 1-based piece number shown in historic mode."""
+        try:
+            historic_index = self._load_historic_index(force_rescan=False) or []
+        except Exception as exc:
+            self.logger.error(f"Error loading historic index map: {exc}")
+            return {}
+
+        total_batches = len(historic_index)
+        jsn_index_map = {}
+        for idx, batch in enumerate(historic_index):
+            if not batch:
+                continue
+            jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+            if jsn and jsn not in jsn_index_map:
+                jsn_index_map[jsn] = total_batches - idx
+        return jsn_index_map
+
+    def _attach_historic_indices(self, rows, jsn_key="jsn"):
+        jsn_index_map = self._get_historic_jsn_index_map()
+        enriched_rows = []
+        for row in rows or []:
+            row_data = dict(row)
+            jsn_value = str(row_data.get(jsn_key) or "").strip()
+            row_data["historic_index"] = jsn_index_map.get(jsn_value)
+            enriched_rows.append(row_data)
+        return enriched_rows
+
     def get_piece_jsns_for_class(self, class_name, db_client=None):
         db = db_client or self.display.db
         normalized_class_name = str(class_name or "").strip()
@@ -3387,7 +3415,7 @@ class MainController:
             return []
 
         try:
-            return db.fetch(
+            rows = db.fetch(
                 "SELECT DISTINCT pr.jsn "
                 "FROM piece_result_defects prd "
                 "JOIN piece_result pr ON pr.id = prd.piece_result_id "
@@ -3397,6 +3425,7 @@ class MainController:
                 "ORDER BY pr.jsn DESC",
                 (normalized_class_name,),
             )
+            return self._attach_historic_indices(rows)
         except Exception as exc:
             self.logger.error(f"Error fetching JSNs for class '{normalized_class_name}': {exc}")
             return []
@@ -3408,7 +3437,7 @@ class MainController:
             return []
 
         try:
-            return db.fetch(
+            rows = db.fetch(
                 "SELECT pr.jsn "
                 "FROM piece_result pr "
                 "WHERE pr.final_result = %s "
@@ -3417,6 +3446,7 @@ class MainController:
                 "ORDER BY pr.jsn DESC",
                 (normalized_result,),
             )
+            return self._attach_historic_indices(rows)
         except Exception as exc:
             self.logger.error(
                 f"Error fetching JSNs for final_result '{normalized_result}': {exc}"
