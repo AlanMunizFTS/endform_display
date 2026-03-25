@@ -40,6 +40,11 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
    - Lets user assign/toggle `OK/NOK` and persists to Postgres.
 6. Sync action:
    - Reads `img_results`, routes files into `*_ok` / `*_nok`, and removes mismatches.
+   - On explicit `SAVE` only, copies images into `final_classification` using operator-vs-model equivalence:
+     - `OK` = `P`
+     - `NOK` = `N`
+     - `FOK` (`operator='NOK'`, `model='OK'`) = `FP`
+     - `FNOK` (`operator='OK'`, `model='NOK'`) = `FN`
    - Runs asynchronously with modal loader/progress and then verifies consistency using logic aligned with `tests/test_sync_images_by_status.py`.
    - Shows completion message indicating verified success or verification issues.
 
@@ -78,4 +83,5 @@ Use `REPO_MAP.md` as the single source of truth for structure, file routing, and
   - `tests/test_file_manager.py` (unit tests for file I/O adapter)
 - UI assumes image tiles are already `360x360` in `show_image_grid`.
 - Filename parsing assumes patterns that include JSN prefix and camera/position tokens (`side/front/diag`).
+- `final_classification` is not auto-populated on new historic/annotated arrivals; it is updated only from the explicit dataset save flow.
 - Production safety: do not run `sync_images_by_status` unless explicitly requested.

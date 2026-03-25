@@ -62,12 +62,18 @@ Expected logs include:
 ## Dataset Sync Loader and Verification
 
 - Pressing `SYNC` starts an asynchronous sync job (UI remains responsive).
+- The `final_classification` folders are updated only during this explicit save/sync action; they are not auto-populated when new annotated images arrive.
 - A loading modal is shown with:
   - Progress bar (`0-100%`)
   - Current stage text (`Saving dataset`, `Verifying classification`, `Completed`)
   - Current counter (`x/y`) while processing.
 - During this sync, UI interactions are blocked by the modal until completion.
 - After sync completes, the app verifies classification consistency using the same core logic as `tests/test_sync_images_by_status.py`.
+- `final_classification` equivalence used by the app:
+  - `OK` -> `P`
+  - `NOK` -> `N`
+  - `FOK` (`operator='NOK'`, `model='OK'`) -> `FP`
+  - `FNOK` (`operator='OK'`, `model='NOK'`) -> `FN`
 - Completion messages:
   - Success: `Dataset completed and verified`
   - Verification issues: `Dataset completed but verification failed (N issues)`

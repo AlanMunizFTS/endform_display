@@ -1140,10 +1140,6 @@ class MainController:
                         worker_db = get_db_connection()
                         self._register_local_images_in_db(captured_dir, db_client=worker_db)
                         self._backfill_piece_result(db_client=worker_db)
-                        self.save_classification_results(
-                            historic_dir=self._get_export_historic_dir(),
-                            db_client=worker_db,
-                        )
                     except Exception as exc:
                         print(f"Error in register worker: {exc}")
                     finally:
@@ -2952,16 +2948,6 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
-        # Ensure piece_result is up-to-date for the current dataset.
-        # This updates FOK/FNOK counts in the stats card based on DB state.
-        save_res = self.save_classification_results(
-            db_client=db,
-            historic_dir=historic_dir,
-            visible_images_snapshot=visible_images_snapshot,
-        )
-        if not save_res.get("ok", False):
-            print(f"Warning: saving classification results failed: {save_res.get('error')}")
-
         return {
             "ok": True,
             "rows": total_rows,
@@ -2971,7 +2957,6 @@ class MainController:
             "errors": error_count,
             "visible_images": len(visible_images),
             "visible_images_snapshot": visible_images_snapshot,
-            "save_classification": save_res,
         }
 
     def save_classification_results(
