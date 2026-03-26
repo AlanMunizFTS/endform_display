@@ -24,6 +24,7 @@ from paths_config import (
 )
 from sftp_app import SFTPApp
 from utilities.log import get_logger, install_print_logger
+from state_package import export_display_state, import_display_state
 
 
 def _display_sort_key(filename):
@@ -521,6 +522,8 @@ class MainController:
         self.sync_worker_thread = None
         self.reset_worker_thread = None
         self.rebuild_worker_thread = None
+        self.export_worker_thread = None
+        self.import_worker_thread = None
         self.remote_db_poll_thread = None
         self.remote_db_stop_event = None
         self._remote_db_placeholder_warned = False
@@ -1207,10 +1210,14 @@ class MainController:
         d.no_images_dialog_message = message
         d.show_no_images_dialog = True
 
-    def _set_sync_progress(self, stage, percent):
+    def _set_sync_progress(self, stage, percent, title=None, helper_text=None):
         d = self.display
         d.sync_stage = str(stage)
         d.sync_progress = max(0, min(100, int(percent)))
+        if title is not None:
+            d.sync_progress_title = str(title)
+        if helper_text is not None:
+            d.sync_progress_helper_text = str(helper_text)
 
     def _set_reset_progress(self, stage, percent, title=None, helper_text=None):
         d = self.display
@@ -1229,6 +1236,8 @@ class MainController:
         d.sync_in_progress = True
         d.sync_progress = 0
         d.sync_stage = "Preparing dataset sync..."
+        d.sync_progress_title = "Saving Dataset"
+        d.sync_progress_helper_text = "Please wait until the process finishes."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -1250,7 +1259,12 @@ class MainController:
                     else:
                         phase_percent = int((done / total) * 65)
                         stage_text = f"{stage} ({done}/{total})"
-                    self._set_sync_progress(stage_text, phase_percent)
+                    self._set_sync_progress(
+                        stage_text,
+                        phase_percent,
+                        title="Saving Dataset",
+                        helper_text="Please wait until the process finishes.",
+                    )
 
                 sync_result = self.sync_images_by_status(
                     historic_dir=historic_dir,
@@ -1270,7 +1284,12 @@ class MainController:
                     else:
                         phase_percent = 65 + int((done / total) * 23)
                         stage_text = f"{stage} ({done}/{total})"
-                    self._set_sync_progress(stage_text, phase_percent)
+                    self._set_sync_progress(
+                        stage_text,
+                        phase_percent,
+                        title="Saving Dataset",
+                        helper_text="Please wait until the process finishes.",
+                    )
 
                 classification = self.save_classification_results(
                     db_client=worker_db,
@@ -1286,7 +1305,12 @@ class MainController:
                     else:
                         phase_percent = 88 + int((done / total) * 12)
                         stage_text = f"{stage} ({done}/{total})"
-                    self._set_sync_progress(stage_text, phase_percent)
+                    self._set_sync_progress(
+                        stage_text,
+                        phase_percent,
+                        title="Saving Dataset",
+                        helper_text="Please wait until the process finishes.",
+                    )
 
                 verify_result = self.verify_sync_images_by_status(
                     historic_dir=historic_dir,
@@ -1365,7 +1389,7 @@ class MainController:
                     self.logger.warn(
                         f"[SYNC] Classification folder copy failed: {cls_error}",
                         allow_repeat=True,
-                    )
+                )
             except Exception as exc:
                 d.sync_message = f"Dataset sync failed: {exc}"
                 d.sync_message_is_error = True
@@ -1395,6 +1419,200 @@ class MainController:
             daemon=True,
         )
         self.sync_worker_thread.start()
+
+    def _pause_dataset_background_workers(self):
+        remote_db_was_running = bool(
+            self.remote_db_poll_thread is not None
+            and self.remote_db_poll_thread.is_alive()
+        )
+        self.stop_historic_download_worker()
+        self.stop_remote_db_polling()
+        return {"remote_db_was_running": remote_db_was_running}
+
+    def _resume_dataset_background_workers(self, worker_state):
+        try:
+            self.start_historic_download_on_startup(
+                self.config.temp_dir,
+                check_interval=self.config.historic_download_check_interval,
+            )
+        except Exception as exc:
+            self.logger.error(
+                f"[DATASET_TRANSFER] Error restarting historic download workers: {exc}",
+                allow_repeat=True,
+            )
+
+        if worker_state and worker_state.get("remote_db_was_running"):
+            try:
+                self.start_remote_db_polling()
+            except Exception as exc:
+                self.logger.error(
+                    f"[DATASET_TRANSFER] Error restarting remote DB polling: {exc}",
+                    allow_repeat=True,
+                )
+
+    def start_export_display_state_async(self):
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing export..."
+        d.sync_progress_title = "Exporting Dataset"
+        d.sync_progress_helper_text = "Creating a portable package from the current local state."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _export_worker():
+            worker_db = None
+            worker_state = None
+            try:
+                worker_state = self._pause_dataset_background_workers()
+
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _export_progress_cb(done, total, stage):
+                    if total <= 0:
+                        percent = 0
+                        stage_text = stage
+                    else:
+                        percent = int((done / total) * 100)
+                        stage_text = stage
+                    self._set_sync_progress(
+                        stage_text,
+                        percent,
+                        title="Exporting Dataset",
+                        helper_text="Creating a portable package from the current local state.",
+                    )
+
+                result = export_display_state(
+                    self,
+                    db_client=worker_db,
+                    progress_callback=_export_progress_cb,
+                )
+                if not result.get("ok", False):
+                    raise RuntimeError(result.get("error", "Dataset export failed"))
+
+                package_name = result.get("package_name") or os.path.basename(
+                    str(result.get("package_path") or "")
+                )
+                d.sync_message = f"Export completed: {package_name}"
+                d.sync_message_is_error = False
+                self.logger.info(
+                    f"[EXPORT] Dataset export completed: {result.get('package_path')}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Export failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(f"[EXPORT] Dataset export failed: {exc}", allow_repeat=True)
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.export_worker_thread = Thread(
+            target=_export_worker,
+            name="dataset-export-worker",
+            daemon=True,
+        )
+        self.export_worker_thread.start()
+
+    def start_import_display_state_async(self, package_path):
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+        if not package_path:
+            return
+
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing import..."
+        d.sync_progress_title = "Importing Dataset"
+        d.sync_progress_helper_text = "Merging package contents into the local display state."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _import_worker():
+            worker_db = None
+            worker_state = None
+            try:
+                worker_state = self._pause_dataset_background_workers()
+
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _import_progress_cb(done, total, stage):
+                    if total <= 0:
+                        percent = 0
+                        stage_text = stage
+                    else:
+                        percent = int((done / total) * 100)
+                        stage_text = stage
+                    self._set_sync_progress(
+                        stage_text,
+                        percent,
+                        title="Importing Dataset",
+                        helper_text="Merging package contents into the local display state.",
+                    )
+
+                result = import_display_state(
+                    self,
+                    package_path=package_path,
+                    db_client=worker_db,
+                    progress_callback=_import_progress_cb,
+                )
+                if not result.get("ok", False):
+                    raise RuntimeError(result.get("error", "Dataset import failed"))
+
+                annotated = result.get("annotated", {})
+                historic = result.get("historic", {})
+                db_stats = result.get("db", {})
+                file_imported = int(annotated.get("copied", 0)) + int(historic.get("copied", 0))
+                file_skipped = int(annotated.get("skipped", 0)) + int(historic.get("skipped", 0))
+                db_inserted_total = sum((db_stats.get("inserted") or {}).values())
+                db_skipped_total = sum((db_stats.get("skipped") or {}).values())
+                d.sync_message = (
+                    f"Import completed: {file_imported} files, {db_inserted_total} DB rows added, "
+                    f"{file_skipped + db_skipped_total} duplicates skipped"
+                )
+                d.sync_message_is_error = False
+                self.logger.info(
+                    f"[IMPORT] Dataset import completed from {package_path}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Import failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(f"[IMPORT] Dataset import failed: {exc}", allow_repeat=True)
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.import_worker_thread = Thread(
+            target=_import_worker,
+            name="dataset-import-worker",
+            daemon=True,
+        )
+        self.import_worker_thread.start()
 
     def start_reset_async(self):
         d = self.display
@@ -3818,6 +4036,10 @@ class MainController:
             self.start_rebuild_db_from_historic_async()
         elif action == "sync_images_by_status":
             self.start_sync_images_by_status_async()
+        elif action == "export_display_state":
+            self.start_export_display_state_async()
+        elif action == "import_display_state":
+            self.start_import_display_state_async(payload.get("package_path"))
         elif action == "toggle_result":
             self.toggle_result(payload.get("img_name"), payload.get("result_value"))
         elif action == "dismiss_no_images_dialog":

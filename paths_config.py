@@ -40,6 +40,8 @@ STATUS_SYNC_DIRS = {
 # --------------------------------------------------
 FINAL_CLASSIFICATION_DIR = Path("./final_classification")
 REPORTS_DIR = Path("./reports")
+EXPORTS_DIR = Path("./exports")
+STATE_PACKAGE_VERSION = 1
 
 FINAL_CLASSIFICATION_DIRS = {
     "side": {"P": "Side_P", "N": "Side_N", "FP": "Side_FP", "FN": "Side_FN"},

@@ -86,6 +86,8 @@ class DisplayWindow:
         self.reset_button_rect = None  # Reset button rect
         self.trash_button_rect = None  # Trash button rect
         self.sync_button_rect = None  # Sync button rect
+        self.import_button_rect = None  # Import button rect
+        self.export_button_rect = None  # Export button rect
         self.exit_button_rect = None  # Exit button rect
         self.start_stop_button_rect = None  # Start/Stop button rect
         self.remote_action_request = None  # "start" or "stop" requested by UI
@@ -108,6 +110,8 @@ class DisplayWindow:
         self.sync_in_progress = False
         self.sync_progress = 0
         self.sync_stage = ""
+        self.sync_progress_title = "Saving Dataset"
+        self.sync_progress_helper_text = "Please wait until the process finishes."
         self.reset_in_progress = False
         self.reset_progress = 0
         self.reset_stage = ""
@@ -434,6 +438,25 @@ class DisplayWindow:
         else:
             self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
         return copied
+
+    def _choose_import_package_path(self):
+        """Open a file picker and return the selected package path."""
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.update_idletasks()
+            package_path = filedialog.askopenfilename(
+                title="Select Display State Package",
+                filetypes=[("ZIP files", "*.zip")],
+            )
+            root.destroy()
+            return package_path or None
+        except Exception as exc:
+            self._set_toast_message(f"Unable to open import dialog: {exc}", is_error=True)
+            return None
 
     def _copy_stats_modal_jsn(self, jsn):
         """Copy a JSN from the stats modal detail view and show operator feedback."""
@@ -1606,6 +1629,20 @@ class DisplayWindow:
                     self._emit_action("request_exit")
                     return
 
+            if self.export_button_rect and not self.show_no_images_dialog:
+                bx, by, bw, bh = self.export_button_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._emit_action("export_display_state")
+                    return
+
+            if self.import_button_rect and not self.show_no_images_dialog:
+                bx, by, bw, bh = self.import_button_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    package_path = self._choose_import_package_path()
+                    if package_path:
+                        self._emit_action("import_display_state", package_path=package_path)
+                    return
+
             # START/STOP button - only in normal mode
             if (
                 self.remote_controls_enabled
@@ -1843,6 +1880,130 @@ class DisplayWindow:
                    (255, 255, 255), thickness)
         
         return canvas
+
+    def draw_import_button(self, canvas):
+        """Draw IMPORT button on canvas."""
+        button_width = 180
+        button_height = 60
+        margin_right = 30
+        margin_bottom = 10
+        spacing = 20
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+
+        if self.historic_mode:
+            x_reset = self.width - button_width - margin_right
+            x_sync = x_reset - spacing - button_width
+            x_export = x_sync - spacing - button_width
+            x_import = x_export - spacing - button_width
+        else:
+            exit_width = 160
+            x_exit = self.width - exit_width - margin_right
+            x_export = x_exit - spacing - button_width
+            x_import = x_export - spacing - button_width
+        y_button = self.height - button_height - margin_bottom
+
+        self.import_button_rect = (x_import, y_button, button_width, button_height)
+
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.import_button_rect)
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        scaled_rect = self._scale_rect(self.import_button_rect, scale_factor)
+        x_draw, y_draw, w_draw, h_draw = scaled_rect
+
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (0, 135, 65),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (0, 0, 0),
+            2,
+        )
+
+        text_label = "IMPORT"
+        text_size = cv2.getTextSize(text_label, font, font_scale, thickness)[0]
+        text_x = x_draw + (w_draw - text_size[0]) // 2
+        text_y = y_draw + (h_draw + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            text_label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
+
+        return canvas
+
+    def draw_export_button(self, canvas):
+        """Draw EXPORT button on canvas."""
+        button_width = 180
+        button_height = 60
+        margin_right = 30
+        margin_bottom = 10
+        spacing = 20
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+
+        if self.historic_mode:
+            x_reset = self.width - button_width - margin_right
+            x_sync = x_reset - spacing - button_width
+            x_export = x_sync - spacing - button_width
+        else:
+            exit_width = 160
+            x_exit = self.width - exit_width - margin_right
+            x_export = x_exit - spacing - button_width
+        y_button = self.height - button_height - margin_bottom
+
+        self.export_button_rect = (x_export, y_button, button_width, button_height)
+
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.export_button_rect)
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        scaled_rect = self._scale_rect(self.export_button_rect, scale_factor)
+        x_draw, y_draw, w_draw, h_draw = scaled_rect
+
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (30, 125, 200),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (0, 0, 0),
+            2,
+        )
+
+        text_label = "EXPORT"
+        text_size = cv2.getTextSize(text_label, font, font_scale, thickness)[0]
+        text_x = x_draw + (w_draw - text_size[0]) // 2
+        text_y = y_draw + (h_draw + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            text_label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
+
+        return canvas
     
     def draw_back_button(self, canvas):
         """Draw back button on canvas"""
@@ -1969,12 +2130,16 @@ class DisplayWindow:
         font_scale = 1.0
         thickness = 2
 
-        # Place TRASH button to the left of SYNC (shifted further left)
+        # Place TRASH button to the left of IMPORT
         reset_width = 180
         sync_width = 180
+        export_width = 180
+        import_width = 180
         x_reset = self.width - reset_width - margin_right
         x_sync = x_reset - spacing - sync_width
-        x_trash = x_sync - spacing - button_width
+        x_export = x_sync - spacing - export_width
+        x_import = x_export - spacing - import_width
+        x_trash = x_import - spacing - button_width
         y_trash = self.height - button_height - margin_top
 
         self.trash_button_rect = (x_trash, y_trash, button_width, button_height)
@@ -2405,7 +2570,7 @@ class DisplayWindow:
         )
 
         font = cv2.FONT_HERSHEY_SIMPLEX
-        title = "Saving Dataset"
+        title = self.sync_progress_title or "Saving Dataset"
         title_scale = 1.1
         title_thickness = 3
         cv2.putText(
@@ -2455,7 +2620,7 @@ class DisplayWindow:
         pct_y = bar_y + bar_h - 8
         cv2.putText(canvas, pct_text, (pct_x, pct_y), font, 0.9, (255, 255, 255), 2)
 
-        helper_text = "Please wait until the process finishes."
+        helper_text = self.sync_progress_helper_text or "Please wait until the process finishes."
         cv2.putText(
             canvas,
             helper_text,
@@ -3810,6 +3975,8 @@ class DisplayWindow:
             if self.remote_controls_enabled:
                 canvas = self.draw_trigger_status(canvas)
             canvas = self.draw_historic_button(canvas)
+            canvas = self.draw_import_button(canvas)
+            canvas = self.draw_export_button(canvas)
             if self.remote_controls_enabled:
                 canvas = self.draw_start_stop_button(canvas)
             else:
@@ -3849,6 +4016,8 @@ class DisplayWindow:
             canvas = self.draw_back_button(canvas)
             canvas = self.draw_info_icon(canvas)
             canvas = self.draw_trash_button(canvas)
+            canvas = self.draw_import_button(canvas)
+            canvas = self.draw_export_button(canvas)
             canvas = self.draw_sync_button(canvas)
             canvas = self.draw_reset_button(canvas)
             
