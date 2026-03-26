@@ -689,8 +689,8 @@ class DisplayWindow:
 
     def draw_stats_class_modal(self, canvas):
         """Draw modal dialog showing piece breakdown by class and final result."""
-        dialog_width = 1120
-        dialog_height = 620
+        dialog_width = 1440 if self.stats_class_modal_view == "detail" else 1120
+        dialog_height = 650 if self.stats_class_modal_view == "detail" else 620
         dialog_x = (self.width - dialog_width) // 2
         dialog_y = (self.height - dialog_height) // 2
 
@@ -758,9 +758,9 @@ class DisplayWindow:
             cv2.putText(canvas, label, (text_x, text_y), font, 0.63, (255, 255, 255), 2)
 
         if self.stats_class_modal_view == "detail":
-            table_x = dialog_x + 45
+            table_x = dialog_x + 24
             table_y = dialog_y + 95
-            table_w = dialog_width - 90
+            table_w = dialog_width - 48
             table_h = dialog_height - 190
             list_content_y = table_y + 54
             list_content_h = table_h - 70
@@ -790,7 +790,7 @@ class DisplayWindow:
 
             back_width = 88
             back_height = 34
-            back_x = dialog_x + 28
+            back_x = dialog_x + 20
             back_y = dialog_y + 20
             self.stats_class_modal_back_rect = (back_x, back_y, back_width, back_height)
             back_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.stats_class_modal_back_rect)
@@ -800,19 +800,11 @@ class DisplayWindow:
             cv2.putText(canvas, "Back", (back_x + 20, back_y + 23), font, 0.62, (255, 255, 255), 2)
 
             header_left = "JSN"
-            header_middle = "Hist #"
+            header_index = "Hist #"
+            header_date = "Date"
+            is_status_detail = self.stats_class_modal_selected_kind == "status"
+            header_context = "Defect" if is_status_detail else "Final Result"
             header_right = "Action"
-            cv2.putText(canvas, header_left, (table_x + 20, table_y + 31), font, 0.72, (255, 255, 255), 2)
-            action_size = cv2.getTextSize(header_right, font, 0.72, 2)[0]
-            cv2.putText(
-                canvas,
-                header_right,
-                (table_x + table_w - 20 - action_size[0], table_y + 31),
-                font,
-                0.72,
-                (255, 255, 255),
-                2,
-            )
             detail_rows = []
             for row in self.stats_class_modal_detail_rows or []:
                 jsn_value = str(row.get("jsn") or "").strip()
@@ -822,9 +814,15 @@ class DisplayWindow:
                     {
                         "jsn": jsn_value,
                         "historic_index": row.get("historic_index"),
+                        "piece_date_display": str(row.get("piece_date_display") or "N/A").strip() or "N/A",
+                        "context_value": (
+                            str(row.get("class_name") or "UNCLASSIFIED").strip() or "UNCLASSIFIED"
+                        ) if is_status_detail else (
+                            str(row.get("final_result") or "N/A").strip() or "N/A"
+                        ),
                     }
                 )
-            row_h = 42
+            row_h = 48
             visible_capacity = max(1, list_content_h // row_h)
             self.stats_class_modal_detail_visible_rows = visible_capacity
             self._clamp_stats_class_modal_detail_offset()
@@ -833,28 +831,71 @@ class DisplayWindow:
             self.stats_class_modal_list_rect = (table_x + 8, list_content_y, table_w - 16, list_content_h)
 
             if not visible_rows:
-                empty_text = "No JSNs available for this class"
+                empty_text = (
+                    "No JSNs available for this final result"
+                    if is_status_detail
+                    else "No JSNs available for this class"
+                )
                 empty_size = cv2.getTextSize(empty_text, font, 0.8, 2)[0]
                 empty_x = table_x + (table_w - empty_size[0]) // 2
                 empty_y = table_y + header_h + (table_h - header_h) // 2
                 cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.8, (70, 70, 70), 2)
             else:
-                copy_button_width = 96
-                index_col_width = 92
+                copy_button_width = 92
+                index_col_width = 80
+                date_col_width = 240
+                context_col_width = 140
                 scroll_track_width = 12 if len(detail_rows) > visible_capacity else 0
-                row_left = table_x + 8
-                row_right = table_x + table_w - 8 - scroll_track_width
+                row_left = table_x + 6
+                row_right = table_x + table_w - 6 - scroll_track_width
                 copy_left = row_right - copy_button_width - 8
-                index_left = copy_left - index_col_width - 12
-                jsn_max_width = max(80, index_left - row_left - 18)
-                header_middle_size = cv2.getTextSize(header_middle, font, 0.72, 2)[0]
-                header_middle_x = index_left + (index_col_width - header_middle_size[0]) // 2
+                context_left = copy_left - context_col_width - 10
+                date_left = context_left - date_col_width - 10
+                index_left = date_left - index_col_width - 10
+                jsn_col_width = max(170, index_left - row_left - 12)
+                jsn_max_width = max(140, jsn_col_width - 16)
+                cv2.putText(canvas, header_left, (row_left + 12, table_y + 32), font, 0.72, (255, 255, 255), 2)
+                header_index_size = cv2.getTextSize(header_index, font, 0.68, 2)[0]
+                header_index_x = index_left + (index_col_width - header_index_size[0]) // 2
                 cv2.putText(
                     canvas,
-                    header_middle,
-                    (header_middle_x, table_y + 31),
+                    header_index,
+                    (header_index_x, table_y + 32),
                     font,
-                    0.72,
+                    0.68,
+                    (255, 255, 255),
+                    2,
+                )
+                header_date_size = cv2.getTextSize(header_date, font, 0.68, 2)[0]
+                header_date_x = date_left + (date_col_width - header_date_size[0]) // 2
+                cv2.putText(
+                    canvas,
+                    header_date,
+                    (header_date_x, table_y + 32),
+                    font,
+                    0.68,
+                    (255, 255, 255),
+                    2,
+                )
+                header_context_size = cv2.getTextSize(header_context, font, 0.68, 2)[0]
+                header_context_x = context_left + (context_col_width - header_context_size[0]) // 2
+                cv2.putText(
+                    canvas,
+                    header_context,
+                    (header_context_x, table_y + 32),
+                    font,
+                    0.68,
+                    (255, 255, 255),
+                    2,
+                )
+                action_size = cv2.getTextSize(header_right, font, 0.68, 2)[0]
+                action_x = copy_left + (copy_button_width - action_size[0]) // 2
+                cv2.putText(
+                    canvas,
+                    header_right,
+                    (action_x, table_y + 32),
+                    font,
+                    0.68,
                     (255, 255, 255),
                     2,
                 )
@@ -865,7 +906,7 @@ class DisplayWindow:
                     row_bottom = min(list_content_y + list_content_h - 4, row_top + row_h - 4)
                     row_rect = (row_left, row_top, row_right - row_left, row_bottom - row_top)
                     copy_rect = (copy_left, row_top + 5, copy_button_width, row_bottom - row_top - 10)
-                    jsn_rect = (row_left, row_top, copy_rect[0] - row_left - 6, row_bottom - row_top)
+                    jsn_rect = (row_left, row_top, jsn_col_width, row_bottom - row_top)
                     row_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, jsn_rect)
                     copy_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, copy_rect)
                     fill_color = (242, 247, 255) if row_hovered else ((248, 248, 248) if absolute_idx % 2 == 0 else (238, 238, 238))
@@ -880,16 +921,48 @@ class DisplayWindow:
                     jsn_value = detail_row["jsn"]
                     historic_index = detail_row.get("historic_index")
                     jsn_text = self._truncate_text_to_width(jsn_value, font, 0.68, 2, jsn_max_width)
-                    cv2.putText(canvas, jsn_text, (row_left + 14, row_top + 26), font, 0.68, (30, 30, 30), 2)
+                    cv2.putText(canvas, jsn_text, (row_left + 14, row_top + 30), font, 0.68, (30, 30, 30), 2)
                     historic_text = str(historic_index) if historic_index is not None else "-"
                     historic_size = cv2.getTextSize(historic_text, font, 0.68, 2)[0]
                     historic_x = index_left + (index_col_width - historic_size[0]) // 2
                     cv2.putText(
                         canvas,
                         historic_text,
-                        (historic_x, row_top + 26),
+                        (historic_x, row_top + 30),
                         font,
                         0.68,
+                        (30, 30, 30),
+                        2,
+                    )
+                    piece_date_text = self._truncate_text_to_width(
+                        detail_row.get("piece_date_display") or "N/A",
+                        font,
+                        0.62,
+                        2,
+                        date_col_width - 16,
+                    )
+                    cv2.putText(
+                        canvas,
+                        piece_date_text,
+                        (date_left + 8, row_top + 29),
+                        font,
+                        0.62,
+                        (30, 30, 30),
+                        2,
+                    )
+                    context_text = self._truncate_text_to_width(
+                        detail_row.get("context_value") or "N/A",
+                        font,
+                        0.62,
+                        2,
+                        context_col_width - 16,
+                    )
+                    cv2.putText(
+                        canvas,
+                        context_text,
+                        (context_left + 8, row_top + 29),
+                        font,
+                        0.62,
                         (30, 30, 30),
                         2,
                     )
@@ -910,13 +983,13 @@ class DisplayWindow:
                         2,
                     )
                     copy_label = "Copy"
-                    copy_size = cv2.getTextSize(copy_label, font, 0.6, 2)[0]
+                    copy_size = cv2.getTextSize(copy_label, font, 0.64, 2)[0]
                     cv2.putText(
                         canvas,
                         copy_label,
                         (copy_rect[0] + (copy_rect[2] - copy_size[0]) // 2, copy_rect[1] + (copy_rect[3] + copy_size[1]) // 2),
                         font,
-                        0.6,
+                        0.64,
                         (255, 255, 255),
                         2,
                     )

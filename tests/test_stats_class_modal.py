@@ -192,6 +192,29 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         self.assertIsNotNone(display.stats_class_modal_list_rect)
         self.assertIsNotNone(display.stats_class_modal_matrix_tab_rect)
 
+    @patch("display_window.get_db_connection")
+    def test_draw_stats_class_modal_detail_handles_context_columns(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display.stats_class_modal_view = "detail"
+        display.stats_class_modal_selected_kind = "status"
+        display.stats_class_modal_selected_label = "FNOK"
+        display.stats_class_modal_detail_rows = [
+            {
+                "jsn": "11861-0007",
+                "historic_index": 2,
+                "piece_date_display": "2026-03-25-09-15",
+                "class_name": "wrinkle",
+            }
+        ]
+
+        canvas = np.zeros((display.height, display.width, 3), dtype=np.uint8)
+        rendered = display.draw_stats_class_modal(canvas)
+
+        self.assertIsNotNone(rendered)
+        self.assertIsNotNone(display.stats_class_modal_list_rect)
+        self.assertIsNotNone(display.stats_class_modal_back_rect)
+
 
 class TestMainControllerStatsClassModal(unittest.TestCase):
     def test_get_piece_class_summary_queries_distinct_piece_counts(self):
@@ -312,6 +335,71 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertEqual(rows[0]["historic_index"], 3)
         self.assertEqual(rows[1]["historic_index"], 1)
 
+    def test_get_piece_jsns_for_class_includes_date_and_final_result(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.return_value = [
+            {
+                "jsn": "11861-0007",
+                "created_at": "2026-03-25 09:15:33",
+                "final_result": "FNOK",
+            }
+        ]
+        controller = MainController(display=display)
+        controller._load_historic_index = MagicMock(
+            return_value=[["11861-0007_side_OK.png"]]
+        )
+
+        rows = controller.get_piece_jsns_for_class("wrinkle")
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "jsn": "11861-0007",
+                    "created_at": "2026-03-25 09:15:33",
+                    "final_result": "FNOK",
+                    "historic_index": 1,
+                    "piece_date_display": "2026-03-25-09-15",
+                }
+            ],
+        )
+        query = display.db.fetch.call_args[0][0]
+        self.assertIn("COALESCE(prd.class_name, 'UNCLASSIFIED') = %s", query)
+        self.assertIn("pr.created_at", query)
+        self.assertIn("pr.final_result", query)
+
+    def test_get_piece_jsns_for_status_includes_date_and_defect(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.return_value = [
+            {
+                "jsn": "11861-0007",
+                "created_at": "2026-03-25 09:15:33",
+                "class_name": "UNCLASSIFIED",
+            }
+        ]
+        controller = MainController(display=display)
+        controller._load_historic_index = MagicMock(
+            return_value=[["11861-0007_side_OK.png"]]
+        )
+
+        rows = controller.get_piece_jsns_for_status("FNOK")
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "jsn": "11861-0007",
+                    "created_at": "2026-03-25 09:15:33",
+                    "class_name": "UNCLASSIFIED",
+                    "historic_index": 1,
+                    "piece_date_display": "2026-03-25-09-15",
+                }
+            ],
+        )
+        query = display.db.fetch.call_args[0][0]
+        self.assertIn("COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name", query)
+        self.assertIn("pr.created_at", query)
+
     def test_open_stats_class_modal_populates_rows_and_shows_modal(self):
         display = _DisplayStatsStub()
         display.db.fetch.side_effect = [
@@ -370,7 +458,18 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
 
     def test_open_stats_status_detail_populates_detail_rows(self):
         display = _DisplayStatsStub()
-        display.db.fetch.return_value = [{"jsn": "11861-0007"}, {"jsn": "11861-0003"}]
+        display.db.fetch.return_value = [
+            {
+                "jsn": "11861-0007",
+                "created_at": "2026-03-25 09:15:33",
+                "class_name": "wrinkle",
+            },
+            {
+                "jsn": "11861-0003",
+                "created_at": "2026-03-25 08:45:00",
+                "class_name": "split",
+            },
+        ]
         controller = MainController(display=display)
         controller._load_historic_index = MagicMock(
             return_value=[
@@ -387,8 +486,20 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertEqual(
             display.stats_class_modal_detail_rows,
             [
-                {"jsn": "11861-0007", "historic_index": 2},
-                {"jsn": "11861-0003", "historic_index": 1},
+                {
+                    "jsn": "11861-0007",
+                    "created_at": "2026-03-25 09:15:33",
+                    "class_name": "wrinkle",
+                    "historic_index": 2,
+                    "piece_date_display": "2026-03-25-09-15",
+                },
+                {
+                    "jsn": "11861-0003",
+                    "created_at": "2026-03-25 08:45:00",
+                    "class_name": "split",
+                    "historic_index": 1,
+                    "piece_date_display": "2026-03-25-08-45",
+                },
             ],
         )
 

@@ -3592,6 +3592,24 @@ class MainController:
             enriched_rows.append(row_data)
         return enriched_rows
 
+    def _normalize_piece_date_display(self, value):
+        if value is None:
+            return "N/A"
+
+        if hasattr(value, "strftime"):
+            try:
+                return value.strftime("%Y-%m-%d-%H-%M")
+            except Exception:
+                pass
+
+        text = str(value).strip()
+        if not text:
+            return "N/A"
+        text = text.replace("T", " ")
+        if len(text) >= 16:
+            text = text[:16]
+        return text.replace(" ", "-").replace(":", "-")
+
     def get_piece_jsns_for_class(self, class_name, db_client=None):
         db = db_client or self.display.db
         normalized_class_name = str(class_name or "").strip()
@@ -3600,16 +3618,21 @@ class MainController:
 
         try:
             rows = db.fetch(
-                "SELECT DISTINCT pr.jsn "
-                "FROM piece_result_defects prd "
-                "JOIN piece_result pr ON pr.id = prd.piece_result_id "
-                "WHERE prd.class_name = %s "
+                "SELECT DISTINCT pr.jsn, pr.created_at, pr.final_result "
+                "FROM piece_result pr "
+                "LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id "
+                "WHERE COALESCE(prd.class_name, 'UNCLASSIFIED') = %s "
                 "AND pr.jsn IS NOT NULL "
                 "AND pr.jsn <> '' "
                 "ORDER BY pr.jsn DESC",
                 (normalized_class_name,),
             )
-            return self._attach_historic_indices(rows)
+            enriched_rows = self._attach_historic_indices(rows)
+            for row in enriched_rows:
+                row["piece_date_display"] = self._normalize_piece_date_display(
+                    row.get("created_at")
+                )
+            return enriched_rows
         except Exception as exc:
             self.logger.error(f"Error fetching JSNs for class '{normalized_class_name}': {exc}")
             return []
@@ -3622,15 +3645,22 @@ class MainController:
 
         try:
             rows = db.fetch(
-                "SELECT pr.jsn "
+                "SELECT pr.jsn, pr.created_at, "
+                "COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name "
                 "FROM piece_result pr "
+                "LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id "
                 "WHERE pr.final_result = %s "
                 "AND pr.jsn IS NOT NULL "
                 "AND pr.jsn <> '' "
                 "ORDER BY pr.jsn DESC",
                 (normalized_result,),
             )
-            return self._attach_historic_indices(rows)
+            enriched_rows = self._attach_historic_indices(rows)
+            for row in enriched_rows:
+                row["piece_date_display"] = self._normalize_piece_date_display(
+                    row.get("created_at")
+                )
+            return enriched_rows
         except Exception as exc:
             self.logger.error(
                 f"Error fetching JSNs for final_result '{normalized_result}': {exc}"
