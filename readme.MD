@@ -131,17 +131,5 @@ pip install -r requirements.txt
 docker compose up -d postgres pgadmin
 
 
-## database form
 
---LOGIN--
-user: admin@endform.com
-pass: admin123
-
---FORM-- (OPTIONAL)
-- Server Name: local-postgres 
-- Host name/address: postgres
-- Port: 5432
-- Database: postgres 
-- User: postgres 
-- Password: MartinreaFT$2023#
 
