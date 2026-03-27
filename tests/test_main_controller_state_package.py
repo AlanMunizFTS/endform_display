@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from main_controller import ControllerConfig, MainController
@@ -142,6 +143,30 @@ class TestMainControllerStatePackage(unittest.TestCase):
             )
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
+
+    def test_check_and_register_new_historic_images_skips_during_dataset_transfer(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            annotated_dir = Path(tmp_dir) / "annotated"
+            annotated_dir.mkdir()
+            (annotated_dir / "11861_test_side_OK.png").write_bytes(b"image")
+
+            display = self._build_display(db=MagicMock())
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+            )
+            controller.dataset_transfer_active = True
+            controller.file_manager.getmtime = MagicMock(return_value=123.0)
+            controller._register_local_images_in_db = MagicMock()
+            controller._backfill_piece_result = MagicMock()
+            controller.save_classification_results = MagicMock()
+
+            controller._check_and_register_new_historic_images()
+
+            self.assertFalse(getattr(controller, "_register_worker_running", False))
+            controller._register_local_images_in_db.assert_not_called()
+            controller._backfill_piece_result.assert_not_called()
+            controller.save_classification_results.assert_not_called()
 
 
 if __name__ == "__main__":

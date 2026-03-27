@@ -531,6 +531,7 @@ class MainController:
         self.remote_db_forward_cursor_id = 0
         self.remote_db_backfill_cursor_id = 0
         self.last_historic_check = 0.0
+        self.dataset_transfer_active = False
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -1071,6 +1072,8 @@ class MainController:
 
     def _register_historic_local_dir_on_startup(self):
         """Register all visible historic images on startup if not already in img_results."""
+        if self.dataset_transfer_active:
+            return
         if not self.db_connected:
             return
 
@@ -1086,6 +1089,8 @@ class MainController:
     def _register_historic_local_dir_worker(self):
         """Worker thread for registering visible historic images on startup."""
         try:
+            if self.dataset_transfer_active:
+                return
             visible_dir = self._get_visible_historic_dir()
             if not self.file_manager.exists(visible_dir):
                 return
@@ -1117,6 +1122,8 @@ class MainController:
 
     def _check_and_register_new_historic_images(self):
         """Check for new visible historic images and register them in DB."""
+        if self.dataset_transfer_active:
+            return
         visible_dir = self._get_visible_historic_dir()
         if not self.file_manager.exists(visible_dir):
             return
@@ -1140,6 +1147,8 @@ class MainController:
                 def _register_worker():
                     worker_db = None
                     try:
+                        if self.dataset_transfer_active:
+                            return
                         from db import get_db_connection
                         worker_db = get_db_connection()
                         self._register_local_images_in_db(captured_dir, db_client=worker_db)
@@ -1172,6 +1181,8 @@ class MainController:
             worker_db = None
             completed = False
             try:
+                if self.dataset_transfer_active:
+                    return
                 from db import get_db_connection
 
                 worker_db = get_db_connection()
@@ -1455,6 +1466,7 @@ class MainController:
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
             return
 
+        self.dataset_transfer_active = True
         d.sync_in_progress = True
         d.sync_progress = 0
         d.sync_stage = "Preparing export..."
@@ -1512,6 +1524,7 @@ class MainController:
             finally:
                 if worker_state is not None:
                     self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
                 d.sync_in_progress = False
                 d.sync_message_time = time.time()
                 if worker_db is not None:
@@ -1534,6 +1547,7 @@ class MainController:
         if not package_path:
             return
 
+        self.dataset_transfer_active = True
         d.sync_in_progress = True
         d.sync_progress = 0
         d.sync_stage = "Preparing import..."
@@ -1599,6 +1613,7 @@ class MainController:
             finally:
                 if worker_state is not None:
                     self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
                 d.sync_in_progress = False
                 d.sync_message_time = time.time()
                 if worker_db is not None:
