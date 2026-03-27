@@ -1,16 +1,22 @@
 import select
 import socketserver
 import threading
+from contextlib import contextmanager
+from pathlib import Path
 
 import paramiko
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
-from contextlib import contextmanager
-from utilities.log import get_logger
+
 from settings import get_db_settings
+from utilities.log import get_logger
 
 logger = get_logger()
+
+SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
+SCHEMA_MIGRATIONS_LOCK_KEY = 420731145922714061
+MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 
 class _SSHTunnelRequestHandler(socketserver.BaseRequestHandler):
@@ -257,6 +263,116 @@ class PostgresDB:
         query = "INSERT INTO img_results (name) VALUES (%s)"
         return self.execute(query, (img_name,))
 
+    def apply_local_migrations(self, migrations_dir=None):
+        """Apply pending local SQL migrations tracked in schema_migrations."""
+        migrations_path = Path(migrations_dir) if migrations_dir else MIGRATIONS_DIR
+        migration_files = sorted(
+            path for path in migrations_path.glob("*.sql") if path.is_file()
+        )
+
+        if not migration_files:
+            logger.info(
+                f"[DB] No migrations found in {migrations_path}",
+                allow_repeat=True,
+            )
+            return []
+
+        connection = self.connection_pool.getconn()
+        cursor = None
+        applied_now = []
+        try:
+            cursor = connection.cursor()
+            cursor.execute(
+                "SELECT pg_advisory_lock(%s)",
+                (SCHEMA_MIGRATIONS_LOCK_KEY,),
+            )
+            connection.commit()
+
+            cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {SCHEMA_MIGRATIONS_TABLE} (
+                    filename TEXT PRIMARY KEY,
+                    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            connection.commit()
+
+            cursor.execute(
+                f"SELECT filename FROM {SCHEMA_MIGRATIONS_TABLE} ORDER BY filename"
+            )
+            applied_rows = cursor.fetchall()
+            applied_filenames = {row[0] for row in applied_rows}
+            pending_files = [
+                path for path in migration_files if path.name not in applied_filenames
+            ]
+
+            if not pending_files:
+                logger.info("[DB] Schema already up to date", allow_repeat=True)
+                return []
+
+            logger.info(
+                f"[DB] Applying {len(pending_files)} pending migration(s)",
+                allow_repeat=True,
+            )
+            for migration_file in pending_files:
+                # Accept UTF-8 files with BOM so SQL comments at line 1 do not break parsing.
+                migration_sql = migration_file.read_text(encoding="utf-8-sig").strip()
+                logger.info(
+                    f"[DB] Applying migration {migration_file.name}",
+                    allow_repeat=True,
+                )
+
+                try:
+                    if migration_sql:
+                        cursor.execute(migration_sql)
+                    else:
+                        logger.warn(
+                            f"[DB] Migration {migration_file.name} is empty; recording as applied",
+                            allow_repeat=True,
+                        )
+
+                    cursor.execute(
+                        f"INSERT INTO {SCHEMA_MIGRATIONS_TABLE} (filename) VALUES (%s)",
+                        (migration_file.name,),
+                    )
+                    connection.commit()
+                    applied_now.append(migration_file.name)
+                except Exception as exc:
+                    connection.rollback()
+                    logger.error(
+                        f"[DB] Migration {migration_file.name} failed: {exc}"
+                    )
+                    raise
+
+            logger.info(
+                "[DB] Applied migrations: " + ", ".join(applied_now),
+                allow_repeat=True,
+            )
+            return applied_now
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            if cursor is not None:
+                try:
+                    connection.rollback()
+                    cursor.execute(
+                        "SELECT pg_advisory_unlock(%s)",
+                        (SCHEMA_MIGRATIONS_LOCK_KEY,),
+                    )
+                    connection.commit()
+                except Exception:
+                    try:
+                        connection.rollback()
+                    except Exception:
+                        pass
+                try:
+                    cursor.close()
+                except Exception:
+                    pass
+            self.connection_pool.putconn(connection)
+
 
 class SSHTunneledPostgresDB(PostgresDB):
     def __init__(self, tunnel, database, user, password):
@@ -283,17 +399,25 @@ class SSHTunneledPostgresDB(PostgresDB):
 
 def get_db_connection():
     """Get DB instance with credentials from environment variables."""
+    db_client = None
     try:
         db_settings = get_db_settings()
-        return PostgresDB(
+        db_client = PostgresDB(
             host=db_settings["host"],
             port=db_settings["port"],
             database=db_settings["database"],
             user=db_settings["user"],
             password=db_settings["password"],
         )
+        db_client.apply_local_migrations()
+        return db_client
     except Exception as e:
         logger.error(f"[DB] Failed to initialize DB connection: {e}")
+        if db_client is not None:
+            try:
+                db_client.close()
+            except Exception:
+                pass
         raise
 
 

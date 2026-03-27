@@ -49,7 +49,6 @@ class DisplayWindow:
         self.remote_controls_enabled = False
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
-        self.db = get_db_connection()
         self.controller = controller
         self.action_handler = action_handler
         self.filename_mapping = filename_mapping or {}  # Mapping of short names to original names
