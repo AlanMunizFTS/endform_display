@@ -2070,6 +2070,9 @@ class MainController:
         d.show_delete_confirm = False
         d.show_rebuild_confirm = False
         d.show_piece_date_dialog = False
+        d.show_piece_number_dialog = False
+        d.piece_number_dialog_input = ""
+        d.piece_number_dialog_replace_on_input = False
         if hasattr(d, "historic_jsn_rect"):
             d.historic_jsn_rect = None
         if hasattr(d, "toast_message"):
@@ -2131,6 +2134,48 @@ class MainController:
                 return idx
         return None
 
+    def _get_current_historic_piece_number(self):
+        """Return the current visible historic piece number using UI numbering."""
+        d = self.display
+        total_pieces = len(d.historic_images or [])
+        if total_pieces <= 0:
+            return 0
+
+        current_piece = total_pieces - int(d.historic_offset or 0)
+        if current_piece < 1:
+            return 1
+        if current_piece > total_pieces:
+            return total_pieces
+        return current_piece
+
+    def _close_piece_number_dialog(self, clear_input=False):
+        """Hide the go-to-piece dialog and optionally clear its input."""
+        d = self.display
+        d.show_piece_number_dialog = False
+        d.piece_number_dialog_replace_on_input = False
+        if clear_input:
+            d.piece_number_dialog_input = ""
+
+    def _open_piece_number_dialog(self):
+        """Open the go-to-piece dialog prefilled with the current piece number."""
+        d = self.display
+        total_pieces = len(d.historic_images or [])
+        if total_pieces <= 0:
+            self._show_no_images_dialog("No images available")
+            return False
+
+        d.show_piece_date_dialog = False
+        d.show_piece_number_dialog = True
+        d.show_reset_confirm = False
+        d.show_delete_confirm = False
+        d.show_rebuild_confirm = False
+        d.search_active = False
+        d.filtered_suggestions = []
+        d.selected_suggestion_idx = -1
+        d.piece_number_dialog_input = str(self._get_current_historic_piece_number())
+        d.piece_number_dialog_replace_on_input = True
+        return True
+
     def go_to_historic_jsn(self, jsn, show_missing_dialog=False, close_stats_modal=False):
         """Navigate to a JSN in historic mode using the freshest local index available."""
         d = self.display
@@ -2158,6 +2203,35 @@ class MainController:
         d.historic_images = historic_index
         d.historic_mode = True
         d.historic_offset = target_idx
+        d.search_active = False
+        d.filtered_suggestions = []
+        d.selected_suggestion_idx = -1
+        self._refresh_historic_index_async()
+        return True
+
+    def go_to_historic_piece_number(self, piece_number, show_missing_dialog=False):
+        """Navigate to a historic piece number using the displayed numbering."""
+        d = self.display
+        try:
+            target_piece = int(str(piece_number).strip())
+        except (TypeError, ValueError):
+            if show_missing_dialog:
+                self._show_no_images_dialog(f"Piece {piece_number} not available")
+            return False
+
+        historic_index = self._load_historic_index(force_rescan=False) or []
+        if not historic_index:
+            historic_index = self._load_historic_index(force_rescan=True) or []
+
+        total_pieces = len(historic_index)
+        if target_piece < 1 or target_piece > total_pieces:
+            if show_missing_dialog:
+                self._show_no_images_dialog(f"Piece {target_piece} not available")
+            return False
+
+        d.historic_images = historic_index
+        d.historic_mode = True
+        d.historic_offset = total_pieces - target_piece
         d.search_active = False
         d.filtered_suggestions = []
         d.selected_suggestion_idx = -1
@@ -3958,9 +4032,33 @@ class MainController:
         elif action == "prev_historic_batch":
             self.prev_historic_batch()
         elif action == "open_piece_date_dialog":
+            self._close_piece_number_dialog(clear_input=False)
             d.show_piece_date_dialog = True
         elif action == "close_piece_date_dialog":
             d.show_piece_date_dialog = False
+        elif action == "open_piece_number_dialog":
+            self._open_piece_number_dialog()
+        elif action == "close_piece_number_dialog":
+            self._close_piece_number_dialog(clear_input=True)
+        elif action == "piece_number_append_digit":
+            digit = payload.get("digit")
+            if digit is not None and str(digit).isdigit():
+                max_length = max(1, len(str(max(1, len(d.historic_images or [])))))
+                digit_str = str(digit)
+                current_input = str(getattr(d, "piece_number_dialog_input", "") or "")
+                if getattr(d, "piece_number_dialog_replace_on_input", False):
+                    next_input = digit_str
+                else:
+                    next_input = f"{current_input}{digit_str}"[:max_length]
+                d.piece_number_dialog_input = next_input[:max_length]
+                d.piece_number_dialog_replace_on_input = False
+        elif action == "piece_number_backspace":
+            d.piece_number_dialog_input = str(getattr(d, "piece_number_dialog_input", "") or "")[:-1]
+            d.piece_number_dialog_replace_on_input = False
+        elif action == "submit_piece_number_dialog":
+            piece_number = str(getattr(d, "piece_number_dialog_input", "") or "").strip()
+            if self.go_to_historic_piece_number(piece_number, show_missing_dialog=True):
+                self._close_piece_number_dialog(clear_input=True)
         elif action == "open_stats_class_modal":
             if hasattr(d, "_reset_stats_class_modal_state"):
                 d._reset_stats_class_modal_state()

@@ -127,6 +127,12 @@ class DisplayWindow:
         self.info_icon_rect = None  # Info icon rect (top right in historic mode)
         self.show_piece_date_dialog = False  # Show piece date dialog
         self.piece_date_dialog_close_rect = None  # Close button rect for date dialog
+        self.show_piece_number_dialog = False  # Show go-to-piece dialog
+        self.piece_number_dialog_input = ""
+        self.piece_number_dialog_replace_on_input = False
+        self.piece_number_dialog_ok_rect = None
+        self.piece_number_dialog_cancel_rect = None
+        self.piece_counter_rect = None  # Clickable counter above reset button
         self.show_stats_class_modal = False
         self.stats_class_modal_close_rect = None
         self.stats_class_modal_rows = []
@@ -281,6 +287,19 @@ class DisplayWindow:
 
         first_image = current_batch[0]
         return first_image.split("_")[0] if "_" in first_image else first_image
+
+    def _get_current_historic_piece_number(self):
+        """Return the visible historic piece number using the UI numbering."""
+        total_pieces = len(self.historic_images)
+        if total_pieces <= 0:
+            return 0
+
+        current_piece = total_pieces - int(self.historic_offset or 0)
+        if current_piece < 1:
+            return 1
+        if current_piece > total_pieces:
+            return total_pieces
+        return current_piece
 
     def _set_toast_message(self, message, is_error=False, duration_sec=1.8):
         """Show a short non-blocking toast message."""
@@ -1554,6 +1573,22 @@ class DisplayWindow:
                     self._emit_action("dismiss_no_images_dialog")
                 return  # Exit early to prevent other clicks
 
+            # Piece number dialog buttons (high priority)
+            if self.show_piece_number_dialog:
+                if self.piece_number_dialog_ok_rect:
+                    bx, by, bw, bh = self.piece_number_dialog_ok_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("submit_piece_number_dialog")
+                        return
+
+                if self.piece_number_dialog_cancel_rect:
+                    bx, by, bw, bh = self.piece_number_dialog_cancel_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("close_piece_number_dialog")
+                        return
+
+                return
+
             # Delete-piece confirmation buttons (high priority)
             if self.show_delete_confirm:
                 # Confirm button
@@ -1677,6 +1712,12 @@ class DisplayWindow:
                 bx, by, bw, bh = self.info_icon_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self._emit_action("open_piece_date_dialog")
+                    return
+
+            if self.piece_counter_rect and self.historic_mode:
+                bx, by, bw, bh = self.piece_counter_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._emit_action("open_piece_number_dialog")
                     return
             
             # NEXT ARROW button (right) - advance in historic
@@ -2095,25 +2136,48 @@ class DisplayWindow:
         
         # Draw counter above RESET button
         total_pieces = len(self.historic_images)
-        if total_pieces > 0:
-            current_piece = total_pieces - self.historic_offset
-            # Clamp in case offset is out of range after refresh
-            if current_piece < 1:
-                current_piece = 1
-            if current_piece > total_pieces:
-                current_piece = total_pieces
-        else:
-            current_piece = 0
+        current_piece = self._get_current_historic_piece_number()
         counter_text = f"Pieces: {current_piece} of {total_pieces}"
         counter_font_scale = 0.9
         counter_thickness = 2
         counter_color = (0, 0, 0)  # Black text
         
         counter_size = cv2.getTextSize(counter_text, font, counter_font_scale, counter_thickness)[0]
-        counter_x = x_draw + (w_draw - counter_size[0]) // 2 - self.right_info_shift
-        counter_y = y_draw - 20  # 20 pixels above the button
-        
-        cv2.putText(canvas, counter_text, (counter_x, counter_y), font, counter_font_scale, 
+        counter_padding_x = 18
+        counter_padding_y = 12
+        counter_width = counter_size[0] + (counter_padding_x * 2)
+        counter_height = max(40, counter_size[1] + (counter_padding_y * 2))
+        counter_x = x_draw + (w_draw - counter_width) // 2 - self.right_info_shift
+        counter_y = y_draw - counter_height - 16
+        self.piece_counter_rect = (counter_x, counter_y, counter_width, counter_height)
+
+        is_counter_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.piece_counter_rect)
+        is_counter_pressed = is_counter_hovered and self.mouse_button_down
+        counter_fill = (220, 220, 220) if is_counter_hovered else (245, 245, 245)
+        counter_border = (0, 0, 0)
+        if is_counter_pressed:
+            counter_fill = (210, 210, 210)
+
+        cv2.rectangle(
+            canvas,
+            (counter_x, counter_y),
+            (counter_x + counter_width, counter_y + counter_height),
+            counter_fill,
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (counter_x, counter_y),
+            (counter_x + counter_width, counter_y + counter_height),
+            counter_border,
+            2,
+        )
+
+
+
+        text_x = counter_x + (counter_width - counter_size[0]) // 2
+        text_y = counter_y + counter_height - 12
+        cv2.putText(canvas, counter_text, (text_x, text_y), font, counter_font_scale,
                    counter_color, counter_thickness)
         
         return canvas
@@ -2472,6 +2536,133 @@ class DisplayWindow:
         cv2.putText(canvas, button_text, (button_text_x, button_text_y), font, font_scale - 0.2,
                    (255, 255, 255), thickness)
         
+        return canvas
+
+    def draw_piece_number_dialog(self, canvas):
+        """Draw modal dialog to jump to a historic piece number."""
+        dialog_width = 460
+        dialog_height = 260
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        canvas = cv2.addWeighted(canvas, 0.3, overlay, 0.7, 0)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (255, 255, 255),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            (0, 0, 0),
+            3,
+        )
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+
+        title_text = "Go To Piece"
+        title_scale = 0.95
+        title_thickness = 2
+        title_size = cv2.getTextSize(title_text, font, title_scale, title_thickness)[0]
+        title_x = dialog_x + (dialog_width - title_size[0]) // 2
+        title_y = dialog_y + 42
+        cv2.putText(canvas, title_text, (title_x, title_y), font, title_scale, (0, 0, 0), title_thickness)
+
+        total_pieces = len(self.historic_images)
+        helper_text = f"Available range: 1 to {total_pieces}"
+        helper_scale = 0.7
+        helper_thickness = 2
+        helper_size = cv2.getTextSize(helper_text, font, helper_scale, helper_thickness)[0]
+        helper_x = dialog_x + (dialog_width - helper_size[0]) // 2
+        helper_y = dialog_y + 82
+        cv2.putText(
+            canvas,
+            helper_text,
+            (helper_x, helper_y),
+            font,
+            helper_scale,
+            (80, 80, 80),
+            helper_thickness,
+        )
+
+        input_width = 200
+        input_height = 60
+        input_x = dialog_x + (dialog_width - input_width) // 2
+        input_y = dialog_y + 108
+        cv2.rectangle(
+            canvas,
+            (input_x, input_y),
+            (input_x + input_width, input_y + input_height),
+            (250, 250, 220),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (input_x, input_y),
+            (input_x + input_width, input_y + input_height),
+            (0, 0, 0),
+            2,
+        )
+
+        input_text = self.piece_number_dialog_input or "Piece #"
+        input_color = (0, 0, 0) if self.piece_number_dialog_input else (145, 145, 145)
+        input_scale = 1.0
+        input_thickness = 2
+        input_size = cv2.getTextSize(input_text, font, input_scale, input_thickness)[0]
+        input_text_x = input_x + (input_width - input_size[0]) // 2
+        input_text_y = input_y + (input_height + input_size[1]) // 2
+        cv2.putText(
+            canvas,
+            input_text,
+            (input_text_x, input_text_y),
+            font,
+            input_scale,
+            input_color,
+            input_thickness,
+        )
+
+        if self.piece_number_dialog_input:
+            cursor_x = input_text_x + input_size[0] + 6
+            cursor_y1 = input_y + 12
+            cursor_y2 = input_y + input_height - 12
+            cv2.line(canvas, (cursor_x, cursor_y1), (cursor_x, cursor_y2), (0, 0, 0), 2)
+
+        button_width = 120
+        button_height = 42
+        button_gap = 24
+        total_buttons_width = (button_width * 2) + button_gap
+        buttons_x = dialog_x + (dialog_width - total_buttons_width) // 2
+        button_y = dialog_y + dialog_height - button_height - 26
+
+        self.piece_number_dialog_cancel_rect = (buttons_x, button_y, button_width, button_height)
+        self.piece_number_dialog_ok_rect = (
+            buttons_x + button_width + button_gap,
+            button_y,
+            button_width,
+            button_height,
+        )
+
+        def _draw_dialog_button(rect, label, fill_color):
+            is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+            is_pressed = is_hovered and self.mouse_button_down
+            scale_factor = 0.95 if is_pressed else (1.06 if is_hovered else 1.0)
+            x_btn, y_btn, w_btn, h_btn = self._scale_rect(rect, scale_factor)
+            cv2.rectangle(canvas, (x_btn, y_btn), (x_btn + w_btn, y_btn + h_btn), fill_color, -1)
+            cv2.rectangle(canvas, (x_btn, y_btn), (x_btn + w_btn, y_btn + h_btn), (0, 0, 0), 2)
+            label_size = cv2.getTextSize(label, font, 0.72, 2)[0]
+            label_x = x_btn + (w_btn - label_size[0]) // 2
+            label_y = y_btn + (h_btn + label_size[1]) // 2
+            cv2.putText(canvas, label, (label_x, label_y), font, 0.72, (255, 255, 255), 2)
+
+        _draw_dialog_button(self.piece_number_dialog_cancel_rect, "Cancel", (100, 100, 100))
+        _draw_dialog_button(self.piece_number_dialog_ok_rect, "Go", (132, 36, 2))
+
         return canvas
 
     def _load_trash_icon(self, size):
@@ -3654,7 +3845,21 @@ class DisplayWindow:
             right_arrow_keys = {2555904, 83, ord('d'), ord('D')}
             up_arrow_keys = {2490368, 82}
             down_arrow_keys = {2621440, 84}
-            
+
+            if self.show_piece_number_dialog and not self.show_no_images_dialog and key_ex != -1:
+                if key == 27:
+                    self._emit_action("close_piece_number_dialog")
+                    return True
+                if key == 13:
+                    self._emit_action("submit_piece_number_dialog")
+                    return True
+                if key == 8:
+                    self._emit_action("piece_number_backspace")
+                    return True
+                if 48 <= key <= 57:
+                    self._emit_action("piece_number_append_digit", digit=chr(key))
+                    return True
+
             # Handle keyboard input when search is active
             if self.search_active and key_ex != -1:
                 if key == 27:  # ESC key
@@ -3686,6 +3891,7 @@ class DisplayWindow:
                 and self.remote_requested
                 and not self.show_stats_class_modal
                 and not self.show_piece_date_dialog
+                and not self.show_piece_number_dialog
                 and not self.show_no_images_dialog
             ):
                 self._emit_action("send_remote_input")
@@ -3699,6 +3905,7 @@ class DisplayWindow:
                 and not self.reset_in_progress
                 and not self.show_stats_class_modal
                 and not self.show_piece_date_dialog
+                and not self.show_piece_number_dialog
                 and not self.show_no_images_dialog
             ):
                 if key in {3, ord('c'), ord('C')}:
@@ -3985,6 +4192,7 @@ class DisplayWindow:
         else:
             # Historic mode: show JSN in upper blue bar
             self.historic_jsn_rect = None
+            self.piece_counter_rect = None
             if self.historic_images and len(self.historic_images) > 0:
                 current_batch = self.historic_images[self.historic_offset]
                 is_incomplete = len(current_batch) < 7
@@ -4024,6 +4232,8 @@ class DisplayWindow:
             # Draw piece date dialog if needed
             if self.show_piece_date_dialog:
                 canvas = self.draw_piece_date_dialog(canvas)
+            if self.show_piece_number_dialog:
+                canvas = self.draw_piece_number_dialog(canvas)
             
             # Draw confirmation dialog if needed
             if self.show_reset_confirm:
