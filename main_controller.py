@@ -453,6 +453,8 @@ class ControllerConfig:
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
     remote_db_polling_enabled: bool = True
+    local_model_results_polling_enabled: bool = True
+    local_model_results_table: str = "model_results_local"
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
     remote_db_query_limit: int = 25
@@ -639,26 +641,36 @@ class MainController:
         table_name = str(getattr(self.config, "remote_db_table", "") or "").strip()
         return not table_name
 
+    def _is_local_model_results_table_placeholder(self):
+        table_name = str(getattr(self.config, "local_model_results_table", "") or "").strip()
+        return not table_name
+
     def _quote_remote_db_identifier(self, identifier):
         parts = [part.strip() for part in str(identifier).split(".")]
         if not parts or any(not part for part in parts):
             raise ValueError(f"Invalid SQL identifier: {identifier!r}")
         return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
 
-    def _build_remote_db_query(self):
-        if self._is_remote_db_table_placeholder():
+    def _build_model_result_query(self, table_name):
+        normalized_table_name = str(table_name or "").strip()
+        if not normalized_table_name:
             return None
 
-        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        quoted_table_name = self._quote_remote_db_identifier(normalized_table_name)
         selected_columns = ", ".join(
             self._quote_remote_db_identifier(column_name)
             for column_name in self.config.remote_db_columns
         )
         return (
-            f"SELECT \"id\", {selected_columns} FROM {table_name} "
+            f"SELECT \"id\", {selected_columns} FROM {quoted_table_name} "
             f"WHERE \"id\" > %s "
             f"ORDER BY \"id\" ASC LIMIT %s"
         )
+
+    def _build_remote_db_query(self):
+        if self._is_remote_db_table_placeholder():
+            return None
+        return self._build_model_result_query(self.config.remote_db_table)
 
     def _serialize_remote_db_row(self, row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
@@ -715,14 +727,28 @@ class MainController:
 
         return synced_img_names, synced_remote_ids
 
+    def _delete_model_result_rows(self, source_db, table_name, row_ids):
+        if not row_ids:
+            return 0
+
+        normalized_table_name = str(table_name or "").strip()
+        if not normalized_table_name:
+            return 0
+
+        quoted_table_name = self._quote_remote_db_identifier(normalized_table_name)
+        return source_db.execute(
+            f"DELETE FROM {quoted_table_name} WHERE id = ANY(%s)",
+            (row_ids,),
+        )
+
     def _delete_remote_model_results(self, remote_db, remote_ids):
         if not remote_ids:
             return 0
 
-        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
-        return remote_db.execute(
-            f"DELETE FROM {table_name} WHERE id = ANY(%s)",
-            (remote_ids,),
+        return self._delete_model_result_rows(
+            source_db=remote_db,
+            table_name=self.config.remote_db_table,
+            row_ids=remote_ids,
         )
 
     def _scan_remote_rows_for_sync(
@@ -818,7 +844,14 @@ class MainController:
             "seen_remote_ids": seen_remote_ids,
         }
 
-    def _sync_remote_rows_into_local_classified_images(self, matched_rows, missing_local, local_db, remote_db):
+    def _sync_remote_rows_into_local_classified_images(
+        self,
+        matched_rows,
+        missing_local,
+        local_db,
+        remote_db,
+        source_table=None,
+    ):
         candidate_rows = []
         for row in matched_rows:
             img_name = str(row.get("img_name") or "").strip()
@@ -845,7 +878,11 @@ class MainController:
             }
 
         synced_img_names, synced_remote_ids = self._insert_local_classification_defects(local_db, candidate_rows)
-        deleted_count = self._delete_remote_model_results(remote_db, synced_remote_ids)
+        deleted_count = self._delete_model_result_rows(
+            source_db=remote_db,
+            table_name=source_table or self.config.remote_db_table,
+            row_ids=synced_remote_ids,
+        )
 
         return {
             "candidate_count": len(candidate_rows),
@@ -856,7 +893,63 @@ class MainController:
             "synced_img_names": synced_img_names,
         }
 
-    def _run_remote_db_poll_iteration(self):
+    def _run_local_model_result_poll_iteration(self, local_db):
+        if not getattr(self.config, "local_model_results_polling_enabled", False):
+            return {"ran": False, "has_activity": False, "synced_count": 0}
+
+        query = self._build_model_result_query(self.config.local_model_results_table)
+        if query is None:
+            return {"ran": False, "has_activity": False, "synced_count": 0}
+        try:
+            scan = self._scan_remote_rows_for_sync(
+                remote_db=local_db,
+                local_db=local_db,
+                query=query,
+                start_after_id=0,
+                max_pages=max(1, int(self.config.remote_db_max_scan_pages)),
+                target_sync_batch=max(1, int(self.config.remote_db_target_sync_batch)),
+                scan_label="local",
+            )
+            sync_summary = self._sync_remote_rows_into_local_classified_images(
+                scan["matched_rows"],
+                missing_local=scan["missing_local"],
+                local_db=local_db,
+                remote_db=local_db,
+                source_table=self.config.local_model_results_table,
+            )
+            has_activity = (
+                scan["scanned_count"] > 0
+                or sync_summary["candidate_count"] > 0
+                or sync_summary["synced_count"] > 0
+                or sync_summary["deleted_count"] > 0
+                or bool(sync_summary["missing_local"])
+            )
+            if has_activity:
+                self.logger.info(
+                    "[LOCAL_MODEL_RESULTS] Sync summary: "
+                    f"scanned={scan['scanned_count']}, "
+                    f"pages={scan['pages_scanned']}, "
+                    f"candidates={sync_summary['candidate_count']}, "
+                    f"matched={sync_summary['matched_count']}, "
+                    f"synced={sync_summary['synced_count']}, "
+                    f"deleted_local={sync_summary['deleted_count']}",
+                )
+            if sync_summary["missing_local"]:
+                self.logger.info(
+                    "[LOCAL_MODEL_RESULTS] Missing local classified_images rows: "
+                    + ", ".join(sync_summary["missing_local"][:10]),
+                )
+            return {
+                "ran": True,
+                "has_activity": has_activity,
+                "synced_count": sync_summary["synced_count"],
+                "deleted_count": sync_summary["deleted_count"],
+            }
+        except Exception as exc:
+            self.logger.debug(f"[LOCAL_MODEL_RESULTS] Poll iteration skipped: {exc}")
+            return {"ran": False, "has_activity": False, "synced_count": 0}
+
+    def _run_remote_model_result_poll_iteration(self, local_db):
         query = self._build_remote_db_query()
         if query is None:
             if not self._remote_db_placeholder_warned:
@@ -865,19 +958,19 @@ class MainController:
                     allow_repeat=True,
                 )
                 self._remote_db_placeholder_warned = True
-            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+            return {"skipped": True, "delay": max(0.0, float(self.config.remote_db_error_backoff_sec))}
 
         self._remote_db_placeholder_warned = False
-        local_db = getattr(self.display, "db", None)
-        if not self.db_connected or local_db is None:
-            self.logger.warn(
-                "[REMOTE_DB] Local PostgreSQL unavailable; skipping remote metadata sync.",
-            )
-            return max(0.0, float(self.config.remote_db_error_backoff_sec))
 
         ssh_credentials = self._resolve_remote_db_ssh_credentials()
         if not ssh_credentials:
-            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+            return {
+                "skipped": True,
+                "delay": max(
+                    float(self.config.remote_db_success_interval_sec),
+                    float(self.config.remote_db_idle_backoff_sec),
+                ),
+            }
 
         remote_db = None
         try:
@@ -941,6 +1034,7 @@ class MainController:
                 missing_local=combined_missing_local,
                 local_db=local_db,
                 remote_db=remote_db,
+                source_table=self.config.remote_db_table,
             )
             has_activity = (
                 scanned_count > 0
@@ -973,21 +1067,38 @@ class MainController:
                 self._remote_db_idle_logged = True
 
             if sync_summary["synced_count"] > 0 or sync_summary["deleted_count"] > 0:
-                return max(0.0, float(self.config.remote_db_success_interval_sec))
-            return max(
-                float(self.config.remote_db_success_interval_sec),
-                float(self.config.remote_db_idle_backoff_sec),
-            )
+                delay = max(0.0, float(self.config.remote_db_success_interval_sec))
+            else:
+                delay = max(
+                    float(self.config.remote_db_success_interval_sec),
+                    float(self.config.remote_db_idle_backoff_sec),
+                )
+            return {"skipped": False, "delay": delay, "has_activity": has_activity}
         except Exception as exc:
             self._remote_db_idle_logged = False
             self.logger.error(f"[REMOTE_DB] Poll iteration failed: {exc}", allow_repeat=True)
-            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+            return {"skipped": False, "delay": max(0.0, float(self.config.remote_db_error_backoff_sec))}
         finally:
             if remote_db is not None:
                 try:
                     remote_db.close()
                 except Exception:
                     pass
+
+    def _run_remote_db_poll_iteration(self):
+        local_db = getattr(self.display, "db", None)
+        if not self.db_connected or local_db is None:
+            self.logger.warn(
+                "[REMOTE_DB] Local PostgreSQL unavailable; skipping remote metadata sync.",
+            )
+            return max(0.0, float(self.config.remote_db_error_backoff_sec))
+
+        local_result = self._run_local_model_result_poll_iteration(local_db)
+        remote_result = self._run_remote_model_result_poll_iteration(local_db)
+
+        if local_result.get("has_activity"):
+            return max(0.0, float(self.config.remote_db_success_interval_sec))
+        return max(0.0, float(remote_result.get("delay", self.config.remote_db_idle_backoff_sec)))
 
     def _remote_db_polling_worker(self):
         self.logger.info("[REMOTE_DB] Polling worker started", allow_repeat=True)

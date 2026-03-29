@@ -116,6 +116,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         display.db = local_db
         logger = self._build_logger()
         config = ControllerConfig(
+            local_model_results_polling_enabled=False,
             remote_db_table="model_results",
             remote_db_query_limit=25,
             remote_db_target_sync_batch=1,
@@ -190,11 +191,15 @@ class TestRemoteDbPolling(unittest.TestCase):
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_skips_when_table_is_missing(self, remote_db_factory):
         display = self._build_display()
+        display.db = self._build_db_client()
         logger = self._build_logger()
         controller = MainController(
             display=display,
             logger=logger,
-            config=ControllerConfig(remote_db_table=""),
+            config=ControllerConfig(
+                local_model_results_polling_enabled=False,
+                remote_db_table="",
+            ),
         )
 
         delay = controller._run_remote_db_poll_iteration()
@@ -216,6 +221,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             display=display,
             logger=logger,
             config=ControllerConfig(
+                local_model_results_polling_enabled=False,
                 remote_db_table="model_results",
                 remote_db_target_sync_batch=1,
                 remote_db_max_scan_pages=1,
@@ -260,6 +266,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             display=display,
             logger=logger,
             config=ControllerConfig(
+                local_model_results_polling_enabled=False,
                 remote_db_table="model_results",
                 remote_db_query_limit=25,
                 remote_db_target_sync_batch=1,
@@ -300,6 +307,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             display=display,
             logger=logger,
             config=ControllerConfig(
+                local_model_results_polling_enabled=False,
                 remote_db_table="model_results",
                 remote_db_error_backoff_sec=11.0,
             ),
@@ -331,6 +339,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             display=display,
             logger=logger,
             config=ControllerConfig(
+                local_model_results_polling_enabled=False,
                 remote_db_table="model_results",
                 remote_db_target_sync_batch=1,
                 remote_db_max_scan_pages=1,
@@ -373,6 +382,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             display=display,
             logger=logger,
             config=ControllerConfig(
+                local_model_results_polling_enabled=False,
                 remote_db_table="model_results",
                 remote_db_query_limit=1,
                 remote_db_target_sync_batch=1,
@@ -417,6 +427,46 @@ class TestRemoteDbPolling(unittest.TestCase):
             ([50],),
         )
         self.assertEqual(controller.remote_db_forward_cursor_id, 50)
+
+    def test_local_model_result_poll_iteration_syncs_existing_local_rows_and_deletes_staging_rows(self):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.fetch.side_effect = [
+            [{"id": 101, "img_name": "img_001.png", "class_name": "dent", "confidence": 0.9321}],
+            [{"id": 77, "img_name": "img_001.png"}],
+        ]
+        local_db.execute.return_value = 1
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                local_model_results_polling_enabled=True,
+                local_model_results_table="model_results_local",
+                remote_db_polling_enabled=True,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+            ),
+        )
+        controller._recalculate_piece_result = MagicMock()
+
+        result = controller._run_local_model_result_poll_iteration(local_db)
+
+        self.assertTrue(result["ran"])
+        self.assertTrue(result["has_activity"])
+        self.assertEqual(result["synced_count"], 1)
+        self.assertEqual(local_db.execute.call_args_list[0].args, (
+            "INSERT INTO classified_image_defects "
+            "(classified_image_id, class_name, confidence) "
+            "VALUES (%s, %s, %s) "
+            "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+            (77, "dent", 0.9321),
+        ))
+        self.assertEqual(local_db.execute.call_args_list[1].args, (
+            'DELETE FROM "model_results_local" WHERE id = ANY(%s)',
+            ([101],),
+        ))
 
     def test_upsert_classification_keeps_created_at_as_db_default(self):
         display = self._build_display()
