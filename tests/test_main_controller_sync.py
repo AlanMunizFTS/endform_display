@@ -84,6 +84,9 @@ class TestMainControllerSync(unittest.TestCase):
                 controller.save_classification_results.call_args.kwargs["visible_images_snapshot"],
                 visible_snapshot,
             )
+            self.assertTrue(
+                controller.save_classification_results.call_args.kwargs["export_stats_report"]
+            )
             self.assertEqual(
                 controller.verify_sync_images_by_status.call_args.kwargs["visible_images_snapshot"],
                 visible_snapshot,

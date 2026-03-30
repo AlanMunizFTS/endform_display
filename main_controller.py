@@ -1156,6 +1156,7 @@ class MainController:
                         self.save_classification_results(
                             historic_dir=self._get_export_historic_dir(),
                             db_client=worker_db,
+                            export_stats_report=False,
                         )
                     except Exception as exc:
                         print(f"Error in register worker: {exc}")
@@ -1307,6 +1308,7 @@ class MainController:
                     historic_dir=historic_dir,
                     progress_callback=_classification_progress_cb,
                     visible_images_snapshot=visible_images_snapshot,
+                    export_stats_report=True,
                 )
 
                 def _verify_progress_cb(done, total, stage):
@@ -3297,6 +3299,7 @@ class MainController:
             db_client=db,
             historic_dir=historic_dir,
             visible_images_snapshot=visible_images_snapshot,
+            export_stats_report=False,
         )
         if not save_res.get("ok", False):
             print(f"Warning: saving classification results failed: {save_res.get('error')}")
@@ -3319,6 +3322,7 @@ class MainController:
         historic_dir=None,
         progress_callback=None,
         visible_images_snapshot=None,
+        export_stats_report=False,
     ):
         """Copy images to final_classification folders (P/N/FP/FN per position).
 
@@ -3466,19 +3470,20 @@ class MainController:
                 + "; ".join(all_errors[:5])
             )
 
-        try:
-            from report_exporter import export_stats_report
+        if export_stats_report:
+            try:
+                from report_exporter import export_stats_report
 
-            result["stats_report_path"] = export_stats_report(
-                self,
-                db_client=db,
-            )
-        except Exception as exc:
-            result["stats_report_error"] = str(exc)
-            self.logger.warn(
-                f"[SYNC] Stats report export failed: {exc}",
-                allow_repeat=True,
-            )
+                result["stats_report_path"] = export_stats_report(
+                    self,
+                    db_client=db,
+                )
+            except Exception as exc:
+                result["stats_report_error"] = str(exc)
+                self.logger.warn(
+                    f"[SYNC] Stats report export failed: {exc}",
+                    allow_repeat=True,
+                )
 
         return result
 
