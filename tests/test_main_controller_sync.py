@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from main_controller import ControllerConfig, MainController
@@ -132,6 +133,31 @@ class TestMainControllerSync(unittest.TestCase):
 
             self.assertTrue(display.sync_message.startswith("Dataset saved: 2 images, 2 files copied. Report warning:"))
             self.assertTrue(display.sync_message_is_error)
+
+    def test_sync_images_by_status_does_not_trigger_final_classification_save(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic_prueba"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            (historic_dir / img_name).write_bytes(b"historic")
+
+            fake_db = MagicMock()
+            fake_db.fetch.return_value = [{"img_name": img_name, "result": "OK"}]
+            display = self._build_display(db=fake_db)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+            )
+            controller.save_classification_results = MagicMock()
+
+            result = controller.sync_images_by_status(
+                historic_dir=str(historic_dir),
+                visible_images_snapshot=[img_name],
+            )
+
+            self.assertTrue(result["ok"])
+            controller.save_classification_results.assert_not_called()
 
 
 if __name__ == "__main__":
