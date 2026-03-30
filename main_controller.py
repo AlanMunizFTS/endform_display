@@ -23,6 +23,7 @@ from paths_config import (
     TMP_DISPLAY_DIR,
 )
 from sftp_app import SFTPApp
+from settings import is_remote_db_enabled
 from utilities.log import get_logger, install_print_logger
 from state_package import export_display_state, import_display_state
 
@@ -452,7 +453,7 @@ class ControllerConfig:
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
-    remote_db_polling_enabled: bool = True
+    remote_db_polling_enabled: bool = field(default_factory=is_remote_db_enabled)
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
     remote_db_query_limit: int = 25
