@@ -689,12 +689,19 @@ class MainController:
             if row.get("img_name") and row.get("id") is not None
         }
 
+    def _normalize_remote_defect_class_name(self, class_name):
+        normalized = str(class_name or "").strip()
+        if normalized.upper() == "NOK":
+            return "STREAKED"
+        return normalized
+
     def _insert_local_classification_defects(self, local_db, matched_rows):
         synced_img_names = []
         synced_remote_ids = []
         recalculated_jsns = set()
         for row in matched_rows:
             img_name = row["img_name"]
+            class_name = self._normalize_remote_defect_class_name(row.get("class_name"))
             local_db.execute(
                 "INSERT INTO classified_image_defects "
                 "(classified_image_id, class_name, confidence) "
@@ -702,7 +709,7 @@ class MainController:
                 "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
                 (
                     row["classified_image_id"],
-                    row.get("class_name"),
+                    class_name,
                     row.get("confidence"),
                 ),
             )
