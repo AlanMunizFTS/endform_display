@@ -339,14 +339,14 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         display = _DisplayStatsStub()
         display.db.fetch.return_value = [
             {
-                "jsn": "11861-0007",
+                "jsn": "118610007",
                 "created_at": "2026-03-25 09:15:33",
                 "final_result": "FNOK",
             }
         ]
         controller = MainController(display=display)
         controller._load_historic_index = MagicMock(
-            return_value=[["11861-0007_side_OK.png"]]
+            return_value=[["118610007_side_OK.png"]]
         )
 
         rows = controller.get_piece_jsns_for_class("wrinkle")
@@ -355,7 +355,7 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
             rows,
             [
                 {
-                    "jsn": "11861-0007",
+                    "jsn": "118610007",
                     "created_at": "2026-03-25 09:15:33",
                     "final_result": "FNOK",
                     "historic_index": 1,
@@ -372,14 +372,14 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         display = _DisplayStatsStub()
         display.db.fetch.return_value = [
             {
-                "jsn": "11861-0007",
+                "jsn": "118610007",
                 "created_at": "2026-03-25 09:15:33",
                 "class_name": "UNCLASSIFIED",
             }
         ]
         controller = MainController(display=display)
         controller._load_historic_index = MagicMock(
-            return_value=[["11861-0007_side_OK.png"]]
+            return_value=[["118610007_side_OK.png"]]
         )
 
         rows = controller.get_piece_jsns_for_status("FNOK")
@@ -388,7 +388,7 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
             rows,
             [
                 {
-                    "jsn": "11861-0007",
+                    "jsn": "118610007",
                     "created_at": "2026-03-25 09:15:33",
                     "class_name": "UNCLASSIFIED",
                     "historic_index": 1,
@@ -460,12 +460,12 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         display = _DisplayStatsStub()
         display.db.fetch.return_value = [
             {
-                "jsn": "11861-0007",
+                "jsn": "118610007",
                 "created_at": "2026-03-25 09:15:33",
                 "class_name": "wrinkle",
             },
             {
-                "jsn": "11861-0003",
+                "jsn": "118610003",
                 "created_at": "2026-03-25 08:45:00",
                 "class_name": "split",
             },
@@ -473,8 +473,8 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         controller = MainController(display=display)
         controller._load_historic_index = MagicMock(
             return_value=[
-                ["11861-0007_side_OK.png"],
-                ["11861-0003_side_OK.png"],
+                ["118610007_side_OK.png"],
+                ["118610003_side_OK.png"],
             ]
         )
 
@@ -487,14 +487,14 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
             display.stats_class_modal_detail_rows,
             [
                 {
-                    "jsn": "11861-0007",
+                    "jsn": "118610007",
                     "created_at": "2026-03-25 09:15:33",
                     "class_name": "wrinkle",
                     "historic_index": 2,
                     "piece_date_display": "2026-03-25-09-15",
                 },
                 {
-                    "jsn": "11861-0003",
+                    "jsn": "118610003",
                     "created_at": "2026-03-25 08:45:00",
                     "class_name": "split",
                     "historic_index": 1,

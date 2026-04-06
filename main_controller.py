@@ -39,6 +39,14 @@ def _display_sort_key(filename):
     return (3, filename)
 
 
+def _extract_numeric_jsn(filename):
+    """Return the leading JSN token when the filename starts with digits before '_'."""
+    if not filename:
+        return None
+    jsn = str(filename).split("_", 1)[0]
+    return jsn if jsn.isdigit() else None
+
+
 def _sleep_with_stop(stop_event, seconds):
     if seconds <= 0:
         return
@@ -133,13 +141,16 @@ def _download_images_background_worker(
                 remote_files = file_manager.sftp_listdir(sftp_client)
 
                 all_remote_images = [
-                    f for f in remote_files if f.lower().endswith(image_extensions)
+                    f
+                    for f in remote_files
+                    if f.lower().endswith(image_extensions) and _extract_numeric_jsn(f) is not None
                 ]
-                all_remote_images = [f for f in all_remote_images if f.startswith("11861")]
 
                 jsn_groups = defaultdict(list)
                 for img in all_remote_images:
-                    jsn = img.split("_")[0] if "_" in img else img
+                    jsn = _extract_numeric_jsn(img)
+                    if jsn is None:
+                        continue
                     jsn_groups[jsn].append(img)
 
                 sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
@@ -148,7 +159,7 @@ def _download_images_background_worker(
                 filtered_images = [
                     img
                     for img in all_remote_images
-                    if (img.split("_")[0] if "_" in img else img) not in excluded_jsns
+                    if _extract_numeric_jsn(img) not in excluded_jsns
                 ]
 
                 images_to_download = [
@@ -558,6 +569,7 @@ class MainController:
         return self._resolve_temp_subdir(HISTORIC_SUBDIR_NAME, HISTORIC_LOCAL_DIR)
 
     def _list_local_image_names(self, directory, require_jsn_prefix=False):
+        """List local images, optionally restricting results to numeric-JSN filenames."""
         if not self.file_manager.exists(directory):
             return []
         images = [
@@ -566,7 +578,7 @@ class MainController:
             if name.lower().endswith(self.config.image_extensions)
         ]
         if require_jsn_prefix:
-            images = [name for name in images if name.startswith("11861")]
+            images = [name for name in images if _extract_numeric_jsn(name) is not None]
         return images
 
     def _get_visible_historic_image_set(self):
@@ -1943,12 +1955,15 @@ class MainController:
         images_with_jsn = [
             name
             for name in files
-            if name.lower().endswith(self.config.image_extensions) and name.startswith("11861")
+            if name.lower().endswith(self.config.image_extensions)
+            and _extract_numeric_jsn(name) is not None
         ]
 
         jsn_groups = defaultdict(list)
         for img in images_with_jsn:
-            jsn = img.split("_")[0]
+            jsn = _extract_numeric_jsn(img)
+            if jsn is None:
+                continue
             jsn_groups[jsn].append(img)
 
         sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
