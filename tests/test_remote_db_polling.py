@@ -189,6 +189,57 @@ class TestRemoteDbPolling(unittest.TestCase):
         )
 
     @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_maps_remote_nok_class_name_to_streaked(self, remote_db_factory):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.fetch.return_value = [{"id": 77, "img_name": "img_001.png"}]
+        local_db.execute.return_value = 1
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_forward_scan_ratio=1.0,
+                remote_db_success_interval_sec=0.0,
+                remote_db_idle_backoff_sec=2.0,
+                remote_db_error_backoff_sec=7.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        controller._recalculate_piece_result = MagicMock()
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = [
+            {"id": 101, "img_name": "img_001.png", "class_name": "NOK", "confidence": 0.9321}
+        ]
+        remote_db.execute.return_value = 1
+        remote_db_factory.return_value = remote_db
+
+        delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(delay, 0.0)
+        self.assertEqual(local_db.execute.call_count, 1)
+        self.assertEqual(
+            local_db.execute.call_args_list[0].args,
+            (
+                "INSERT INTO classified_image_defects "
+                "(classified_image_id, class_name, confidence) "
+                "VALUES (%s, %s, %s) "
+                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+                (77, "STREAKED", 0.9321),
+            ),
+        )
+
+    @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_skips_when_table_is_missing(self, remote_db_factory):
         display = self._build_display()
         display.db = self._build_db_client()
