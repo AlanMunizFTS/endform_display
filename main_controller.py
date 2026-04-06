@@ -23,6 +23,7 @@ from paths_config import (
     TMP_DISPLAY_DIR,
 )
 from sftp_app import SFTPApp
+from settings import is_remote_db_enabled
 from utilities.log import get_logger, install_print_logger
 from state_package import export_display_state, import_display_state
 
@@ -452,7 +453,7 @@ class ControllerConfig:
     live_batch_rotation_interval_sec: float = 1.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
-    remote_db_polling_enabled: bool = True
+    remote_db_polling_enabled: bool = field(default_factory=is_remote_db_enabled)
     remote_db_table: str = "model_results"
     remote_db_columns: tuple = ("img_name", "class_name", "confidence")
     remote_db_query_limit: int = 25
@@ -689,12 +690,19 @@ class MainController:
             if row.get("img_name") and row.get("id") is not None
         }
 
+    def _normalize_remote_defect_class_name(self, class_name):
+        normalized = str(class_name or "").strip()
+        if normalized.upper() == "NOK":
+            return "STREAKED"
+        return normalized
+
     def _insert_local_classification_defects(self, local_db, matched_rows):
         synced_img_names = []
         synced_remote_ids = []
         recalculated_jsns = set()
         for row in matched_rows:
             img_name = row["img_name"]
+            class_name = self._normalize_remote_defect_class_name(row.get("class_name"))
             local_db.execute(
                 "INSERT INTO classified_image_defects "
                 "(classified_image_id, class_name, confidence) "
@@ -702,7 +710,7 @@ class MainController:
                 "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
                 (
                     row["classified_image_id"],
-                    row.get("class_name"),
+                    class_name,
                     row.get("confidence"),
                 ),
             )
@@ -1153,10 +1161,6 @@ class MainController:
                         worker_db = get_db_connection()
                         self._register_local_images_in_db(captured_dir, db_client=worker_db)
                         self._backfill_piece_result(db_client=worker_db)
-                        self.save_classification_results(
-                            historic_dir=self._get_export_historic_dir(),
-                            db_client=worker_db,
-                        )
                     except Exception as exc:
                         print(f"Error in register worker: {exc}")
                     finally:
@@ -1307,6 +1311,7 @@ class MainController:
                     historic_dir=historic_dir,
                     progress_callback=_classification_progress_cb,
                     visible_images_snapshot=visible_images_snapshot,
+                    export_stats_report=True,
                 )
 
                 def _verify_progress_cb(done, total, stage):
@@ -3291,16 +3296,6 @@ class MainController:
             if callable(progress_callback):
                 progress_callback(idx, total_rows, "Saving dataset")
 
-        # Ensure piece_result is up-to-date for the current dataset.
-        # This updates FOK/FNOK counts in the stats card based on DB state.
-        save_res = self.save_classification_results(
-            db_client=db,
-            historic_dir=historic_dir,
-            visible_images_snapshot=visible_images_snapshot,
-        )
-        if not save_res.get("ok", False):
-            print(f"Warning: saving classification results failed: {save_res.get('error')}")
-
         return {
             "ok": True,
             "rows": total_rows,
@@ -3310,7 +3305,6 @@ class MainController:
             "errors": error_count,
             "visible_images": len(visible_images),
             "visible_images_snapshot": visible_images_snapshot,
-            "save_classification": save_res,
         }
 
     def save_classification_results(
@@ -3319,6 +3313,7 @@ class MainController:
         historic_dir=None,
         progress_callback=None,
         visible_images_snapshot=None,
+        export_stats_report=False,
     ):
         """Copy images to final_classification folders (P/N/FP/FN per position).
 
@@ -3466,19 +3461,20 @@ class MainController:
                 + "; ".join(all_errors[:5])
             )
 
-        try:
-            from report_exporter import export_stats_report
+        if export_stats_report:
+            try:
+                from report_exporter import export_stats_report
 
-            result["stats_report_path"] = export_stats_report(
-                self,
-                db_client=db,
-            )
-        except Exception as exc:
-            result["stats_report_error"] = str(exc)
-            self.logger.warn(
-                f"[SYNC] Stats report export failed: {exc}",
-                allow_repeat=True,
-            )
+                result["stats_report_path"] = export_stats_report(
+                    self,
+                    db_client=db,
+                )
+            except Exception as exc:
+                result["stats_report_error"] = str(exc)
+                self.logger.warn(
+                    f"[SYNC] Stats report export failed: {exc}",
+                    allow_repeat=True,
+                )
 
         return result
 

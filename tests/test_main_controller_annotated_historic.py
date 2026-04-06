@@ -127,7 +127,36 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             self.assertIn("classification_folder_errors", result)
             self.assertIn(f"Source missing: {img_name}", result["classification_folder_errors"])
 
-    def test_save_classification_results_returns_stats_report_path(self):
+    def test_save_classification_results_skips_stats_report_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            (historic_dir / img_name).write_bytes(b"historic")
+
+            db = MagicMock()
+            db.fetch.return_value = [{"img_name": img_name, "result": "OK"}]
+
+            controller = MainController(
+                display=self._build_display(db=db),
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+
+            with patch("main_controller.FINAL_CLASSIFICATION_DIR", tmp_path / "final_classification"), patch(
+                "report_exporter.export_stats_report"
+            ) as mock_export:
+                result = controller.save_classification_results(
+                    db_client=db,
+                    historic_dir=str(historic_dir),
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertNotIn("stats_report_path", result)
+            mock_export.assert_not_called()
+
+    def test_save_classification_results_returns_stats_report_path_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             historic_dir = tmp_path / "historic"
@@ -152,6 +181,7 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
                 result = controller.save_classification_results(
                     db_client=db,
                     historic_dir=str(historic_dir),
+                    export_stats_report=True,
                 )
 
             self.assertTrue(result["ok"])

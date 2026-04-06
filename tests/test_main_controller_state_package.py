@@ -168,6 +168,34 @@ class TestMainControllerStatePackage(unittest.TestCase):
             controller._backfill_piece_result.assert_not_called()
             controller.save_classification_results.assert_not_called()
 
+    @patch("main_controller.Thread", _ImmediateThread)
+    def test_check_and_register_new_historic_images_does_not_export_report(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            annotated_dir = Path(tmp_dir) / "annotated"
+            annotated_dir.mkdir()
+            (annotated_dir / "11861_test_side_OK.png").write_bytes(b"image")
+
+            fake_db = MagicMock()
+            display = self._build_display(db=MagicMock())
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+            )
+            controller.last_historic_mtime = 100.0
+            controller.file_manager.getmtime = MagicMock(return_value=200.0)
+            controller._register_local_images_in_db = MagicMock()
+            controller._backfill_piece_result = MagicMock()
+            controller.save_classification_results = MagicMock(return_value={"ok": True})
+
+            with patch("db.get_db_connection", return_value=fake_db):
+                controller._check_and_register_new_historic_images()
+
+            controller.save_classification_results.assert_called_once()
+            self.assertFalse(
+                controller.save_classification_results.call_args.kwargs["export_stats_report"]
+            )
+            fake_db.close.assert_called()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
