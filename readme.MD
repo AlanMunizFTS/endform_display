@@ -130,6 +130,5 @@ venv\scripts\activate
 pip install -r requirements.txt 
 docker compose up -d postgres pgadmin
 
-
-
-
+Command for Vision postrgres:
+sudo docker exec -it postgres-vision psql -U postgres
