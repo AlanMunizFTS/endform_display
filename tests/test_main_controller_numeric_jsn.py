@@ -101,17 +101,27 @@ class TestMainControllerNumericJsn(unittest.TestCase):
                 [["22700001_side_OK.png"], ["1004_side_cam1.png"]],
             )
 
-    def test_download_images_background_worker_filters_numeric_jsn_files(self):
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_download_images_background_worker_downloads_only_jsns_ready_in_remote_db(
+        self, remote_db_factory
+    ):
         stop_event = Event()
         fake_logger = MagicMock()
         fake_sftp_client = MagicMock()
         fake_ssh_client = MagicMock()
         fake_ssh_client.open_sftp.return_value = fake_sftp_client
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = [
+            {"jsn": "22700003"},
+            {"jsn": "22700001"},
+        ]
+        remote_db_factory.return_value = remote_db
 
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = []
         fake_manager.sftp_listdir.return_value = [
+            "22700003_front_OK.png",
             "22700003_side_OK.png",
             "22700002_side_OK.png",
             "22700001_side_OK.png",
@@ -121,8 +131,12 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         ]
         fake_manager.join.side_effect = lambda directory, name: str(Path(directory) / name)
 
+        download_counter = {"count": 0}
+
         def _fake_get(_client, _remote_name, _local_name):
-            stop_event.set()
+            download_counter["count"] += 1
+            if download_counter["count"] >= 3:
+                stop_event.set()
 
         fake_manager.sftp_get.side_effect = _fake_get
 
@@ -156,7 +170,76 @@ class TestMainControllerNumericJsn(unittest.TestCase):
 
         self.assertEqual(
             [call.args[1] for call in fake_manager.sftp_get.call_args_list],
-            ["22700001_side_OK.png"],
+            [
+                "22700003_side_OK.png",
+                "22700003_front_OK.png",
+                "22700001_side_OK.png",
+            ],
+        )
+        remote_db_factory.assert_called_once_with(
+            ssh_host="host",
+            ssh_port=22,
+            ssh_username="user",
+            ssh_password="pwd",
+        )
+        remote_db.fetch.assert_called_once_with(
+            'SELECT CAST("jsn" AS TEXT) AS jsn FROM "pieces_out" WHERE CAST("jsn" AS TEXT) = ANY(%s) AND "status" = %s',
+            (["22700003", "22700002", "22700001"], 1),
+        )
+        remote_db.close.assert_called_once_with()
+
+    @patch("db.get_remote_db_connection_via_ssh", side_effect=RuntimeError("db down"))
+    def test_download_images_background_worker_skips_download_when_remote_db_fails(
+        self, _remote_db_factory
+    ):
+        stop_event = Event()
+        fake_logger = MagicMock()
+        fake_logger.error.side_effect = lambda *args, **kwargs: stop_event.set()
+        fake_sftp_client = MagicMock()
+        fake_ssh_client = MagicMock()
+        fake_ssh_client.open_sftp.return_value = fake_sftp_client
+
+        fake_manager = MagicMock()
+        fake_manager.exists.return_value = True
+        fake_manager.listdir.return_value = []
+        fake_manager.sftp_listdir.return_value = [
+            "22700003_side_OK.png",
+            "22700002_side_OK.png",
+            "readme.txt",
+        ]
+        fake_manager.join.side_effect = lambda directory, name: str(Path(directory) / name)
+
+        fake_paramiko = types.SimpleNamespace(
+            SSHClient=MagicMock(return_value=fake_ssh_client),
+            AutoAddPolicy=MagicMock(return_value=object()),
+        )
+
+        with patch("main_controller.install_print_logger"), patch(
+            "main_controller.get_logger",
+            return_value=fake_logger,
+        ), patch(
+            "main_controller.FileManager",
+            return_value=fake_manager,
+        ), patch.dict(
+            sys.modules,
+            {"paramiko": fake_paramiko},
+        ):
+            _download_images_background_worker(
+                hostname="host",
+                port=22,
+                username="user",
+                password="pwd",
+                remote_dir="/remote",
+                local_temp_dir="C:\\tmp\\images",
+                check_interval=0,
+                reconnect_interval=0,
+                stop_event=stop_event,
+                worker_label="TEST_SYNC",
+            )
+
+        fake_manager.sftp_get.assert_not_called()
+        self.assertTrue(
+            any("Remote DB validation failed" in str(call.args[0]) for call in fake_logger.error.call_args_list)
         )
 
 

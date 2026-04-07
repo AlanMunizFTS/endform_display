@@ -43,6 +43,10 @@ class TestDisplayWindowHistoricDownload(unittest.TestCase):
             self.assertEqual(historic_args[7], 10)
             self.assertIs(historic_args[8], fake_event)
             self.assertEqual(historic_args[9], "HIST_SYNC_SSH")
+            self.assertEqual(historic_args[10], "pieces_out")
+            self.assertEqual(historic_args[11], "jsn")
+            self.assertEqual(historic_args[12], "status")
+            self.assertEqual(historic_args[13], 1)
 
             annotated_args = process_cls.call_args_list[1].kwargs["args"]
             self.assertEqual(annotated_args[0], "host")
@@ -52,6 +56,10 @@ class TestDisplayWindowHistoricDownload(unittest.TestCase):
             self.assertEqual(annotated_args[6], 11)
             self.assertEqual(annotated_args[7], 10)
             self.assertEqual(annotated_args[9], "ANNOTATED_SYNC_SSH")
+            self.assertEqual(annotated_args[10], "pieces_out")
+            self.assertEqual(annotated_args[11], "jsn")
+            self.assertEqual(annotated_args[12], "status")
+            self.assertEqual(annotated_args[13], 1)
 
             self.assertTrue(fake_process.daemon)
             self.assertEqual(fake_process.start.call_count, 2)

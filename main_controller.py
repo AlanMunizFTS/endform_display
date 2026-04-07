@@ -47,6 +47,49 @@ def _extract_numeric_jsn(filename):
     return jsn if jsn.isdigit() else None
 
 
+def _quote_sql_identifier(identifier):
+    parts = [part.strip() for part in str(identifier).split(".")]
+    if not parts or any(not part for part in parts):
+        raise ValueError(f"Invalid SQL identifier: {identifier!r}")
+    return ".".join(f'"{part.replace(chr(34), chr(34) * 2)}"' for part in parts)
+
+
+def _fetch_remote_ready_jsns(
+    hostname,
+    port,
+    username,
+    password,
+    candidate_jsns,
+    remote_db_table="pieces_out",
+    remote_db_jsn_column="jsn",
+    remote_db_status_column="status",
+    remote_db_required_status=1,
+):
+    if not candidate_jsns:
+        return set()
+
+    from db import get_remote_db_connection_via_ssh
+
+    remote_db = get_remote_db_connection_via_ssh(
+        ssh_host=hostname,
+        ssh_port=port,
+        ssh_username=username,
+        ssh_password=password,
+    )
+    try:
+        table_name = _quote_sql_identifier(remote_db_table)
+        jsn_column = _quote_sql_identifier(remote_db_jsn_column)
+        status_column = _quote_sql_identifier(remote_db_status_column)
+        rows = remote_db.fetch(
+            f"SELECT CAST({jsn_column} AS TEXT) AS jsn FROM {table_name} "
+            f"WHERE CAST({jsn_column} AS TEXT) = ANY(%s) AND {status_column} = %s",
+            (list(candidate_jsns), remote_db_required_status),
+        )
+        return {str(row.get('jsn')) for row in (rows or []) if row.get("jsn") is not None}
+    finally:
+        remote_db.close()
+
+
 def _sleep_with_stop(stop_event, seconds):
     if seconds <= 0:
         return
@@ -69,6 +112,10 @@ def _download_images_background_worker(
     reconnect_interval=10,
     stop_event=None,
     worker_label="HIST_SYNC_SSH",
+    remote_db_table="pieces_out",
+    remote_db_jsn_column="jsn",
+    remote_db_status_column="status",
+    remote_db_required_status=1,
     verbose=False,
 ):
     import paramiko
@@ -146,25 +193,49 @@ def _download_images_background_worker(
                     if f.lower().endswith(image_extensions) and _extract_numeric_jsn(f) is not None
                 ]
 
-                jsn_groups = defaultdict(list)
-                for img in all_remote_images:
+                missing_remote_images = [
+                    img for img in all_remote_images if img not in existing_local
+                ]
+
+                candidate_jsn_groups = defaultdict(list)
+                for img in missing_remote_images:
                     jsn = _extract_numeric_jsn(img)
                     if jsn is None:
                         continue
-                    jsn_groups[jsn].append(img)
+                    candidate_jsn_groups[jsn].append(img)
 
-                sorted_jsns = sorted(jsn_groups.keys(), reverse=True)
-                excluded_jsns = set(sorted_jsns[:2]) if len(sorted_jsns) >= 2 else set()
+                candidate_jsns = sorted(candidate_jsn_groups.keys(), key=int, reverse=True)
+                if candidate_jsns:
+                    try:
+                        approved_jsns = _fetch_remote_ready_jsns(
+                            hostname=hostname,
+                            port=port,
+                            username=username,
+                            password=password,
+                            candidate_jsns=candidate_jsns,
+                            remote_db_table=remote_db_table,
+                            remote_db_jsn_column=remote_db_jsn_column,
+                            remote_db_status_column=remote_db_status_column,
+                            remote_db_required_status=remote_db_required_status,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            f"[{worker_label}] Remote DB validation failed for {remote_db_table}: {exc}",
+                            allow_repeat=True,
+                        )
+                        _sleep_with_stop(stop_event, check_interval)
+                        continue
+                else:
+                    approved_jsns = set()
 
-                filtered_images = [
-                    img
-                    for img in all_remote_images
-                    if _extract_numeric_jsn(img) not in excluded_jsns
-                ]
-
-                images_to_download = [
-                    img for img in filtered_images if img not in existing_local
-                ]
+                skipped_jsns = [jsn for jsn in candidate_jsns if jsn not in approved_jsns]
+                images_to_download = []
+                for jsn in candidate_jsns:
+                    if jsn not in approved_jsns:
+                        continue
+                    images_to_download.extend(
+                        sorted(candidate_jsn_groups[jsn], key=_display_sort_key)
+                    )
 
                 downloaded_count = 0
                 for img in images_to_download:
@@ -174,9 +245,18 @@ def _download_images_background_worker(
                     file_manager.sftp_get(sftp_client, img, local_file)
                     downloaded_count += 1
 
-                if downloaded_count:
+                logger.info(
+                    f"[{worker_label}] Sync summary: "
+                    f"remote_images={len(all_remote_images)}, "
+                    f"candidate_jsns={len(candidate_jsns)}, "
+                    f"approved_jsns={len(approved_jsns)}, "
+                    f"downloaded={downloaded_count}",
+                    allow_repeat=True,
+                )
+                if skipped_jsns:
                     logger.info(
-                        f"[{worker_label}] Downloaded {downloaded_count} new images",
+                        f"[{worker_label}] Skipped JSNs not ready in remote DB: "
+                        + ", ".join(skipped_jsns[:10]),
                         allow_repeat=True,
                     )
 
@@ -484,6 +564,10 @@ class ControllerConfig:
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
     remote_annotated_dir: str = REMOTE_ANNOTATED_DIR
+    historic_gate_remote_db_table: str = "pieces_out"
+    historic_gate_remote_db_jsn_column: str = "jsn"
+    historic_gate_remote_db_status_column: str = "status"
+    historic_gate_remote_db_required_status: int = 1
     display_cols: int = 4
     display_rows: int = 2
     historic_download_check_interval: int = 10
@@ -2887,6 +2971,10 @@ class MainController:
                         10,
                         stop_event,
                         worker_label,
+                        self.config.historic_gate_remote_db_table,
+                        self.config.historic_gate_remote_db_jsn_column,
+                        self.config.historic_gate_remote_db_status_column,
+                        self.config.historic_gate_remote_db_required_status,
                     ),
                 )
                 process.daemon = True
