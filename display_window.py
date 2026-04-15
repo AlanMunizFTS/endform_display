@@ -684,6 +684,159 @@ class DisplayWindow:
             truncated = truncated[:-1]
         return ellipsis
 
+    def _wrap_text_to_width(self, text, font, font_scale, thickness, max_width, max_lines=None):
+        """Wrap text into lines that fit the available pixel width."""
+        display_text = str(text or "").strip()
+        if not display_text:
+            return []
+
+        words = display_text.split()
+        if not words:
+            return [display_text]
+
+        lines = []
+        current_line = ""
+
+        for word in words:
+            candidate = f"{current_line} {word}".strip()
+            candidate_width = cv2.getTextSize(candidate, font, font_scale, thickness)[0][0]
+            if candidate_width <= max_width:
+                current_line = candidate
+                continue
+
+            if current_line:
+                lines.append(current_line)
+                current_line = word
+            else:
+                lines.append(self._truncate_text_to_width(word, font, font_scale, thickness, max_width))
+                current_line = ""
+
+        if current_line:
+            if cv2.getTextSize(current_line, font, font_scale, thickness)[0][0] > max_width:
+                current_line = self._truncate_text_to_width(current_line, font, font_scale, thickness, max_width)
+            lines.append(current_line)
+
+        if max_lines is not None and len(lines) > max_lines:
+            overflow_text = " ".join(lines[max_lines - 1:])
+            lines = lines[: max_lines - 1] + [
+                self._truncate_text_to_width(overflow_text, font, font_scale, thickness, max_width)
+            ]
+
+        return lines
+
+    def _prepare_wrapped_text_block(
+        self,
+        paragraphs,
+        font,
+        font_scale,
+        thickness,
+        max_width,
+        line_spacing=40,
+        max_lines_per_paragraph=None,
+    ):
+        """Wrap one or more paragraphs and return metrics for dynamic dialog layout."""
+        if isinstance(paragraphs, str):
+            paragraphs = [paragraphs]
+
+        lines = []
+        for paragraph in paragraphs or []:
+            paragraph_text = str(paragraph or "").strip()
+            if not paragraph_text:
+                continue
+            wrapped = self._wrap_text_to_width(
+                paragraph_text,
+                font,
+                font_scale,
+                thickness,
+                max_width,
+                max_lines=max_lines_per_paragraph,
+            )
+            if wrapped:
+                lines.extend(wrapped)
+
+        line_height = cv2.getTextSize("Ag", font, font_scale, thickness)[0][1]
+        max_line_width = 0
+        for line in lines:
+            max_line_width = max(max_line_width, cv2.getTextSize(line, font, font_scale, thickness)[0][0])
+
+        if not lines:
+            text_height = 0
+        else:
+            text_height = line_height + ((len(lines) - 1) * line_spacing)
+
+        return {
+            "lines": lines,
+            "line_height": line_height,
+            "line_spacing": line_spacing,
+            "text_width": max_line_width,
+            "text_height": text_height,
+        }
+
+    def _draw_text_lines(self, canvas, lines, x, first_baseline_y, font, font_scale, color, thickness, line_spacing=40):
+        """Draw a list of lines using a stable baseline spacing."""
+        for idx, line in enumerate(lines or []):
+            cv2.putText(
+                canvas,
+                line,
+                (x, first_baseline_y + (idx * line_spacing)),
+                font,
+                font_scale,
+                color,
+                thickness,
+            )
+        return canvas
+
+    def _draw_modal_frame(
+        self,
+        canvas,
+        dialog_width,
+        dialog_height,
+        overlay_alpha=0.5,
+        fill_color=(240, 240, 240),
+        border_color=(0, 0, 0),
+        border_width=3,
+    ):
+        """Draw a centered modal frame and return its position."""
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, overlay_alpha, canvas, 1.0 - overlay_alpha, 0, canvas)
+
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            fill_color,
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (dialog_x, dialog_y),
+            (dialog_x + dialog_width, dialog_y + dialog_height),
+            border_color,
+            border_width,
+        )
+        return canvas, dialog_x, dialog_y
+
+    def _draw_modal_button(self, canvas, rect, label, fill_color, font_scale=0.7, thickness=2):
+        """Draw a modal button with the shared hover/press behavior."""
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        x_btn, y_btn, w_btn, h_btn = self._scale_rect(rect, scale_factor)
+
+        cv2.rectangle(canvas, (x_btn, y_btn), (x_btn + w_btn, y_btn + h_btn), fill_color, -1)
+        cv2.rectangle(canvas, (x_btn, y_btn), (x_btn + w_btn, y_btn + h_btn), (0, 0, 0), 2)
+
+        label_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+        label_x = x_btn + (w_btn - label_size[0]) // 2
+        label_y = y_btn + (h_btn + label_size[1]) // 2
+        cv2.putText(canvas, label, (label_x, label_y), font, font_scale, (255, 255, 255), thickness)
+        return canvas
+
     def _can_track_stats_long_press(self):
         return (
             self.stats_card_rect is not None
@@ -755,17 +908,18 @@ class DisplayWindow:
         )
 
         font = cv2.FONT_HERSHEY_SIMPLEX
+        title_font = cv2.FONT_HERSHEY_DUPLEX
         title = "Piece Breakdown"
-        title_scale = 1.0
-        title_thickness = 3
-        title_size = cv2.getTextSize(title, font, title_scale, title_thickness)[0]
+        title_scale = 0.92
+        title_thickness = 2
+        title_size = cv2.getTextSize(title, title_font, title_scale, title_thickness)[0]
         title_x = dialog_x + (dialog_width - title_size[0]) // 2
         title_y = dialog_y + 52
         cv2.putText(
             canvas,
             title,
             (title_x, title_y),
-            font,
+            title_font,
             title_scale,
             (0, 0, 0),
             title_thickness,
@@ -1092,6 +1246,7 @@ class DisplayWindow:
             panel_x = dialog_x + 35
             panel_w = (dialog_width - 70 - panel_gap) // 2
             header_h = 46
+            summary_panel_top_offset = 24
 
             def draw_summary_panel(
                 panel_left,
@@ -1102,11 +1257,14 @@ class DisplayWindow:
                 rect_target,
                 empty_text,
                 use_status_colors=False,
+                top_offset=0,
             ):
+                panel_top = panel_y + top_offset
+                panel_height = max(140, panel_h - top_offset)
                 cv2.putText(
                     canvas,
                     panel_title,
-                    (panel_left + 6, panel_y - 14),
+                    (panel_left + 6, panel_top - 14),
                     font,
                     0.76,
                     (35, 35, 35),
@@ -1115,22 +1273,22 @@ class DisplayWindow:
 
                 cv2.rectangle(
                     canvas,
-                    (panel_left, panel_y),
-                    (panel_left + panel_w, panel_y + panel_h),
+                    (panel_left, panel_top),
+                    (panel_left + panel_w, panel_top + panel_height),
                     (230, 230, 230),
                     -1,
                 )
                 cv2.rectangle(
                     canvas,
-                    (panel_left, panel_y),
-                    (panel_left + panel_w, panel_y + panel_h),
+                    (panel_left, panel_top),
+                    (panel_left + panel_w, panel_top + panel_height),
                     (120, 120, 120),
                     2,
                 )
                 cv2.rectangle(
                     canvas,
-                    (panel_left + 2, panel_y + 2),
-                    (panel_left + panel_w - 2, panel_y + header_h),
+                    (panel_left + 2, panel_top + 2),
+                    (panel_left + panel_w - 2, panel_top + header_h),
                     (65, 65, 65),
                     -1,
                 )
@@ -1138,7 +1296,7 @@ class DisplayWindow:
                 cv2.putText(
                     canvas,
                     left_header,
-                    (panel_left + 20, panel_y + 31),
+                    (panel_left + 20, panel_top + 31),
                     font,
                     0.72,
                     (255, 255, 255),
@@ -1149,7 +1307,7 @@ class DisplayWindow:
                 cv2.putText(
                     canvas,
                     count_label,
-                    (panel_left + panel_w - 20 - count_label_size[0], panel_y + 31),
+                    (panel_left + panel_w - 20 - count_label_size[0], panel_top + 31),
                     font,
                     0.72,
                     (255, 255, 255),
@@ -1157,7 +1315,7 @@ class DisplayWindow:
                 )
 
                 row_h = 38
-                max_rows = max(1, (panel_h - header_h - 18) // row_h)
+                max_rows = max(1, (panel_height - header_h - 18) // row_h)
                 all_rows = list(rows or [])
                 total_row = all_rows[-1] if all_rows and all_rows[-1].get("is_total") else None
                 data_rows = all_rows[:-1] if total_row else all_rows
@@ -1171,13 +1329,13 @@ class DisplayWindow:
                 if not visible_rows:
                     empty_size = cv2.getTextSize(empty_text, font, 0.75, 2)[0]
                     empty_x = panel_left + (panel_w - empty_size[0]) // 2
-                    empty_y = panel_y + header_h + (panel_h - header_h) // 2
+                    empty_y = panel_top + header_h + (panel_height - header_h) // 2
                     cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.75, (70, 70, 70), 2)
                     return
 
                 label_max_width = panel_w - 170
                 for idx, row in enumerate(visible_rows):
-                    row_top = panel_y + header_h + 8 + idx * row_h
+                    row_top = panel_top + header_h + 8 + idx * row_h
                     row_bottom = row_top + row_h - 4
                     row_rect = (panel_left + 8, row_top, panel_w - 16, row_bottom - row_top)
                     label_value = str(row.get(key_name) or "N/A")
@@ -1231,7 +1389,7 @@ class DisplayWindow:
                     cv2.putText(
                         canvas,
                         more_text,
-                        (panel_left + 16, panel_y + panel_h - 14),
+                        (panel_left + 16, panel_top + panel_height - 14),
                         font,
                         0.6,
                         (90, 90, 90),
@@ -1247,6 +1405,7 @@ class DisplayWindow:
                     "class_name",
                     self.stats_class_modal_class_row_rects,
                     "No class data available",
+                    top_offset=summary_panel_top_offset,
                 )
                 draw_summary_panel(
                     panel_x + panel_w + panel_gap,
@@ -1257,6 +1416,7 @@ class DisplayWindow:
                     self.stats_class_modal_status_row_rects,
                     "No result data available",
                     use_status_colors=True,
+                    top_offset=summary_panel_top_offset,
                 )
             else:
                 table_x = dialog_x + 45
@@ -2837,31 +2997,46 @@ class DisplayWindow:
             self.sync_message = ""
             return canvas
 
-        # Dialog dimensions (based on warning dialog style)
-        dialog_width = 700
-        dialog_height = 220
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 3
+        line_spacing = 44
+        icon_diameter = 60
+        left_pad = 45
+        right_pad = 45
+        text_gap = 30
+        top_pad = 34
+        bottom_pad = 34
 
-        # Semi-transparent overlay
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+        message_block = self._prepare_wrapped_text_block(
+            self.sync_message.strip(),
+            font,
+            font_scale,
+            thickness,
+            max_width=max(320, int(self.width * 0.62)),
+            line_spacing=line_spacing,
+            max_lines_per_paragraph=4,
+        )
+        dialog_width = min(
+            max(520, left_pad + icon_diameter + text_gap + message_block["text_width"] + right_pad),
+            int(self.width * 0.82),
+        )
+        body_height = max(icon_diameter, message_block["text_height"])
+        dialog_height = max(180, top_pad + body_height + bottom_pad)
 
-        # Dialog background
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (240, 240, 240), -1)
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (0, 0, 0), 3)
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.5,
+        )
 
-        # Status icon
-        icon_x = dialog_x + 60
-        icon_y = dialog_y + 80
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (body_height // 2)
         icon_color = (0, 0, 200) if self.sync_message_is_error else (0, 150, 0)
         cv2.circle(canvas, (icon_x, icon_y), 30, icon_color, -1)
         cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
         icon_text = "!" if self.sync_message_is_error else "OK"
         icon_scale = 1.0 if self.sync_message_is_error else 1.1
         icon_thickness = 3
@@ -2878,32 +3053,20 @@ class DisplayWindow:
             icon_thickness,
         )
 
-        # Message text (word-wrapped in up to 2 lines)
-        text_x = dialog_x + 130
-        text_y = dialog_y + 80
-        message = self.sync_message.strip()
-
-        words = message.split()
-        line1_words = []
-        line2_words = []
-        max_line_width = 520
-        for word in words:
-            candidate = " ".join(line1_words + [word]).strip()
-            width = cv2.getTextSize(candidate, font, 1.15, 3)[0][0]
-            if width <= max_line_width or not line1_words:
-                line1_words.append(word)
-            else:
-                line2_words.append(word)
-
-        line1 = " ".join(line1_words) if line1_words else message
-        line2 = " ".join(line2_words)
-
-        font_scale = 1.15
-        thickness = 3
-
-        cv2.putText(canvas, line1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
-        if line2:
-            cv2.putText(canvas, line2, (text_x, text_y + 50), font, font_scale, (0, 0, 0), thickness)
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        text_top = dialog_y + top_pad + max(0, (body_height - message_block["text_height"]) // 2)
+        first_line_y = text_top + message_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            message_block["lines"],
+            text_x,
+            first_line_y,
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            line_spacing=line_spacing,
+        )
 
         return canvas
 
@@ -3017,61 +3180,115 @@ class DisplayWindow:
         if not self.reset_in_progress:
             return canvas
 
-        dialog_width = 760
-        dialog_height = 250
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.58, canvas, 0.42, 0, canvas)
-
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (245, 245, 245),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (0, 0, 0),
-            3,
-        )
-
         font = cv2.FONT_HERSHEY_SIMPLEX
         title = self.reset_progress_title or "Resetting Dataset"
+        stage_text = self.reset_stage or "Working..."
+        helper_text = self.reset_progress_helper_text or "Please wait until the process finishes."
         title_scale = 1.1
         title_thickness = 3
-        cv2.putText(
-            canvas,
+        stage_scale = 0.85
+        stage_thickness = 2
+        helper_scale = 0.7
+        helper_thickness = 2
+        left_pad = 35
+        right_pad = 35
+        top_pad = 28
+        bottom_pad = 24
+        title_gap = 18
+        stage_gap = 16
+        progress_gap = 18
+        helper_gap = 18
+        title_spacing = 42
+        stage_spacing = 34
+        helper_spacing = 30
+
+        title_block = self._prepare_wrapped_text_block(
             title,
-            (dialog_x + 35, dialog_y + 58),
+            font,
+            title_scale,
+            title_thickness,
+            max_width=max(320, int(self.width * 0.5)),
+            line_spacing=title_spacing,
+            max_lines_per_paragraph=2,
+        )
+        stage_block = self._prepare_wrapped_text_block(
+            stage_text,
+            font,
+            stage_scale,
+            stage_thickness,
+            max_width=max(360, int(self.width * 0.62)),
+            line_spacing=stage_spacing,
+            max_lines_per_paragraph=3,
+        )
+        helper_block = self._prepare_wrapped_text_block(
+            helper_text,
+            font,
+            helper_scale,
+            helper_thickness,
+            max_width=max(360, int(self.width * 0.62)),
+            line_spacing=helper_spacing,
+            max_lines_per_paragraph=3,
+        )
+
+        content_width = max(
+            title_block["text_width"],
+            stage_block["text_width"],
+            helper_block["text_width"],
+            420,
+        )
+        dialog_width = min(
+            max(760, left_pad + content_width + right_pad),
+            int(self.width * 0.86),
+        )
+        bar_w = dialog_width - (left_pad + right_pad)
+        bar_h = 34
+        content_height = (
+            title_block["text_height"]
+            + title_gap
+            + stage_block["text_height"]
+            + progress_gap
+            + bar_h
+            + helper_gap
+            + helper_block["text_height"]
+        )
+        dialog_height = max(250, top_pad + content_height + bottom_pad)
+
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.58,
+            fill_color=(245, 245, 245),
+        )
+
+        title_y = dialog_y + top_pad + title_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            title_block["lines"],
+            dialog_x + left_pad,
+            title_y,
             font,
             title_scale,
             (0, 0, 0),
             title_thickness,
+            line_spacing=title_spacing,
         )
 
-        stage_text = self.reset_stage or "Working..."
-        stage_scale = 0.85
-        stage_thickness = 2
-        cv2.putText(
+        stage_y = title_y + title_block["text_height"] + title_gap
+        self._draw_text_lines(
             canvas,
-            stage_text,
-            (dialog_x + 35, dialog_y + 100),
+            stage_block["lines"],
+            dialog_x + left_pad,
+            stage_y,
             font,
             stage_scale,
             (40, 40, 40),
             stage_thickness,
+            line_spacing=stage_spacing,
         )
 
-        bar_x = dialog_x + 35
-        bar_y = dialog_y + 135
-        bar_w = dialog_width - 70
-        bar_h = 34
+        bar_x = dialog_x + left_pad
+        bar_y = stage_y + stage_block["text_height"] + progress_gap
         progress = max(0, min(100, int(self.reset_progress)))
         fill_w = int((bar_w * progress) / 100)
 
@@ -3092,15 +3309,17 @@ class DisplayWindow:
         pct_y = bar_y + bar_h - 8
         cv2.putText(canvas, pct_text, (pct_x, pct_y), font, 0.9, (255, 255, 255), 2)
 
-        helper_text = self.reset_progress_helper_text or "Please wait until the process finishes."
-        cv2.putText(
+        helper_y = bar_y + bar_h + helper_gap + helper_block["line_height"]
+        self._draw_text_lines(
             canvas,
-            helper_text,
-            (dialog_x + 35, dialog_y + 205),
+            helper_block["lines"],
+            dialog_x + left_pad,
+            helper_y,
             font,
-            0.7,
+            helper_scale,
             (30, 30, 30),
-            2,
+            helper_thickness,
+            line_spacing=helper_spacing,
         )
 
         return canvas
@@ -3110,504 +3329,392 @@ class DisplayWindow:
         if not self.db_blocking:
             return canvas
 
-        dialog_width = 950
-        dialog_height = 320
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.62, canvas, 0.38, 0, canvas)
-
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (240, 240, 240),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (0, 0, 0),
-            3,
-        )
-
         font = cv2.FONT_HERSHEY_SIMPLEX
-        icon_x = dialog_x + 80
-        icon_y = dialog_y + 78
-        cv2.circle(canvas, (icon_x, icon_y), 34, (0, 0, 200), -1)
-        cv2.circle(canvas, (icon_x, icon_y), 34, (0, 0, 0), 2)
-        cv2.putText(canvas, "!", (icon_x - 11, icon_y + 15), font, 1.8, (255, 255, 255), 4)
-
-        cv2.putText(
-            canvas,
-            "Database connection required",
-            (dialog_x + 135, dialog_y + 88),
-            font,
-            1.1,
-            (0, 0, 0),
-            3,
-        )
-
         message = (
             self.db_block_message
             or "PostgreSQL is disconnected. Start postgres and wait for automatic reconnect."
         )
-        cv2.putText(canvas, message, (dialog_x + 45, dialog_y + 160), font, 0.85, (20, 20, 20), 2)
-        cv2.putText(
-            canvas,
-            "User actions are locked until DB connection is restored.",
-            (dialog_x + 45, dialog_y + 205),
+        title_scale = 1.0
+        title_thickness = 3
+        title_spacing = 42
+        body_scale = 0.8
+        body_thickness = 2
+        body_spacing = 36
+        icon_diameter = 68
+        left_pad = 45
+        right_pad = 40
+        text_gap = 28
+        top_pad = 34
+        title_gap = 24
+        bottom_pad = 34
+
+        title_block = self._prepare_wrapped_text_block(
+            "Database connection required",
             font,
-            0.8,
-            (20, 20, 20),
-            2,
+            title_scale,
+            title_thickness,
+            max_width=max(320, int(self.width * 0.56)),
+            line_spacing=title_spacing,
+            max_lines_per_paragraph=2,
         )
-        cv2.putText(
-            canvas,
-            "Auto-reconnect is running...",
-            (dialog_x + 45, dialog_y + 248),
+        body_block = self._prepare_wrapped_text_block(
+            [
+                message,
+                "User actions are locked until DB connection is restored.",
+                "Auto-reconnect is running...",
+            ],
             font,
-            0.8,
+            body_scale,
+            body_thickness,
+            max_width=max(340, int(self.width * 0.62)),
+            line_spacing=body_spacing,
+            max_lines_per_paragraph=3,
+        )
+
+        text_width = max(title_block["text_width"], body_block["text_width"])
+        dialog_width = min(
+            max(700, left_pad + icon_diameter + text_gap + text_width + right_pad),
+            int(self.width * 0.85),
+        )
+        text_height = title_block["text_height"] + title_gap + body_block["text_height"]
+        body_height = max(icon_diameter, text_height)
+        dialog_height = max(250, top_pad + body_height + bottom_pad)
+
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.62,
+        )
+
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (icon_diameter // 2)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 0), 2)
+        cv2.putText(canvas, "!", (icon_x - 11, icon_y + 15), font, 1.8, (255, 255, 255), 4)
+
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        title_y = dialog_y + top_pad + title_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            title_block["lines"],
+            text_x,
+            title_y,
+            font,
+            title_scale,
+            (0, 0, 0),
+            title_thickness,
+            line_spacing=title_spacing,
+        )
+
+        body_y = title_y + title_block["text_height"] + title_gap
+        self._draw_text_lines(
+            canvas,
+            body_block["lines"],
+            text_x,
+            body_y,
+            font,
+            body_scale,
             (20, 20, 20),
-            2,
+            body_thickness,
+            line_spacing=body_spacing,
         )
 
         return canvas
     
     def draw_reset_confirmation_dialog(self, canvas):
         """Draw reset confirmation dialog"""
-        # Dialog dimensions
-        dialog_width = 600
-        dialog_height = 250
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-        
-        # Semi-transparent overlay
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
-        
-        # Dialog background
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (240, 240, 240), -1)
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (0, 0, 0), 3)
-        
-        # Warning icon (exclamation mark)
-        icon_x = dialog_x + 50
-        icon_y = dialog_y + 70
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 200), -1)
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
-        
-        # Exclamation mark
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 2.0, (255, 255, 255), 4)
-        
-        # Warning text
-        text_x = dialog_x + 120
-        text_y = dialog_y + 70
-        
-        warning_text1 = "Warning: This will reset DB and"
-        warning_text2 = "delete images in historic, annotated,"
-        warning_text3 = "classified, and final_classification."
-        warning_text4 = "Confirm reset operation?"
-        
-        font_scale = 1.0
+        font_scale = 0.95
         thickness = 2
-        
-        cv2.putText(canvas, warning_text1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text2, (text_x, text_y + 40), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text3, (text_x, text_y + 80), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text4, (text_x, text_y + 120), font, font_scale, (0, 0, 0), thickness)
-        
-        # Buttons
+        line_spacing = 38
+        icon_diameter = 60
+        left_pad = 45
+        right_pad = 35
+        text_gap = 28
+        top_pad = 32
+        button_gap = 28
+        bottom_pad = 30
+
+        body_block = self._prepare_wrapped_text_block(
+            [
+                "Warning: This will reset DB and delete images in historic, annotated, classified, and final_classification.",
+                "Confirm reset operation?",
+            ],
+            font,
+            font_scale,
+            thickness,
+            max_width=max(320, int(self.width * 0.52)),
+            line_spacing=line_spacing,
+            max_lines_per_paragraph=3,
+        )
+
         button_width = 150
         button_height = 50
         button_spacing = 30
-        buttons_y = dialog_y + dialog_height - button_height - 30
-        
-        # Cancel button (left)
+        dialog_width = min(
+            max(560, left_pad + icon_diameter + text_gap + body_block["text_width"] + right_pad),
+            int(self.width * 0.8),
+        )
+        body_height = max(icon_diameter, body_block["text_height"])
+        dialog_height = top_pad + body_height + button_gap + button_height + bottom_pad
+
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.5,
+        )
+
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (icon_diameter // 2)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 0), 2)
+        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 2.0, (255, 255, 255), 4)
+
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        text_y = dialog_y + top_pad + body_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            body_block["lines"],
+            text_x,
+            text_y,
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            line_spacing=line_spacing,
+        )
+
+        buttons_y = dialog_y + dialog_height - button_height - bottom_pad
         cancel_x = dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2)
         self.reset_cancel_button_rect = (cancel_x, buttons_y, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_cancel_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.reset_cancel_button_rect)
-        is_cancel_pressed = is_cancel_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor = 0.95 if is_cancel_pressed else (1.08 if is_cancel_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.reset_cancel_button_rect, scale_factor)
-        cancel_x_draw, buttons_y_draw, button_width_draw, button_height_draw = scaled_rect
-        
-        base_cancel_color = (150, 150, 150)
-        cancel_color = (150, 150, 150)
-        border_color_cancel = (0, 0, 0)
-        border_width_cancel = 2
-
-        cv2.rectangle(canvas, (cancel_x_draw, buttons_y_draw), (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-                     cancel_color, -1)
-        cv2.rectangle(canvas, (cancel_x_draw, buttons_y_draw), (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-                     border_color_cancel, border_width_cancel)
-        
-        cancel_text = "CANCEL"
-        font_scale_buttons = 0.7
-        text_size = cv2.getTextSize(cancel_text, font, font_scale_buttons, 2)[0]
-        text_x = cancel_x_draw + (button_width_draw - text_size[0]) // 2
-        text_y = buttons_y_draw + (button_height_draw + text_size[1]) // 2
-        cv2.putText(canvas, cancel_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
-        
-        # Confirm button (right)
         confirm_x = dialog_x + (dialog_width // 2) + (button_spacing // 2)
         self.reset_confirm_button_rect = (confirm_x, buttons_y, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_confirm_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.reset_confirm_button_rect)
-        is_confirm_pressed = is_confirm_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor_confirm = 0.95 if is_confirm_pressed else (1.08 if is_confirm_hovered else 1.0)
-        scaled_rect_confirm = self._scale_rect(self.reset_confirm_button_rect, scale_factor_confirm)
-        confirm_x_draw, buttons_y_draw_c, button_width_draw_c, button_height_draw_c = scaled_rect_confirm
-        
-        base_confirm_color = (0, 0, 200)
-        confirm_color = (0, 0, 200)
-        border_color_confirm = (0, 0, 0)
-        border_width_confirm = 2
-
-        cv2.rectangle(canvas, (confirm_x_draw, buttons_y_draw_c), (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-                     confirm_color, -1)
-        cv2.rectangle(canvas, (confirm_x_draw, buttons_y_draw_c), (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-                     border_color_confirm, border_width_confirm)
-        
-        confirm_text = "CONFIRM"
-        text_size = cv2.getTextSize(confirm_text, font, font_scale_buttons, 2)[0]
-        text_x = confirm_x_draw + (button_width_draw_c - text_size[0]) // 2
-        text_y = buttons_y_draw_c + (button_height_draw_c + text_size[1]) // 2
-        cv2.putText(canvas, confirm_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
+        self._draw_modal_button(canvas, self.reset_cancel_button_rect, "CANCEL", (150, 150, 150))
+        self._draw_modal_button(canvas, self.reset_confirm_button_rect, "CONFIRM", (0, 0, 200))
         
         return canvas
 
     def draw_rebuild_confirmation_dialog(self, canvas):
         """Draw rebuild-from-historic confirmation dialog."""
-        dialog_width = 860
-        dialog_height = 320
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
-
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (240, 240, 240),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (0, 0, 0),
-            3,
-        )
-
-        icon_x = dialog_x + 55
-        icon_y = dialog_y + 80
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 200), -1)
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
-
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 2.0, (255, 255, 255), 4)
-
-        text_x = dialog_x + 130
-        text_y = dialog_y + 62
         font_scale = 0.82
         thickness = 2
+        line_spacing = 36
+        icon_diameter = 60
+        left_pad = 45
+        right_pad = 35
+        text_gap = 28
+        top_pad = 32
+        button_gap = 28
+        bottom_pad = 30
 
-        warning_lines = [
-            "Rebuild the app database from annotated historic images?",
-            "This clears img_results, classified_images,",
-            "and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
-            "Classified and final folders will be preserved.",
-            "Historic images will be preserved.",
-        ]
-
-        for idx, line in enumerate(warning_lines):
-            cv2.putText(
-                canvas,
-                line,
-                (text_x, text_y + (idx * 38)),
-                font,
-                font_scale,
-                (0, 0, 0),
-                thickness,
-            )
+        body_block = self._prepare_wrapped_text_block(
+            [
+                "Rebuild the app database from annotated historic images?",
+                "This clears img_results, classified_images, and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
+                "Classified and final folders will be preserved.",
+                "Historic images will be preserved.",
+            ],
+            font,
+            font_scale,
+            thickness,
+            max_width=max(360, int(self.width * 0.58)),
+            line_spacing=line_spacing,
+            max_lines_per_paragraph=3,
+        )
 
         button_width = 170
         button_height = 52
         button_spacing = 30
-        buttons_y = dialog_y + dialog_height - button_height - 30
+        dialog_width = min(
+            max(700, left_pad + icon_diameter + text_gap + body_block["text_width"] + right_pad),
+            int(self.width * 0.86),
+        )
+        body_height = max(icon_diameter, body_block["text_height"])
+        dialog_height = top_pad + body_height + button_gap + button_height + bottom_pad
+
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.5,
+        )
+
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (icon_diameter // 2)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 0), 2)
+        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 2.0, (255, 255, 255), 4)
+
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        text_y = dialog_y + top_pad + body_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            body_block["lines"],
+            text_x,
+            text_y,
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            line_spacing=line_spacing,
+        )
+
+        buttons_y = dialog_y + dialog_height - button_height - bottom_pad
 
         cancel_x = dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2)
         self.rebuild_cancel_button_rect = (cancel_x, buttons_y, button_width, button_height)
 
-        is_cancel_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.rebuild_cancel_button_rect)
-        is_cancel_pressed = is_cancel_hovered and self.mouse_button_down
-        scale_factor = 0.95 if is_cancel_pressed else (1.08 if is_cancel_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.rebuild_cancel_button_rect, scale_factor)
-        cancel_x_draw, buttons_y_draw, button_width_draw, button_height_draw = scaled_rect
-
-        cv2.rectangle(
-            canvas,
-            (cancel_x_draw, buttons_y_draw),
-            (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-            (150, 150, 150),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (cancel_x_draw, buttons_y_draw),
-            (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-            (0, 0, 0),
-            2,
-        )
-
-        cancel_text = "CANCEL"
-        font_scale_buttons = 0.7
-        text_size = cv2.getTextSize(cancel_text, font, font_scale_buttons, 2)[0]
-        text_x = cancel_x_draw + (button_width_draw - text_size[0]) // 2
-        text_y = buttons_y_draw + (button_height_draw + text_size[1]) // 2
-        cv2.putText(canvas, cancel_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
-
         confirm_x = dialog_x + (dialog_width // 2) + (button_spacing // 2)
         self.rebuild_confirm_button_rect = (confirm_x, buttons_y, button_width, button_height)
-
-        is_confirm_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.rebuild_confirm_button_rect)
-        is_confirm_pressed = is_confirm_hovered and self.mouse_button_down
-        scale_factor_confirm = 0.95 if is_confirm_pressed else (1.08 if is_confirm_hovered else 1.0)
-        scaled_rect_confirm = self._scale_rect(self.rebuild_confirm_button_rect, scale_factor_confirm)
-        confirm_x_draw, buttons_y_draw_c, button_width_draw_c, button_height_draw_c = scaled_rect_confirm
-
-        cv2.rectangle(
-            canvas,
-            (confirm_x_draw, buttons_y_draw_c),
-            (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-            (0, 0, 200),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (confirm_x_draw, buttons_y_draw_c),
-            (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-            (0, 0, 0),
-            2,
-        )
-
-        confirm_text = "REBUILD"
-        text_size = cv2.getTextSize(confirm_text, font, font_scale_buttons, 2)[0]
-        text_x = confirm_x_draw + (button_width_draw_c - text_size[0]) // 2
-        text_y = buttons_y_draw_c + (button_height_draw_c + text_size[1]) // 2
-        cv2.putText(canvas, confirm_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
+        self._draw_modal_button(canvas, self.rebuild_cancel_button_rect, "CANCEL", (150, 150, 150))
+        self._draw_modal_button(canvas, self.rebuild_confirm_button_rect, "REBUILD", (0, 0, 200))
 
         return canvas
 
     def draw_delete_confirmation_dialog(self, canvas):
         """Draw delete-piece confirmation dialog"""
-        # Dialog dimensions
-        dialog_width = 720
-        dialog_height = 300
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-
-        # Semi-transparent overlay
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
-
-        # Dialog background
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (240, 240, 240), -1)
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (0, 0, 0), 3)
-
-        # Warning icon (trash)
-        icon_x = dialog_x + 50
-        icon_y = dialog_y + 70
-        cv2.circle(canvas, (icon_x, icon_y), 30, (60, 60, 60), -1)
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
-
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(canvas, "X", (icon_x - 12, icon_y + 15), font, 1.6, (255, 255, 255), 3)
-
-        # Warning text
-        text_x = dialog_x + 130
-        text_y = dialog_y + 70
-
         jsn = self._get_current_historic_jsn() or "N/A"
-        warning_text1 = "Delete current piece?"
-        warning_text2 = f"JSN: {jsn}"
-        warning_text3 = "This will delete local and remote"
-        warning_text4 = "images permanently"
-
         font_scale = 0.85
         thickness = 2
+        line_spacing = 38
+        icon_diameter = 60
+        left_pad = 45
+        right_pad = 35
+        text_gap = 28
+        top_pad = 32
+        button_gap = 28
+        bottom_pad = 30
 
-        cv2.putText(canvas, warning_text1, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text2, (text_x, text_y + 40), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text3, (text_x, text_y + 80), font, font_scale, (0, 0, 0), thickness)
-        cv2.putText(canvas, warning_text4, (text_x, text_y + 120), font, font_scale, (0, 0, 0), thickness)
+        body_block = self._prepare_wrapped_text_block(
+            [
+                f"Delete current piece? JSN: {jsn}",
+                "This will delete local and remote images permanently.",
+            ],
+            font,
+            font_scale,
+            thickness,
+            max_width=max(320, int(self.width * 0.54)),
+            line_spacing=line_spacing,
+            max_lines_per_paragraph=3,
+        )
 
-        # Buttons
         button_width = 150
         button_height = 50
         button_spacing = 30
-        buttons_y = dialog_y + dialog_height - button_height - 30
+        dialog_width = min(
+            max(620, left_pad + icon_diameter + text_gap + body_block["text_width"] + right_pad),
+            int(self.width * 0.82),
+        )
+        body_height = max(icon_diameter, body_block["text_height"])
+        dialog_height = top_pad + body_height + button_gap + button_height + bottom_pad
 
-        # Cancel button (left)
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.5,
+        )
+
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (icon_diameter // 2)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (60, 60, 60), -1)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 0), 2)
+        cv2.putText(canvas, "X", (icon_x - 12, icon_y + 15), font, 1.6, (255, 255, 255), 3)
+
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        text_y = dialog_y + top_pad + body_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            body_block["lines"],
+            text_x,
+            text_y,
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            line_spacing=line_spacing,
+        )
+
+        buttons_y = dialog_y + dialog_height - button_height - bottom_pad
         cancel_x = dialog_x + (dialog_width // 2) - button_width - (button_spacing // 2)
         self.delete_cancel_button_rect = (cancel_x, buttons_y, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_cancel_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.delete_cancel_button_rect)
-        is_cancel_pressed = is_cancel_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor = 0.95 if is_cancel_pressed else (1.08 if is_cancel_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.delete_cancel_button_rect, scale_factor)
-        cancel_x_draw, buttons_y_draw, button_width_draw, button_height_draw = scaled_rect
-        
-        cancel_color = (150, 150, 150)
-        border_color_cancel = (0, 0, 0)
-        border_width_cancel = 2
-
-        cv2.rectangle(canvas, (cancel_x_draw, buttons_y_draw), (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-                     cancel_color, -1)
-        cv2.rectangle(canvas, (cancel_x_draw, buttons_y_draw), (cancel_x_draw + button_width_draw, buttons_y_draw + button_height_draw),
-                     border_color_cancel, border_width_cancel)
-        
-        cancel_text = "CANCEL"
-        font_scale_buttons = 0.7
-        text_size = cv2.getTextSize(cancel_text, font, font_scale_buttons, 2)[0]
-        text_x = cancel_x_draw + (button_width_draw - text_size[0]) // 2
-        text_y = buttons_y_draw + (button_height_draw + text_size[1]) // 2
-        cv2.putText(canvas, cancel_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
-        
-        # Confirm button (right)
         confirm_x = dialog_x + (dialog_width // 2) + (button_spacing // 2)
         self.delete_confirm_button_rect = (confirm_x, buttons_y, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_confirm_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.delete_confirm_button_rect)
-        is_confirm_pressed = is_confirm_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor_confirm = 0.95 if is_confirm_pressed else (1.08 if is_confirm_hovered else 1.0)
-        scaled_rect_confirm = self._scale_rect(self.delete_confirm_button_rect, scale_factor_confirm)
-        confirm_x_draw, buttons_y_draw_c, button_width_draw_c, button_height_draw_c = scaled_rect_confirm
-        
-        confirm_color = (0, 0, 200)
-        border_color_confirm = (0, 0, 0)
-        border_width_confirm = 2
-
-        cv2.rectangle(canvas, (confirm_x_draw, buttons_y_draw_c), (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-                     confirm_color, -1)
-        cv2.rectangle(canvas, (confirm_x_draw, buttons_y_draw_c), (confirm_x_draw + button_width_draw_c, buttons_y_draw_c + button_height_draw_c),
-                     border_color_confirm, border_width_confirm)
-        
-        confirm_text = "CONFIRM"
-        text_size = cv2.getTextSize(confirm_text, font, font_scale_buttons, 2)[0]
-        text_x = confirm_x_draw + (button_width_draw_c - text_size[0]) // 2
-        text_y = buttons_y_draw_c + (button_height_draw_c + text_size[1]) // 2
-        cv2.putText(canvas, confirm_text, (text_x, text_y), font, font_scale_buttons, (255, 255, 255), 2)
+        self._draw_modal_button(canvas, self.delete_cancel_button_rect, "CANCEL", (150, 150, 150))
+        self._draw_modal_button(canvas, self.delete_confirm_button_rect, "CONFIRM", (0, 0, 200))
 
         return canvas
     
     def draw_no_images_dialog(self, canvas):
         """Draw no images available dialog"""
-        # Dialog dimensions
-        dialog_width = 500
-        dialog_height = 200
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-        
-        # Semi-transparent overlay
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
-        
-        # Dialog background
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (240, 240, 240), -1)
-        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height),
-                     (0, 0, 0), 3)
-        
-        # Warning icon (red, same as reset button)
-        icon_x = dialog_x + 50
-        icon_y = dialog_y + 70
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 200), -1)  # Red
-        cv2.circle(canvas, (icon_x, icon_y), 30, (0, 0, 0), 2)
-        
-        # Exclamation mark
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 1.8, (255, 255, 255), 3)
-
-        # Message text to the right of the icon, not touching the border
         message_text = self.no_images_dialog_message or "No images available"
         font_scale = 0.9
         thickness = 2
-        max_text_width = dialog_width - 140
-        text_size = cv2.getTextSize(message_text, font, font_scale, thickness)[0]
-        while text_size[0] > max_text_width and font_scale > 0.55:
-            font_scale -= 0.05
-            text_size = cv2.getTextSize(message_text, font, font_scale, thickness)[0]
-        # Place text to the right of the icon, with margin
-        margin_right_of_icon = 20
-        text_x = icon_x + 30 + margin_right_of_icon
-        # Vertically center with the icon
-        text_y = icon_y + text_size[1] // 2
-        # Ensure text does not touch the right border
-        max_text_x = dialog_x + dialog_width - 20 - text_size[0]
-        if text_x > max_text_x:
-            text_x = max_text_x
-        cv2.putText(canvas, message_text, (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
+        line_spacing = 38
+        icon_diameter = 60
+        left_pad = 45
+        right_pad = 35
+        text_gap = 28
+        top_pad = 30
+        button_gap = 26
+        bottom_pad = 25
 
-        # Confirm Button (blue, same as back button)
+        body_block = self._prepare_wrapped_text_block(
+            message_text,
+            font,
+            font_scale,
+            thickness,
+            max_width=max(280, int(self.width * 0.45)),
+            line_spacing=line_spacing,
+            max_lines_per_paragraph=4,
+        )
+
         button_width = 120
         button_height = 50
+        dialog_width = min(
+            max(440, left_pad + icon_diameter + text_gap + body_block["text_width"] + right_pad),
+            int(self.width * 0.72),
+        )
+        body_height = max(icon_diameter, body_block["text_height"])
+        dialog_height = top_pad + body_height + button_gap + button_height + bottom_pad
+
+        canvas, dialog_x, dialog_y = self._draw_modal_frame(
+            canvas,
+            dialog_width,
+            dialog_height,
+            overlay_alpha=0.5,
+        )
+
+        icon_x = dialog_x + left_pad + (icon_diameter // 2)
+        icon_y = dialog_y + top_pad + (icon_diameter // 2)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 200), -1)
+        cv2.circle(canvas, (icon_x, icon_y), icon_diameter // 2, (0, 0, 0), 2)
+        cv2.putText(canvas, "!", (icon_x - 10, icon_y + 15), font, 1.8, (255, 255, 255), 3)
+
+        text_x = dialog_x + left_pad + icon_diameter + text_gap
+        text_y = dialog_y + top_pad + body_block["line_height"]
+        self._draw_text_lines(
+            canvas,
+            body_block["lines"],
+            text_x,
+            text_y,
+            font,
+            font_scale,
+            (0, 0, 0),
+            thickness,
+            line_spacing=line_spacing,
+        )
+
         button_x = dialog_x + (dialog_width - button_width) // 2
-        button_y = dialog_y + dialog_height - button_height - 25
+        button_y = dialog_y + dialog_height - button_height - bottom_pad
 
         self.no_images_ok_button_rect = (button_x, button_y, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.no_images_ok_button_rect)
-        is_pressed = is_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.no_images_ok_button_rect, scale_factor)
-        button_x_draw, button_y_draw, button_width_draw, button_height_draw = scaled_rect
-        
-        button_color = (132, 36, 2)
-        border_color = (0, 0, 0)
-        border_width = 2
-
-        cv2.rectangle(canvas, (button_x_draw, button_y_draw), (button_x_draw + button_width_draw, button_y_draw + button_height_draw),
-                 button_color, -1)  # Blue
-        cv2.rectangle(canvas, (button_x_draw, button_y_draw), (button_x_draw + button_width_draw, button_y_draw + button_height_draw),
-                 border_color, border_width)
-
-        ok_text = "OK"
-        font_scale_button = 0.9
-        text_size_btn = cv2.getTextSize(ok_text, font, font_scale_button, 2)[0]
-        text_x_btn = button_x_draw + (button_width_draw - text_size_btn[0]) // 2
-        text_y_btn = button_y_draw + (button_height_draw + text_size_btn[1]) // 2
-        cv2.putText(canvas, ok_text, (text_x_btn, text_y_btn), font, font_scale_button, (255, 255, 255), 2)
+        self._draw_modal_button(canvas, self.no_images_ok_button_rect, "OK", (132, 36, 2), font_scale=0.9)
 
         return canvas
     
