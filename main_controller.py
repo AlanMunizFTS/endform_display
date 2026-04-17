@@ -459,7 +459,6 @@ def _process_remote_event_impl(msg, display, logger):
         if "done signal sent to plc" in lower_line:
             if getattr(display, "manual_capture_pending", False):
                 display.manual_capture_pending = False
-                _show_capture_modal(display, "captured", (0, 150, 0), duration_sec=0.5)
 
     elif msg_type == "stderr":
         return
@@ -4125,7 +4124,6 @@ class MainController:
             if self.stdin_queue is not None:
                 self.stdin_queue.put("t\n")
                 d.manual_capture_pending = True
-                _show_capture_modal(d, "capturing", (0, 0, 200))
         elif action == "next_historic_batch":
             self.next_historic_batch()
         elif action == "prev_historic_batch":
