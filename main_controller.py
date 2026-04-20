@@ -23,7 +23,10 @@ from paths_config import (
     TMP_DISPLAY_DIR,
 )
 from sftp_app import SFTPApp
-from settings import is_remote_db_enabled
+from settings import (
+    is_historic_download_remote_jsn_validation_enabled,
+    is_remote_db_enabled,
+)
 from utilities.log import get_logger, install_print_logger
 from state_package import export_display_state, import_display_state
 
@@ -112,6 +115,7 @@ def _download_images_background_worker(
     reconnect_interval=10,
     stop_event=None,
     worker_label="HIST_SYNC_SSH",
+    validate_remote_jsn=True,
     remote_db_table="pieces_out",
     remote_db_jsn_column="jsn",
     remote_db_status_column="status",
@@ -206,25 +210,28 @@ def _download_images_background_worker(
 
                 candidate_jsns = sorted(candidate_jsn_groups.keys(), key=int, reverse=True)
                 if candidate_jsns:
-                    try:
-                        approved_jsns = _fetch_remote_ready_jsns(
-                            hostname=hostname,
-                            port=port,
-                            username=username,
-                            password=password,
-                            candidate_jsns=candidate_jsns,
-                            remote_db_table=remote_db_table,
-                            remote_db_jsn_column=remote_db_jsn_column,
-                            remote_db_status_column=remote_db_status_column,
-                            remote_db_required_status=remote_db_required_status,
-                        )
-                    except Exception as exc:
-                        logger.error(
-                            f"[{worker_label}] Remote DB validation failed for {remote_db_table}: {exc}",
-                            allow_repeat=True,
-                        )
-                        _sleep_with_stop(stop_event, check_interval)
-                        continue
+                    if validate_remote_jsn:
+                        try:
+                            approved_jsns = _fetch_remote_ready_jsns(
+                                hostname=hostname,
+                                port=port,
+                                username=username,
+                                password=password,
+                                candidate_jsns=candidate_jsns,
+                                remote_db_table=remote_db_table,
+                                remote_db_jsn_column=remote_db_jsn_column,
+                                remote_db_status_column=remote_db_status_column,
+                                remote_db_required_status=remote_db_required_status,
+                            )
+                        except Exception as exc:
+                            logger.error(
+                                f"[{worker_label}] Remote DB validation failed for {remote_db_table}: {exc}",
+                                allow_repeat=True,
+                            )
+                            _sleep_with_stop(stop_event, check_interval)
+                            continue
+                    else:
+                        approved_jsns = set(candidate_jsns)
                 else:
                     approved_jsns = set()
 
@@ -563,6 +570,9 @@ class ControllerConfig:
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
     remote_annotated_dir: str = REMOTE_ANNOTATED_DIR
+    historic_gate_remote_db_validation_enabled: bool = field(
+        default_factory=is_historic_download_remote_jsn_validation_enabled
+    )
     historic_gate_remote_db_table: str = "pieces_out"
     historic_gate_remote_db_jsn_column: str = "jsn"
     historic_gate_remote_db_status_column: str = "status"
@@ -2970,6 +2980,7 @@ class MainController:
                         10,
                         stop_event,
                         worker_label,
+                        self.config.historic_gate_remote_db_validation_enabled,
                         self.config.historic_gate_remote_db_table,
                         self.config.historic_gate_remote_db_jsn_column,
                         self.config.historic_gate_remote_db_status_column,

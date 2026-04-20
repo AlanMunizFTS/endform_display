@@ -96,6 +96,11 @@ def is_remote_db_enabled():
     return _get_bool_env("APP_REMOTE_DB_ENABLED", default=True)
 
 
+def is_historic_download_remote_jsn_validation_enabled():
+    """Return whether startup historic/annotated downloads should validate JSNs in remote DB."""
+    return _get_bool_env("APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN", default=False)
+
+
 def get_optional_sftp_settings():
     """Return validated SFTP settings when enabled and complete, else None."""
     if not is_sftp_enabled():

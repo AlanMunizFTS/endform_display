@@ -28,6 +28,7 @@ Required keys:
 
 Optional SFTP keys (only required when enabled):
 - `APP_SFTP_ENABLED` (`1`, `true`, `yes`, `on` to enable; default disabled)
+- `APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN` (`1`, `true`, `yes`, `on` to require JSN validation in remote DB before startup `historic`/`annotated` downloads; default disabled)
 - `SFTP_HOST`
 - `SFTP_PORT`
 - `SFTP_USERNAME`
@@ -43,6 +44,10 @@ Optional SFTP keys (only required when enabled):
   - App tries SFTP at startup.
   - If SFTP is down/unreachable, app continues in local mode and retries every 10 seconds.
   - When SFTP reconnects, remote live tasks resume automatically.
+- `APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN` missing or disabled:
+  - Startup `historic` and `annotated` downloads pull all eligible numeric-JSN images.
+- `APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN` enabled:
+  - Startup `historic` and `annotated` downloads only pull JSNs approved in remote `pieces_out`.
 
 Expected logs include:
 - `[LOCAL] Running in local-only mode (SFTP disabled)`

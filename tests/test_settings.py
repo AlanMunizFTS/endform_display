@@ -88,6 +88,26 @@ class TestSettings(unittest.TestCase):
                 },
             )
 
+    def test_historic_download_remote_jsn_validation_disabled_when_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertFalse(settings.is_historic_download_remote_jsn_validation_enabled())
+
+    def test_historic_download_remote_jsn_validation_disabled_for_zero(self):
+        with patch.dict(
+            os.environ,
+            {"APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN": "0"},
+            clear=True,
+        ):
+            self.assertFalse(settings.is_historic_download_remote_jsn_validation_enabled())
+
+    def test_historic_download_remote_jsn_validation_enabled_for_truthy_value(self):
+        with patch.dict(
+            os.environ,
+            {"APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN": "1"},
+            clear=True,
+        ):
+            self.assertTrue(settings.is_historic_download_remote_jsn_validation_enabled())
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
