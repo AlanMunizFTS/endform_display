@@ -41,6 +41,7 @@ STATUS_SYNC_DIRS = {
 FINAL_CLASSIFICATION_DIR = Path("./final_classification")
 REPORTS_DIR = Path("./reports")
 EXPORTS_DIR = Path("./exports")
+DATASETS_DIR = Path("./datasets")
 STATE_PACKAGE_VERSION = 1
 
 FINAL_CLASSIFICATION_DIRS = {

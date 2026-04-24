@@ -17,3 +17,5 @@ log.txt
 test_images/
 annotated/
 final_classification/
+exports/
+datasets/

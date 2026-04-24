@@ -28,6 +28,14 @@ class _DisplayStatsStub:
         self.stats_class_modal_view = "summary"
         self.stats_class_modal_matrix_offset = 0
         self.stats_class_modal_matrix_visible_rows = 1
+        self.stats_class_modal_dataset_class_offset = 0
+        self.stats_class_modal_dataset_class_visible_rows = 1
+        self.stats_class_modal_dataset_result_options = []
+        self.stats_class_modal_dataset_angle_options = []
+        self.stats_class_modal_dataset_class_options = []
+        self.stats_class_modal_dataset_selected_results = set()
+        self.stats_class_modal_dataset_selected_angles = set()
+        self.stats_class_modal_dataset_selected_classes = set()
         self.stats_class_modal_selected_kind = ""
         self.stats_class_modal_selected_label = ""
         self.show_stats_class_modal = False
@@ -144,6 +152,42 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         action_handler.assert_called_once_with("open_stats_matrix_view")
 
     @patch("display_window.get_db_connection")
+    def test_stats_class_modal_dataset_tab_click_emits_view_action(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_dataset_tab_rect = (400, 140, 120, 40)
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            430,
+            160,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("open_stats_dataset_view")
+
+    @patch("display_window.get_db_connection")
+    def test_stats_class_modal_dataset_export_click_emits_action(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_dataset_export_rect = (420, 300, 220, 44)
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            500,
+            320,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("export_stats_dataset")
+
+    @patch("display_window.get_db_connection")
     def test_stats_class_modal_blocks_background_clicks(self, mock_get_db_connection):
         mock_get_db_connection.return_value = MagicMock()
         action_handler = MagicMock()
@@ -191,6 +235,26 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertIsNotNone(display.stats_class_modal_list_rect)
         self.assertIsNotNone(display.stats_class_modal_matrix_tab_rect)
+
+    @patch("display_window.get_db_connection")
+    def test_draw_stats_class_modal_dataset_handles_filter_panels(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display.stats_class_modal_view = "dataset"
+        display.stats_class_modal_dataset_result_options = ["OK", "NOK", "FNOK", "FOK"]
+        display.stats_class_modal_dataset_angle_options = ["side", "diag", "front"]
+        display.stats_class_modal_dataset_class_options = ["All", "dent", "scratch", "UNCLASSIFIED"]
+        display.stats_class_modal_dataset_selected_results = {"OK", "NOK"}
+        display.stats_class_modal_dataset_selected_angles = {"side", "front"}
+        display.stats_class_modal_dataset_selected_classes = {"All"}
+
+        canvas = np.zeros((display.height, display.width, 3), dtype=np.uint8)
+        rendered = display.draw_stats_class_modal(canvas)
+
+        self.assertIsNotNone(rendered)
+        self.assertIsNotNone(display.stats_class_modal_dataset_tab_rect)
+        self.assertIsNotNone(display.stats_class_modal_dataset_export_rect)
+        self.assertTrue(display.stats_class_modal_dataset_class_rects)
 
     @patch("display_window.get_db_connection")
     def test_draw_stats_class_modal_detail_handles_context_columns(self, mock_get_db_connection):
@@ -317,6 +381,81 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         self.assertEqual(report["rows"][0]["OK"], 4)
         self.assertEqual(report["rows"][-1]["Total"], 4)
 
+    def test_get_piece_stats_dataset_filter_options_includes_unclassified_and_all(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.return_value = [
+            {"class_name": "dent"},
+            {"class_name": "scratch"},
+        ]
+        controller = MainController(display=display)
+
+        options = controller.get_piece_stats_dataset_filter_options()
+
+        self.assertEqual(options["results"], ["OK", "NOK", "FOK", "FNOK"])
+        self.assertEqual(options["angles"], ["side", "diag", "front"])
+        self.assertEqual(options["class_names"][0], "All")
+        self.assertIn("UNCLASSIFIED", options["class_names"])
+
+    def test_get_piece_stats_dataset_records_builds_image_level_rows(self):
+        display = _DisplayStatsStub()
+        display.db.fetch.return_value = [
+            {
+                "img_name": "11861_Cam1_Side1_OK.png",
+                "operator_result": "OK",
+                "model_result": "OK",
+                "class_name": None,
+            },
+            {
+                "img_name": "11861_Cam2_Front_NOK.png",
+                "operator_result": "NOK",
+                "model_result": "OK",
+                "class_name": "dent",
+            },
+            {
+                "img_name": "11861_Cam2_Front_NOK.png",
+                "operator_result": "NOK",
+                "model_result": "OK",
+                "class_name": "scratch",
+            },
+        ]
+        controller = MainController(display=display)
+
+        rows = controller.get_piece_stats_dataset_records()
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "img_name": "11861_Cam1_Side1_OK.png",
+                    "result": "OK",
+                    "angle": "side",
+                    "class_names": ["UNCLASSIFIED"],
+                },
+                {
+                    "img_name": "11861_Cam2_Front_NOK.png",
+                    "result": "FOK",
+                    "angle": "front",
+                    "class_names": ["dent", "scratch"],
+                },
+            ],
+        )
+
+    def test_toggle_piece_stats_dataset_class_keeps_all_semantics(self):
+        display = _DisplayStatsStub()
+        controller = MainController(display=display)
+        display.stats_class_modal_dataset_class_options = ["All", "dent", "scratch", "UNCLASSIFIED"]
+        display.stats_class_modal_dataset_selected_classes = {"All"}
+
+        controller.handle_ui_action("toggle_stats_dataset_class", value="dent")
+        self.assertEqual(display.stats_class_modal_dataset_selected_classes, {"dent"})
+
+        controller.handle_ui_action("toggle_stats_dataset_class", value="scratch")
+        self.assertEqual(display.stats_class_modal_dataset_selected_classes, {"dent", "scratch"})
+
+        controller.handle_ui_action("toggle_stats_dataset_class", value="dent")
+        controller.handle_ui_action("toggle_stats_dataset_class", value="scratch")
+        self.assertEqual(display.stats_class_modal_dataset_selected_classes, {"All"})
+
     def test_attach_historic_indices_uses_historic_piece_numbering(self):
         display = _DisplayStatsStub()
         controller = MainController(display=display)
@@ -418,6 +557,7 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
                 {"class_name": "scratch", "final_result": "NOK", "piece_count": 1},
             ],
             [{"start_at": None, "end_at": None}],
+            [{"class_name": "scratch"}],
         ]
         controller = MainController(display=display)
 
@@ -443,10 +583,12 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
             ],
         )
         self.assertEqual(display.stats_class_modal_matrix_rows[-1]["class_name"], "Total")
+        self.assertEqual(display.stats_class_modal_dataset_selected_classes, {"All"})
+        self.assertIn("UNCLASSIFIED", display.stats_class_modal_dataset_class_options)
 
     def test_open_stats_class_modal_handles_empty_summary(self):
         display = _DisplayStatsStub()
-        display.db.fetch.side_effect = [[], [], [], [{"start_at": None, "end_at": None}]]
+        display.db.fetch.side_effect = [[], [], [], [{"start_at": None, "end_at": None}], []]
         controller = MainController(display=display)
 
         controller.handle_ui_action("open_stats_class_modal")
@@ -519,6 +661,14 @@ class TestMainControllerStatsClassModal(unittest.TestCase):
         controller.handle_ui_action("open_stats_matrix_view")
 
         self.assertEqual(display.stats_class_modal_view, "matrix")
+
+    def test_open_stats_dataset_view_switches_modal_view(self):
+        display = _DisplayStatsStub()
+        controller = MainController(display=display)
+
+        controller.handle_ui_action("open_stats_dataset_view")
+
+        self.assertEqual(display.stats_class_modal_view, "dataset")
 
 
 if __name__ == "__main__":

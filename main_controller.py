@@ -7,6 +7,12 @@ from dataclasses import dataclass, field
 from multiprocessing import Event, Process, Queue
 from threading import Thread
 
+from dataset_exporter import (
+    ALL_CLASSES_LABEL,
+    DEFAULT_ANGLE_OPTIONS,
+    DEFAULT_RESULT_OPTIONS,
+    export_piece_stats_dataset,
+)
 from file_manager import FileManager
 from paths_config import (
     ANNOTATED_LOCAL_DIR,
@@ -1646,6 +1652,118 @@ class MainController:
         self.export_worker_thread = Thread(
             target=_export_worker,
             name="dataset-export-worker",
+            daemon=True,
+        )
+        self.export_worker_thread.start()
+
+    def start_export_piece_stats_dataset_async(
+        self,
+        filters=None,
+        output_dir=None,
+        historic_dir=None,
+    ):
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+
+        if filters is None:
+            filters = {
+                "results": list(getattr(d, "stats_class_modal_dataset_selected_results", []) or []),
+                "angles": list(getattr(d, "stats_class_modal_dataset_selected_angles", []) or []),
+                "class_names": list(getattr(d, "stats_class_modal_dataset_selected_classes", []) or []),
+            }
+
+        self.dataset_transfer_active = True
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing filtered dataset export..."
+        d.sync_progress_title = "Exporting Piece Stats Dataset"
+        d.sync_progress_helper_text = "Copying filtered historic images into a dataset folder."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _export_worker():
+            worker_db = None
+            worker_state = None
+            try:
+                worker_state = self._pause_dataset_background_workers()
+
+                from db import get_db_connection
+
+                worker_db = get_db_connection()
+
+                def _export_progress_cb(done, total, stage):
+                    if total <= 0:
+                        percent = 0
+                        stage_text = stage
+                    else:
+                        percent = int((done / total) * 100)
+                        stage_text = f"{stage} ({done}/{total})"
+                    self._set_sync_progress(
+                        stage_text,
+                        percent,
+                        title="Exporting Piece Stats Dataset",
+                        helper_text="Copying filtered historic images into a dataset folder.",
+                    )
+
+                result = export_piece_stats_dataset(
+                    self,
+                    filters=filters,
+                    output_dir=output_dir,
+                    historic_dir=historic_dir,
+                    db_client=worker_db,
+                    progress_callback=_export_progress_cb,
+                )
+                if not result.get("ok", False):
+                    raise RuntimeError(
+                        result.get("error", "Piece stats dataset export failed")
+                    )
+
+                missing_count = int(result.get("missing_count", 0) or 0)
+                copied_files = int(result.get("copied_files", 0) or 0)
+                matched_images = int(result.get("matched_images", 0) or 0)
+                dataset_name = result.get("dataset_name") or os.path.basename(
+                    str(result.get("output_path") or "")
+                )
+                if missing_count > 0:
+                    d.sync_message = (
+                        f"Dataset export completed: {dataset_name} "
+                        f"({matched_images} images, {copied_files} copies, {missing_count} missing)"
+                    )
+                    d.sync_message_is_error = True
+                else:
+                    d.sync_message = (
+                        f"Dataset export completed: {dataset_name} "
+                        f"({matched_images} images, {copied_files} copies)"
+                    )
+                    d.sync_message_is_error = False
+                self.logger.info(
+                    f"[STATS_DATASET] Export completed: {result.get('output_path')}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Dataset export failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(
+                    f"[STATS_DATASET] Dataset export failed: {exc}",
+                    allow_repeat=True,
+                )
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+                if worker_db is not None:
+                    try:
+                        worker_db.close()
+                    except Exception:
+                        pass
+
+        self.export_worker_thread = Thread(
+            target=_export_worker,
+            name="stats-dataset-export-worker",
             daemon=True,
         )
         self.export_worker_thread.start()
@@ -3980,6 +4098,135 @@ class MainController:
             "end_at": range_row.get("end_at"),
         }
 
+    def _normalize_piece_stats_dataset_class_name(self, class_name):
+        normalized = str(class_name or "").strip()
+        if not normalized:
+            return None
+        if normalized.upper() == "UNCLASSIFIED":
+            return "UNCLASSIFIED"
+        return normalized
+
+    def _get_image_level_final_result(self, operator_result, model_result):
+        operator_value = str(operator_result or "").strip().upper()
+        model_value = str(model_result or "").strip().upper()
+        if operator_value == "OK" and model_value == "OK":
+            return "OK"
+        if operator_value == "NOK" and model_value == "NOK":
+            return "NOK"
+        if operator_value == "NOK" and model_value == "OK":
+            return "FOK"
+        if operator_value == "OK" and model_value == "NOK":
+            return "FNOK"
+        return None
+
+    def _get_image_level_angle(self, img_name):
+        match = re.search(r"(side|front|diag)", str(img_name or ""), re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).lower()
+
+    def get_piece_stats_dataset_filter_options(self, db_client=None):
+        db = db_client or self.display.db
+        class_names = []
+        seen_labels = set()
+
+        if db:
+            try:
+                rows = db.fetch(
+                    "SELECT DISTINCT class_name "
+                    "FROM classified_image_defects "
+                    "WHERE class_name IS NOT NULL AND BTRIM(class_name) <> '' "
+                    "ORDER BY class_name ASC"
+                )
+                for row in rows or []:
+                    label = self._normalize_piece_stats_dataset_class_name(
+                        row.get("class_name")
+                    )
+                    if not label or label in seen_labels:
+                        continue
+                    class_names.append(label)
+                    seen_labels.add(label)
+            except Exception as exc:
+                self.logger.error(
+                    f"Error fetching piece stats dataset filter options: {exc}"
+                )
+
+        if "UNCLASSIFIED" not in seen_labels:
+            class_names.append("UNCLASSIFIED")
+
+        ordered_class_names = [
+            label for label in class_names if label != "UNCLASSIFIED"
+        ]
+        ordered_class_names.sort(key=lambda value: value.lower())
+        ordered_class_names.append("UNCLASSIFIED")
+        return {
+            "results": list(DEFAULT_RESULT_OPTIONS),
+            "angles": list(DEFAULT_ANGLE_OPTIONS),
+            "class_names": [ALL_CLASSES_LABEL, *ordered_class_names],
+        }
+
+    def get_piece_stats_dataset_records(self, db_client=None):
+        db = db_client or self.display.db
+        if not db:
+            return []
+
+        try:
+            rows = db.fetch(
+                "SELECT ci.img_name, ci.operator_result, ci.model_result, cid.class_name "
+                "FROM classified_images ci "
+                "LEFT JOIN classified_image_defects cid ON cid.classified_image_id = ci.id "
+                "WHERE ci.img_name IS NOT NULL AND ci.img_name <> '' "
+                "ORDER BY ci.img_name ASC, cid.class_name ASC"
+            )
+        except Exception as exc:
+            self.logger.error(f"Error fetching piece stats dataset rows: {exc}")
+            return []
+
+        record_map = {}
+        for row in rows or []:
+            img_name = str(row.get("img_name") or "").strip()
+            if not img_name:
+                continue
+
+            record = record_map.get(img_name)
+            if record is None:
+                result_value = self._get_image_level_final_result(
+                    row.get("operator_result"),
+                    row.get("model_result"),
+                )
+                angle_value = self._get_image_level_angle(img_name)
+                record = {
+                    "img_name": img_name,
+                    "result": result_value,
+                    "angle": angle_value,
+                    "class_names": set(),
+                }
+                record_map[img_name] = record
+
+            class_name = self._normalize_piece_stats_dataset_class_name(
+                row.get("class_name")
+            )
+            if class_name:
+                record["class_names"].add(class_name)
+
+        normalized_records = []
+        for img_name in sorted(record_map):
+            record = record_map[img_name]
+            if not record["result"] or not record["angle"]:
+                continue
+            class_names = sorted(record["class_names"], key=lambda value: value.lower())
+            if not class_names:
+                class_names = ["UNCLASSIFIED"]
+            normalized_records.append(
+                {
+                    "img_name": img_name,
+                    "result": record["result"],
+                    "angle": record["angle"],
+                    "class_names": class_names,
+                }
+            )
+        return normalized_records
+
     def _get_historic_jsn_index_map(self):
         """Map each historic JSN to the 1-based piece number shown in historic mode."""
         try:
@@ -4107,6 +4354,76 @@ class MainController:
         d._db_result_cache[img_name] = result_text
         return result_text
 
+    def _set_default_piece_stats_dataset_filters(self, filter_options=None):
+        d = self.display
+        filter_options = filter_options or self.get_piece_stats_dataset_filter_options()
+        d.stats_class_modal_dataset_result_options = list(
+            filter_options.get("results") or list(DEFAULT_RESULT_OPTIONS)
+        )
+        d.stats_class_modal_dataset_angle_options = list(
+            filter_options.get("angles") or list(DEFAULT_ANGLE_OPTIONS)
+        )
+        d.stats_class_modal_dataset_class_options = list(
+            filter_options.get("class_names") or [ALL_CLASSES_LABEL, "UNCLASSIFIED"]
+        )
+        d.stats_class_modal_dataset_selected_results = set(
+            d.stats_class_modal_dataset_result_options
+        )
+        d.stats_class_modal_dataset_selected_angles = set(
+            d.stats_class_modal_dataset_angle_options
+        )
+        d.stats_class_modal_dataset_selected_classes = {ALL_CLASSES_LABEL}
+        d.stats_class_modal_dataset_class_offset = 0
+
+    def _toggle_piece_stats_dataset_result(self, value):
+        d = self.display
+        label = str(value or "").strip().upper()
+        allowed = set(getattr(d, "stats_class_modal_dataset_result_options", []) or [])
+        if label not in allowed:
+            return
+        selected = set(getattr(d, "stats_class_modal_dataset_selected_results", set()) or set())
+        if label in selected:
+            selected.remove(label)
+        else:
+            selected.add(label)
+        if not selected:
+            selected = set(allowed)
+        d.stats_class_modal_dataset_selected_results = selected
+
+    def _toggle_piece_stats_dataset_angle(self, value):
+        d = self.display
+        label = str(value or "").strip().lower()
+        allowed = set(getattr(d, "stats_class_modal_dataset_angle_options", []) or [])
+        if label not in allowed:
+            return
+        selected = set(getattr(d, "stats_class_modal_dataset_selected_angles", set()) or set())
+        if label in selected:
+            selected.remove(label)
+        else:
+            selected.add(label)
+        if not selected:
+            selected = set(allowed)
+        d.stats_class_modal_dataset_selected_angles = selected
+
+    def _toggle_piece_stats_dataset_class(self, value):
+        d = self.display
+        label = str(value or "").strip()
+        allowed = set(getattr(d, "stats_class_modal_dataset_class_options", []) or [])
+        if label not in allowed:
+            return
+        selected = set(getattr(d, "stats_class_modal_dataset_selected_classes", set()) or set())
+        if label == ALL_CLASSES_LABEL:
+            d.stats_class_modal_dataset_selected_classes = {ALL_CLASSES_LABEL}
+            return
+        selected.discard(ALL_CLASSES_LABEL)
+        if label in selected:
+            selected.remove(label)
+        else:
+            selected.add(label)
+        if not selected:
+            selected = {ALL_CLASSES_LABEL}
+        d.stats_class_modal_dataset_selected_classes = selected
+
     def toggle_result(self, img_name, current_value=None):
         if not img_name:
             return
@@ -4173,6 +4490,9 @@ class MainController:
             d.stats_class_modal_rows = self.get_piece_class_summary()
             d.stats_class_modal_status_rows = self.get_piece_status_summary()
             d.stats_class_modal_matrix_rows = self.build_piece_stats_report().get("rows", [])
+            self._set_default_piece_stats_dataset_filters(
+                self.get_piece_stats_dataset_filter_options()
+            )
             d.show_stats_class_modal = True
         elif action == "close_stats_class_modal":
             d.show_stats_class_modal = False
@@ -4183,6 +4503,9 @@ class MainController:
         elif action == "open_stats_matrix_view":
             d.stats_class_modal_view = "matrix"
             d.stats_class_modal_matrix_offset = 0
+        elif action == "open_stats_dataset_view":
+            d.stats_class_modal_view = "dataset"
+            d.stats_class_modal_dataset_class_offset = 0
         elif action == "open_stats_class_detail":
             class_name = str(payload.get("class_name") or "").strip()
             d.stats_class_modal_view = "detail"
@@ -4228,6 +4551,22 @@ class MainController:
                 d.stats_class_modal_matrix_offset += direction * steps
                 if hasattr(d, "_clamp_stats_class_modal_matrix_offset"):
                     d._clamp_stats_class_modal_matrix_offset()
+        elif action == "toggle_stats_dataset_result":
+            self._toggle_piece_stats_dataset_result(payload.get("value"))
+        elif action == "toggle_stats_dataset_angle":
+            self._toggle_piece_stats_dataset_angle(payload.get("value"))
+        elif action == "toggle_stats_dataset_class":
+            self._toggle_piece_stats_dataset_class(payload.get("value"))
+        elif action == "stats_dataset_class_scroll":
+            delta = int(payload.get("delta") or 0)
+            if delta:
+                steps = max(1, abs(delta) // 120)
+                direction = -1 if delta > 0 else 1
+                d.stats_class_modal_dataset_class_offset += direction * steps
+                if hasattr(d, "_clamp_stats_class_modal_dataset_class_offset"):
+                    d._clamp_stats_class_modal_dataset_class_offset()
+        elif action == "export_stats_dataset":
+            self.start_export_piece_stats_dataset_async()
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False

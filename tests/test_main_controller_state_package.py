@@ -144,6 +144,60 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
 
+    @patch("main_controller.Thread", _ImmediateThread)
+    @patch("main_controller.export_piece_stats_dataset")
+    def test_start_export_piece_stats_dataset_async_reports_output_folder(self, export_mock):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_db = MagicMock()
+            display = self._build_display(db=fake_db)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(
+                    temp_dir=tmp_dir,
+                    historic_download_check_interval=17,
+                ),
+            )
+            controller.remote_db_poll_thread = _AliveThread()
+            controller.stop_historic_download_worker = MagicMock()
+            controller.stop_remote_db_polling = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+            controller.start_remote_db_polling = MagicMock()
+
+            export_mock.return_value = {
+                "ok": True,
+                "dataset_name": "dataset_20260424_101500",
+                "output_path": f"{tmp_dir}\\datasets\\dataset_20260424_101500",
+                "matched_images": 8,
+                "copied_files": 11,
+                "missing_count": 0,
+            }
+
+            with patch("db.get_db_connection", return_value=fake_db):
+                controller.start_export_piece_stats_dataset_async(
+                    filters={
+                        "results": ["OK", "NOK"],
+                        "angles": ["side"],
+                        "class_names": ["All"],
+                    }
+                )
+
+            export_mock.assert_called_once()
+            controller.stop_historic_download_worker.assert_called_once_with()
+            controller.stop_remote_db_polling.assert_called_once_with()
+            controller.start_historic_download_on_startup.assert_called_once_with(
+                tmp_dir,
+                check_interval=17,
+            )
+            controller.start_remote_db_polling.assert_called_once_with()
+            self.assertFalse(display.sync_in_progress)
+            self.assertEqual(display.sync_progress_title, "Exporting Piece Stats Dataset")
+            self.assertEqual(
+                display.sync_message,
+                "Dataset export completed: dataset_20260424_101500 (8 images, 11 copies)",
+            )
+            self.assertFalse(display.sync_message_is_error)
+            fake_db.close.assert_called_once_with()
+
     def test_check_and_register_new_historic_images_skips_during_dataset_transfer(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             annotated_dir = Path(tmp_dir) / "annotated"
@@ -190,10 +244,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             with patch("db.get_db_connection", return_value=fake_db):
                 controller._check_and_register_new_historic_images()
 
-            controller.save_classification_results.assert_called_once()
-            self.assertFalse(
-                controller.save_classification_results.call_args.kwargs["export_stats_report"]
-            )
+            controller.save_classification_results.assert_not_called()
             fake_db.close.assert_called()
 
 

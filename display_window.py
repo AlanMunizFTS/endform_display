@@ -152,8 +152,21 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
+        self.stats_class_modal_dataset_result_options = []
+        self.stats_class_modal_dataset_angle_options = []
+        self.stats_class_modal_dataset_class_options = []
+        self.stats_class_modal_dataset_selected_results = set()
+        self.stats_class_modal_dataset_selected_angles = set()
+        self.stats_class_modal_dataset_selected_classes = set()
+        self.stats_class_modal_dataset_result_rects = []
+        self.stats_class_modal_dataset_angle_rects = []
+        self.stats_class_modal_dataset_class_rects = []
+        self.stats_class_modal_dataset_export_rect = None
+        self.stats_class_modal_dataset_class_offset = 0
+        self.stats_class_modal_dataset_class_visible_rows = 1
         self.mouse_x = 0  # Current mouse X position
         self.mouse_y = 0  # Current mouse Y position
         self.mouse_button_down = False  # Track if left mouse button is down
@@ -507,8 +520,21 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
+        self.stats_class_modal_dataset_result_options = []
+        self.stats_class_modal_dataset_angle_options = []
+        self.stats_class_modal_dataset_class_options = []
+        self.stats_class_modal_dataset_selected_results = set()
+        self.stats_class_modal_dataset_selected_angles = set()
+        self.stats_class_modal_dataset_selected_classes = set()
+        self.stats_class_modal_dataset_result_rects = []
+        self.stats_class_modal_dataset_angle_rects = []
+        self.stats_class_modal_dataset_class_rects = []
+        self.stats_class_modal_dataset_export_rect = None
+        self.stats_class_modal_dataset_class_offset = 0
+        self.stats_class_modal_dataset_class_visible_rows = 1
 
     def _clamp_stats_class_modal_detail_offset(self):
         """Keep the detail-list offset within its valid range."""
@@ -534,6 +560,21 @@ class DisplayWindow:
             min(int(self.stats_class_modal_matrix_offset or 0), max_offset),
         )
         return self.stats_class_modal_matrix_offset
+
+    def _clamp_stats_class_modal_dataset_class_offset(self):
+        """Keep the dataset class-grid offset within its valid range."""
+        class_options = list(self.stats_class_modal_dataset_class_options or [])
+        total_rows = (len(class_options) + 1) // 2
+        visible_rows = max(
+            1,
+            int(getattr(self, "stats_class_modal_dataset_class_visible_rows", 1) or 1),
+        )
+        max_offset = max(0, total_rows - visible_rows)
+        self.stats_class_modal_dataset_class_offset = max(
+            0,
+            min(int(self.stats_class_modal_dataset_class_offset or 0), max_offset),
+        )
+        return self.stats_class_modal_dataset_class_offset
 
     def _paste_clipboard_into_search(self):
         """Paste numeric clipboard content into the historic JSN search field."""
@@ -883,8 +924,15 @@ class DisplayWindow:
 
     def draw_stats_class_modal(self, canvas):
         """Draw modal dialog showing piece breakdown by class and final result."""
-        dialog_width = 1440 if self.stats_class_modal_view == "detail" else 1120
-        dialog_height = 650 if self.stats_class_modal_view == "detail" else 620
+        if self.stats_class_modal_view == "detail":
+            dialog_width = 1440
+            dialog_height = 650
+        elif self.stats_class_modal_view == "dataset":
+            dialog_width = 1260
+            dialog_height = 690
+        else:
+            dialog_width = 1120
+            dialog_height = 620
         dialog_x = (self.width - dialog_width) // 2
         dialog_y = (self.height - dialog_height) // 2
 
@@ -932,8 +980,13 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
+        self.stats_class_modal_dataset_result_rects = []
+        self.stats_class_modal_dataset_angle_rects = []
+        self.stats_class_modal_dataset_class_rects = []
+        self.stats_class_modal_dataset_export_rect = None
 
         tabs_y = dialog_y + 72
         tabs_height = 38
@@ -1215,8 +1268,9 @@ class DisplayWindow:
                     cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
                     cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
         else:
-            summary_tab_x = dialog_x + (dialog_width // 2) - tab_width - 12
-            matrix_tab_x = dialog_x + (dialog_width // 2) + 12
+            summary_tab_x = dialog_x + (dialog_width // 2) - tab_width - 146
+            matrix_tab_x = dialog_x + (dialog_width // 2) - (tab_width // 2)
+            dataset_tab_x = dialog_x + (dialog_width // 2) + 146
             self.stats_class_modal_summary_tab_rect = (
                 summary_tab_x,
                 tabs_y,
@@ -1225,6 +1279,12 @@ class DisplayWindow:
             )
             self.stats_class_modal_matrix_tab_rect = (
                 matrix_tab_x,
+                tabs_y,
+                tab_width,
+                tabs_height,
+            )
+            self.stats_class_modal_dataset_tab_rect = (
+                dataset_tab_x,
                 tabs_y,
                 tab_width,
                 tabs_height,
@@ -1238,6 +1298,11 @@ class DisplayWindow:
                 self.stats_class_modal_matrix_tab_rect,
                 "Matrix",
                 self.stats_class_modal_view == "matrix",
+            )
+            draw_tab_button(
+                self.stats_class_modal_dataset_tab_rect,
+                "Dataset",
+                self.stats_class_modal_view == "dataset",
             )
 
             panel_gap = 28
@@ -1417,6 +1482,282 @@ class DisplayWindow:
                     "No result data available",
                     use_status_colors=True,
                     top_offset=summary_panel_top_offset,
+                )
+            elif self.stats_class_modal_view == "dataset":
+                panel_y = dialog_y + 126
+                panel_h = dialog_height - 220
+                left_panel_w = 320
+                gap_w = 24
+                class_panel_x = dialog_x + 28 + left_panel_w + gap_w
+                class_panel_w = dialog_width - 56 - left_panel_w - gap_w
+                section_gap = 22
+                info_text = "Filters are applied by intersection. Images with multiple defects are copied once per matching class."
+                info_lines = self._wrap_text_to_width(
+                    info_text,
+                    font,
+                    0.58,
+                    2,
+                    dialog_width - 120,
+                    max_lines=2,
+                )
+                info_y = dialog_y + 108
+                for idx, line in enumerate(info_lines):
+                    cv2.putText(
+                        canvas,
+                        line,
+                        (dialog_x + 36, info_y + idx * 24),
+                        font,
+                        0.58,
+                        (65, 65, 65),
+                        2,
+                    )
+
+                def draw_dataset_section(panel_rect, title, options, selected_values, rect_target, value_formatter=None):
+                    px, py, pw, ph = panel_rect
+                    cv2.rectangle(canvas, (px, py), (px + pw, py + ph), (230, 230, 230), -1)
+                    cv2.rectangle(canvas, (px, py), (px + pw, py + ph), (120, 120, 120), 2)
+                    cv2.rectangle(canvas, (px + 2, py + 2), (px + pw - 2, py + 44), (65, 65, 65), -1)
+                    cv2.putText(canvas, title, (px + 16, py + 30), font, 0.72, (255, 255, 255), 2)
+
+                    chip_x = px + 12
+                    chip_y = py + 58
+                    chip_w = pw - 24
+                    chip_h = 42
+                    row_gap = 10
+                    for idx, option in enumerate(options or []):
+                        rect = (chip_x, chip_y + idx * (chip_h + row_gap), chip_w, chip_h)
+                        is_selected = option in (selected_values or set())
+                        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+                        fill = (75, 135, 75) if is_selected else (245, 245, 245)
+                        text_color = (255, 255, 255) if is_selected else (35, 35, 35)
+                        if title == "Result" and is_selected:
+                            fill = self._get_stats_result_color(option)
+                        if is_hovered and not is_selected:
+                            fill = (232, 239, 250)
+                        cv2.rectangle(
+                            canvas,
+                            (rect[0], rect[1]),
+                            (rect[0] + rect[2], rect[1] + rect[3]),
+                            fill,
+                            -1,
+                        )
+                        cv2.rectangle(
+                            canvas,
+                            (rect[0], rect[1]),
+                            (rect[0] + rect[2], rect[1] + rect[3]),
+                            (70, 70, 70),
+                            2,
+                        )
+                        label = value_formatter(option) if callable(value_formatter) else str(option)
+                        label = self._truncate_text_to_width(label, font, 0.65, 2, chip_w - 20)
+                        label_size = cv2.getTextSize(label, font, 0.65, 2)[0]
+                        label_x = rect[0] + 12
+                        label_y = rect[1] + (rect[3] + label_size[1]) // 2
+                        cv2.putText(canvas, label, (label_x, label_y), font, 0.65, text_color, 2)
+                        rect_target.append((rect, option))
+
+                result_panel_h = 242
+                angle_panel_h = 190
+                result_panel_rect = (dialog_x + 28, panel_y, left_panel_w, result_panel_h)
+                angle_panel_rect = (
+                    dialog_x + 28,
+                    panel_y + result_panel_h + section_gap,
+                    left_panel_w,
+                    angle_panel_h,
+                )
+
+                draw_dataset_section(
+                    result_panel_rect,
+                    "Result",
+                    list(self.stats_class_modal_dataset_result_options or []),
+                    set(self.stats_class_modal_dataset_selected_results or set()),
+                    self.stats_class_modal_dataset_result_rects,
+                )
+                draw_dataset_section(
+                    angle_panel_rect,
+                    "Angle",
+                    list(self.stats_class_modal_dataset_angle_options or []),
+                    set(self.stats_class_modal_dataset_selected_angles or set()),
+                    self.stats_class_modal_dataset_angle_rects,
+                    value_formatter=lambda value: str(value).upper(),
+                )
+
+                class_panel_rect = (class_panel_x, panel_y, class_panel_w, panel_h)
+                cv2.rectangle(
+                    canvas,
+                    (class_panel_rect[0], class_panel_rect[1]),
+                    (class_panel_rect[0] + class_panel_rect[2], class_panel_rect[1] + class_panel_rect[3]),
+                    (230, 230, 230),
+                    -1,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (class_panel_rect[0], class_panel_rect[1]),
+                    (class_panel_rect[0] + class_panel_rect[2], class_panel_rect[1] + class_panel_rect[3]),
+                    (120, 120, 120),
+                    2,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (class_panel_rect[0] + 2, class_panel_rect[1] + 2),
+                    (class_panel_rect[0] + class_panel_rect[2] - 2, class_panel_rect[1] + 44),
+                    (65, 65, 65),
+                    -1,
+                )
+                cv2.putText(
+                    canvas,
+                    "Class Name",
+                    (class_panel_rect[0] + 16, class_panel_rect[1] + 30),
+                    font,
+                    0.72,
+                    (255, 255, 255),
+                    2,
+                )
+
+                export_btn_w = 220
+                export_btn_h = 44
+                export_btn_x = class_panel_rect[0] + class_panel_rect[2] - export_btn_w - 16
+                export_btn_y = class_panel_rect[1] + class_panel_rect[3] - export_btn_h - 14
+                self.stats_class_modal_dataset_export_rect = (
+                    export_btn_x,
+                    export_btn_y,
+                    export_btn_w,
+                    export_btn_h,
+                )
+
+                summary_text = (
+                    f"Selected: {len(self.stats_class_modal_dataset_selected_results or [])} results, "
+                    f"{len(self.stats_class_modal_dataset_selected_angles or [])} angles, "
+                    f"{len(self.stats_class_modal_dataset_selected_classes or [])} class filters"
+                )
+                cv2.putText(
+                    canvas,
+                    self._truncate_text_to_width(summary_text, font, 0.56, 2, class_panel_rect[2] - 270),
+                    (class_panel_rect[0] + 16, class_panel_rect[1] + class_panel_rect[3] - 22),
+                    font,
+                    0.56,
+                    (80, 80, 80),
+                    2,
+                )
+
+                class_list_x = class_panel_rect[0] + 12
+                class_list_y = class_panel_rect[1] + 58
+                class_list_w = class_panel_rect[2] - 24
+                class_list_h = class_panel_rect[3] - 128
+                self.stats_class_modal_list_rect = (
+                    class_list_x,
+                    class_list_y,
+                    class_list_w,
+                    class_list_h,
+                )
+
+                class_options = list(self.stats_class_modal_dataset_class_options or [])
+                cols = 2
+                chip_gap_x = 12
+                chip_gap_y = 10
+                scroll_track_width = 12 if len(class_options) > 0 else 0
+                chip_w = (class_list_w - scroll_track_width - chip_gap_x) // cols
+                chip_h = 42
+                total_rows = (len(class_options) + cols - 1) // cols
+                visible_rows = max(1, class_list_h // (chip_h + chip_gap_y))
+                self.stats_class_modal_dataset_class_visible_rows = visible_rows
+                self._clamp_stats_class_modal_dataset_class_offset()
+                start_row = self.stats_class_modal_dataset_class_offset
+                start_idx = start_row * cols
+                end_idx = min(len(class_options), start_idx + visible_rows * cols)
+                visible_class_options = class_options[start_idx:end_idx]
+
+                if not visible_class_options:
+                    empty_text = "No class filters available"
+                    empty_size = cv2.getTextSize(empty_text, font, 0.78, 2)[0]
+                    empty_x = class_panel_rect[0] + (class_panel_rect[2] - empty_size[0]) // 2
+                    empty_y = class_panel_rect[1] + 120
+                    cv2.putText(canvas, empty_text, (empty_x, empty_y), font, 0.78, (70, 70, 70), 2)
+                else:
+                    selected_classes = set(self.stats_class_modal_dataset_selected_classes or set())
+                    for option_idx, option in enumerate(visible_class_options):
+                        row_idx = option_idx // cols
+                        col_idx = option_idx % cols
+                        rect = (
+                            class_list_x + col_idx * (chip_w + chip_gap_x),
+                            class_list_y + row_idx * (chip_h + chip_gap_y),
+                            chip_w,
+                            chip_h,
+                        )
+                        is_selected = option in selected_classes
+                        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+                        fill = (75, 135, 75) if is_selected else (245, 245, 245)
+                        text_color = (255, 255, 255) if is_selected else (35, 35, 35)
+                        if option == "All" and is_selected:
+                            fill = (80, 110, 160)
+                        if is_hovered and not is_selected:
+                            fill = (232, 239, 250)
+                        cv2.rectangle(
+                            canvas,
+                            (rect[0], rect[1]),
+                            (rect[0] + rect[2], rect[1] + rect[3]),
+                            fill,
+                            -1,
+                        )
+                        cv2.rectangle(
+                            canvas,
+                            (rect[0], rect[1]),
+                            (rect[0] + rect[2], rect[1] + rect[3]),
+                            (70, 70, 70),
+                            2,
+                        )
+                        label = self._truncate_text_to_width(str(option), font, 0.62, 2, chip_w - 20)
+                        label_size = cv2.getTextSize(label, font, 0.62, 2)[0]
+                        label_x = rect[0] + 10
+                        label_y = rect[1] + (rect[3] + label_size[1]) // 2
+                        cv2.putText(canvas, label, (label_x, label_y), font, 0.62, text_color, 2)
+                        self.stats_class_modal_dataset_class_rects.append((rect, option))
+
+                    if total_rows > visible_rows:
+                        track_x = class_panel_rect[0] + class_panel_rect[2] - 20
+                        track_y = class_list_y
+                        track_h = class_list_h - 4
+                        thumb_h = max(30, int(track_h * (visible_rows / total_rows)))
+                        max_offset = max(1, total_rows - visible_rows)
+                        thumb_y = track_y + int((track_h - thumb_h) * (start_row / max_offset))
+                        self.stats_class_modal_scrollbar_rect = (track_x, thumb_y, 10, thumb_h)
+                        cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (210, 210, 210), -1)
+                        cv2.rectangle(canvas, (track_x, thumb_y), (track_x + 10, thumb_y + thumb_h), (120, 120, 120), -1)
+                        cv2.rectangle(canvas, (track_x, track_y), (track_x + 10, track_y + track_h), (90, 90, 90), 1)
+
+                export_hovered = self._is_point_in_rect(
+                    self.mouse_x,
+                    self.mouse_y,
+                    self.stats_class_modal_dataset_export_rect,
+                )
+                export_fill = (68, 120, 196) if export_hovered else (88, 140, 216)
+                cv2.rectangle(
+                    canvas,
+                    (export_btn_x, export_btn_y),
+                    (export_btn_x + export_btn_w, export_btn_y + export_btn_h),
+                    export_fill,
+                    -1,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (export_btn_x, export_btn_y),
+                    (export_btn_x + export_btn_w, export_btn_y + export_btn_h),
+                    (0, 0, 0),
+                    2,
+                )
+                export_label = "Export Dataset"
+                export_label_size = cv2.getTextSize(export_label, font, 0.68, 2)[0]
+                cv2.putText(
+                    canvas,
+                    export_label,
+                    (
+                        export_btn_x + (export_btn_w - export_label_size[0]) // 2,
+                        export_btn_y + (export_btn_h + export_label_size[1]) // 2,
+                    ),
+                    font,
+                    0.68,
+                    (255, 255, 255),
+                    2,
                 )
             else:
                 table_x = dialog_x + 45
@@ -1640,6 +1981,8 @@ class DisplayWindow:
                     self._emit_action("stats_detail_scroll", delta=wheel_delta)
                 elif self.stats_class_modal_view == "matrix":
                     self._emit_action("stats_matrix_scroll", delta=wheel_delta)
+                elif self.stats_class_modal_view == "dataset":
+                    self._emit_action("stats_dataset_class_scroll", delta=wheel_delta)
             return
 
         if event == cv2.EVENT_LBUTTONUP:
@@ -1699,6 +2042,12 @@ class DisplayWindow:
                         self._emit_action("open_stats_matrix_view")
                         return
 
+                if self.stats_class_modal_dataset_tab_rect:
+                    bx, by, bw, bh = self.stats_class_modal_dataset_tab_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("open_stats_dataset_view")
+                        return
+
                 for rect, jsn_value in self.stats_class_modal_copy_rects:
                     bx, by, bw, bh = rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -1721,6 +2070,30 @@ class DisplayWindow:
                     bx, by, bw, bh = rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
                         self._emit_action("open_stats_status_detail", final_result=final_result)
+                        return
+
+                for rect, value in self.stats_class_modal_dataset_result_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("toggle_stats_dataset_result", value=value)
+                        return
+
+                for rect, value in self.stats_class_modal_dataset_angle_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("toggle_stats_dataset_angle", value=value)
+                        return
+
+                for rect, value in self.stats_class_modal_dataset_class_rects:
+                    bx, by, bw, bh = rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("toggle_stats_dataset_class", value=value)
+                        return
+
+                if self.stats_class_modal_dataset_export_rect:
+                    bx, by, bw, bh = self.stats_class_modal_dataset_export_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("export_stats_dataset")
                         return
 
                 return
