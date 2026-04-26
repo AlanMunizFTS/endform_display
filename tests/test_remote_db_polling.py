@@ -91,7 +91,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         controller = _PollingTestController(
             display=display,
             logger=logger,
-            config=ControllerConfig(),
+            config=ControllerConfig(remote_db_polling_enabled=True),
         )
 
         self.assertTrue(controller.start_remote_db_polling())
@@ -176,16 +176,17 @@ class TestRemoteDbPolling(unittest.TestCase):
             'DELETE FROM "model_results" WHERE id = ANY(%s)',
             ([101],),
         )
-        remote_db.close.assert_called_once_with()
+        remote_db.close.assert_not_called()
         self.assertTrue(
-            any("Retrieved 1 rows for forward scan using LIMIT 25" in call.args[0] for call in logger.info.call_args_list)
+            any(
+                "Retrieved 1 rows for forward scan using LIMIT 25" in call.args[0]
+                for call in logger.debug.call_args_list
+            )
         )
         self.assertTrue(
             any("scanned=1, pages=1, candidates=1, matched=1, synced=1, deleted_remote=1" in call.args[0] for call in logger.info.call_args_list)
         )
-        self.assertTrue(
-            any('"class_name": "dent"' in call.args[0] for call in logger.info.call_args_list)
-        )
+        self.assertFalse(any('"class_name": "dent"' in call.args[0] for call in logger.info.call_args_list))
 
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_maps_remote_nok_class_name_to_streaked(self, remote_db_factory):
@@ -292,7 +293,10 @@ class TestRemoteDbPolling(unittest.TestCase):
         local_db.execute.assert_not_called()
         remote_db.execute.assert_not_called()
         self.assertTrue(
-            any("img_missing.png" in call.args[0] for call in logger.info.call_args_list)
+            any(
+                "Missing local classified_images rows during poll: count=1 (examples: img_missing.png)" in call.args[0]
+                for call in logger.info.call_args_list
+            )
         )
         self.assertTrue(
             any(
@@ -341,6 +345,50 @@ class TestRemoteDbPolling(unittest.TestCase):
             if "No remote metadata available to sync" in call.args[0]
         ]
         self.assertEqual(len(idle_logs), 1)
+        remote_db_factory.assert_called_once()
+        remote_db.close.assert_not_called()
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_reuses_persistent_ssh_tunnel_across_iterations(self, remote_db_factory):
+        display = self._build_display()
+        display.db = self._build_db_client()
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_forward_scan_ratio=1.0,
+                remote_db_success_interval_sec=0.0,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = []
+        remote_db_factory.return_value = remote_db
+
+        first_delay = controller._run_remote_db_poll_iteration()
+        second_delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(first_delay, 2.0)
+        self.assertEqual(second_delay, 2.0)
+        self.assertIs(controller.remote_db_client, remote_db)
+        remote_db_factory.assert_called_once()
+        remote_db.close.assert_not_called()
+
+        controller.stop_remote_db_polling()
+
+        remote_db.close.assert_called_once_with()
+        self.assertIsNone(controller.remote_db_client)
 
     @patch("db.get_remote_db_connection_via_ssh", side_effect=RuntimeError("boom"))
     def test_remote_db_poll_iteration_uses_error_backoff_on_failure(self, remote_db_factory):
@@ -405,9 +453,46 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         self.assertEqual(delay, 9.0)
         remote_db.execute.assert_not_called()
+        remote_db.close.assert_not_called()
         self.assertTrue(
             any("Poll iteration failed: local insert failed" in call.args[0] for call in logger.error.call_args_list)
         )
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_recreates_tunnel_after_remote_fetch_failure(self, remote_db_factory):
+        display = self._build_display()
+        display.db = self._build_db_client()
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_error_backoff_sec=11.0,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        failed_remote_db = MagicMock()
+        failed_remote_db.fetch.side_effect = RuntimeError("remote tunnel down")
+        healthy_remote_db = MagicMock()
+        healthy_remote_db.fetch.return_value = []
+        remote_db_factory.side_effect = [failed_remote_db, healthy_remote_db]
+
+        first_delay = controller._run_remote_db_poll_iteration()
+        second_delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(first_delay, 11.0)
+        self.assertEqual(second_delay, 2.0)
+        self.assertEqual(remote_db_factory.call_count, 2)
+        failed_remote_db.close.assert_called_once_with()
+        healthy_remote_db.close.assert_not_called()
+        self.assertIs(controller.remote_db_client, healthy_remote_db)
 
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_uses_forward_cursor_to_reach_later_matches(self, remote_db_factory):

@@ -637,6 +637,7 @@ class MainController:
         self.import_worker_thread = None
         self.remote_db_poll_thread = None
         self.remote_db_stop_event = None
+        self.remote_db_client = None
         self._remote_db_placeholder_warned = False
         self._remote_db_idle_logged = False
         self.remote_db_forward_cursor_id = 0
@@ -772,18 +773,55 @@ class MainController:
             f"ORDER BY \"id\" ASC LIMIT %s"
         )
 
+    def _close_remote_db_client(self, reason=None):
+        remote_db = self.remote_db_client
+        self.remote_db_client = None
+        if remote_db is None:
+            return
+
+        try:
+            remote_db.close()
+        except Exception as exc:
+            self.logger.warn(
+                f"[REMOTE_DB] Error closing dedicated SSH tunnel ({reason or 'cleanup'}): {exc}",
+                allow_repeat=True,
+            )
+
+    def _ensure_remote_db_client(self):
+        if self.remote_db_client is not None:
+            return self.remote_db_client
+
+        ssh_credentials = self._resolve_remote_db_ssh_credentials()
+        if not ssh_credentials:
+            return None
+
+        from db import get_remote_db_connection_via_ssh
+
+        self.logger.debug(
+            f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
+        )
+        self.remote_db_client = get_remote_db_connection_via_ssh(
+            ssh_host=ssh_credentials["hostname"],
+            ssh_port=ssh_credentials["port"],
+            ssh_username=ssh_credentials["username"],
+            ssh_password=ssh_credentials["password"],
+        )
+        self.logger.debug("[REMOTE_DB] Remote PostgreSQL connection successful")
+        return self.remote_db_client
+
     def _serialize_remote_db_row(self, row):
         return json.dumps(row, ensure_ascii=True, sort_keys=True, default=str)
 
     def _collect_remote_model_result_rows(self, remote_db, query, after_id, limit, scan_label):
-        rows = remote_db.fetch(query, (after_id, limit))
+        try:
+            rows = remote_db.fetch(query, (after_id, limit))
+        except Exception:
+            if remote_db is self.remote_db_client:
+                self._close_remote_db_client("remote-fetch-failure")
+            raise
         if rows:
-            self.logger.info(
+            self.logger.debug(
                 f"[REMOTE_DB] Retrieved {len(rows)} rows for {scan_label} scan using LIMIT {limit}",
-            )
-        for idx, row in enumerate(rows, start=1):
-            self.logger.info(
-                f"[REMOTE_DB] {scan_label} row {idx}: {self._serialize_remote_db_row(row)}",
             )
         return rows
 
@@ -839,10 +877,15 @@ class MainController:
             return 0
 
         table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
-        return remote_db.execute(
-            f"DELETE FROM {table_name} WHERE id = ANY(%s)",
-            (remote_ids,),
-        )
+        try:
+            return remote_db.execute(
+                f"DELETE FROM {table_name} WHERE id = ANY(%s)",
+                (remote_ids,),
+            )
+        except Exception:
+            if remote_db is self.remote_db_client:
+                self._close_remote_db_client("remote-delete-failure")
+            raise
 
     def _scan_remote_rows_for_sync(
         self,
@@ -994,13 +1037,10 @@ class MainController:
             )
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
 
-        ssh_credentials = self._resolve_remote_db_ssh_credentials()
-        if not ssh_credentials:
-            return max(0.0, float(self.config.remote_db_error_backoff_sec))
-
-        remote_db = None
         try:
-            from db import get_remote_db_connection_via_ssh
+            remote_db = self._ensure_remote_db_client()
+            if remote_db is None:
+                return max(0.0, float(self.config.remote_db_error_backoff_sec))
 
             total_page_budget = max(1, int(self.config.remote_db_max_scan_pages))
             forward_page_budget = min(
@@ -1009,17 +1049,6 @@ class MainController:
             )
             backfill_page_budget = max(0, total_page_budget - forward_page_budget)
             target_sync_batch = max(1, int(self.config.remote_db_target_sync_batch))
-
-            self.logger.debug(
-                f"[REMOTE_DB] Opening dedicated SSH tunnel to {ssh_credentials['hostname']}:{ssh_credentials['port']}",
-            )
-            remote_db = get_remote_db_connection_via_ssh(
-                ssh_host=ssh_credentials["hostname"],
-                ssh_port=ssh_credentials["port"],
-                ssh_username=ssh_credentials["username"],
-                ssh_password=ssh_credentials["password"],
-            )
-            self.logger.debug("[REMOTE_DB] Remote PostgreSQL connection successful")
 
             forward_scan = self._scan_remote_rows_for_sync(
                 remote_db=remote_db,
@@ -1080,9 +1109,18 @@ class MainController:
                     f"deleted_remote={sync_summary['deleted_count']}",
                 )
             if sync_summary["missing_local"]:
+                missing_count = len(sync_summary["missing_local"])
+                missing_preview = ", ".join(sync_summary["missing_local"][:3])
+                extra_missing = max(0, missing_count - 3)
+                preview_suffix = ""
+                if missing_preview:
+                    preview_suffix = f" (examples: {missing_preview}"
+                    if extra_missing > 0:
+                        preview_suffix += f", +{extra_missing} more"
+                    preview_suffix += ")"
                 self.logger.info(
-                    "[REMOTE_DB] Missing local classified_images rows: "
-                    + ", ".join(sync_summary["missing_local"][:10]),
+                    f"[REMOTE_DB] Missing local classified_images rows during poll: "
+                    f"count={missing_count}{preview_suffix}",
                 )
             elif not has_activity and not self._remote_db_idle_logged:
                 idle_backoff = max(0.0, float(self.config.remote_db_idle_backoff_sec))
@@ -1101,12 +1139,6 @@ class MainController:
             self._remote_db_idle_logged = False
             self.logger.error(f"[REMOTE_DB] Poll iteration failed: {exc}", allow_repeat=True)
             return max(0.0, float(self.config.remote_db_error_backoff_sec))
-        finally:
-            if remote_db is not None:
-                try:
-                    remote_db.close()
-                except Exception:
-                    pass
 
     def _remote_db_polling_worker(self):
         self.logger.info("[REMOTE_DB] Polling worker started", allow_repeat=True)
@@ -1117,6 +1149,7 @@ class MainController:
                     break
                 _sleep_with_stop(self.remote_db_stop_event, delay_sec)
         finally:
+            self._close_remote_db_client("polling-worker-stop")
             self.logger.info("[REMOTE_DB] Polling worker stopped", allow_repeat=True)
 
     def start_remote_db_polling(self):
@@ -1143,6 +1176,7 @@ class MainController:
                 self.remote_db_poll_thread.join(timeout=5)
             except Exception:
                 pass
+        self._close_remote_db_client("polling-stop")
         self.remote_db_poll_thread = None
         self.remote_db_stop_event = None
 
