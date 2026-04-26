@@ -152,6 +152,24 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         action_handler.assert_called_once_with("open_stats_matrix_view")
 
     @patch("display_window.get_db_connection")
+    def test_stats_class_modal_matrix_export_click_emits_action(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_matrix_report_rect = (520, 140, 180, 36)
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            560,
+            160,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("export_stats_matrix_report")
+
+    @patch("display_window.get_db_connection")
     def test_stats_class_modal_dataset_tab_click_emits_view_action(self, mock_get_db_connection):
         mock_get_db_connection.return_value = MagicMock()
         action_handler = MagicMock()
@@ -235,6 +253,7 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertIsNotNone(display.stats_class_modal_list_rect)
         self.assertIsNotNone(display.stats_class_modal_matrix_tab_rect)
+        self.assertIsNotNone(display.stats_class_modal_matrix_report_rect)
 
     @patch("display_window.get_db_connection")
     def test_draw_stats_class_modal_dataset_handles_filter_panels(self, mock_get_db_connection):

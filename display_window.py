@@ -152,6 +152,7 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_matrix_report_rect = None
         self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
@@ -520,6 +521,7 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_matrix_report_rect = None
         self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
@@ -980,6 +982,7 @@ class DisplayWindow:
         self.stats_class_modal_back_rect = None
         self.stats_class_modal_summary_tab_rect = None
         self.stats_class_modal_matrix_tab_rect = None
+        self.stats_class_modal_matrix_report_rect = None
         self.stats_class_modal_dataset_tab_rect = None
         self.stats_class_modal_list_rect = None
         self.stats_class_modal_scrollbar_rect = None
@@ -1784,6 +1787,59 @@ class DisplayWindow:
                     2,
                 )
 
+                report_button_width = 180
+                report_button_height = 36
+                report_button_x = dialog_x + dialog_width - report_button_width - 34
+                report_button_y = dialog_y + 82
+                self.stats_class_modal_matrix_report_rect = (
+                    report_button_x,
+                    report_button_y,
+                    report_button_width,
+                    report_button_height,
+                )
+                report_hovered = self._is_point_in_rect(
+                    self.mouse_x,
+                    self.mouse_y,
+                    self.stats_class_modal_matrix_report_rect,
+                )
+                report_fill = (68, 120, 196) if report_hovered else (88, 140, 216)
+                cv2.rectangle(
+                    canvas,
+                    (report_button_x, report_button_y),
+                    (
+                        report_button_x + report_button_width,
+                        report_button_y + report_button_height,
+                    ),
+                    report_fill,
+                    -1,
+                )
+                cv2.rectangle(
+                    canvas,
+                    (report_button_x, report_button_y),
+                    (
+                        report_button_x + report_button_width,
+                        report_button_y + report_button_height,
+                    ),
+                    (0, 0, 0),
+                    2,
+                )
+                report_text = "Export Excel"
+                report_text_size = cv2.getTextSize(report_text, font, 0.66, 2)[0]
+                cv2.putText(
+                    canvas,
+                    report_text,
+                    (
+                        report_button_x
+                        + (report_button_width - report_text_size[0]) // 2,
+                        report_button_y
+                        + (report_button_height + report_text_size[1]) // 2,
+                    ),
+                    font,
+                    0.66,
+                    (255, 255, 255),
+                    2,
+                )
+
                 matrix_rows = list(self.stats_class_modal_matrix_rows or [])
                 total_row = matrix_rows[-1] if matrix_rows and matrix_rows[-1].get("is_total") else None
                 data_rows = matrix_rows[:-1] if total_row else matrix_rows
@@ -2040,6 +2096,12 @@ class DisplayWindow:
                     bx, by, bw, bh = self.stats_class_modal_matrix_tab_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
                         self._emit_action("open_stats_matrix_view")
+                        return
+
+                if self.stats_class_modal_matrix_report_rect:
+                    bx, by, bw, bh = self.stats_class_modal_matrix_report_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self._emit_action("export_stats_matrix_report")
                         return
 
                 if self.stats_class_modal_dataset_tab_rect:
