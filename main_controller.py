@@ -137,6 +137,8 @@ def _download_images_background_worker(
     image_extensions = (".png", ".jpg", ".jpeg", ".bmp")
     ssh_client = None
     sftp_client = None
+    last_sync_signature = None
+    last_skipped_signature = None
 
     file_manager.makedirs(local_temp_dir, exist_ok=True)
 
@@ -258,20 +260,31 @@ def _download_images_background_worker(
                     file_manager.sftp_get(sftp_client, img, local_file)
                     downloaded_count += 1
 
-                logger.info(
-                    f"[{worker_label}] Sync summary: "
-                    f"remote_images={len(all_remote_images)}, "
-                    f"candidate_jsns={len(candidate_jsns)}, "
-                    f"approved_jsns={len(approved_jsns)}, "
-                    f"downloaded={downloaded_count}",
-                    allow_repeat=True,
+                sync_signature = (
+                    len(all_remote_images),
+                    len(candidate_jsns),
+                    len(approved_jsns),
+                    downloaded_count,
                 )
-                if skipped_jsns:
+                if downloaded_count > 0 or sync_signature != last_sync_signature:
                     logger.info(
-                        f"[{worker_label}] Skipped JSNs not ready in remote DB: "
-                        + ", ".join(skipped_jsns[:10]),
+                        f"[{worker_label}] Sync summary: "
+                        f"remote_images={len(all_remote_images)}, "
+                        f"candidate_jsns={len(candidate_jsns)}, "
+                        f"approved_jsns={len(approved_jsns)}, "
+                        f"downloaded={downloaded_count}",
                         allow_repeat=True,
                     )
+                last_sync_signature = sync_signature
+
+                skipped_signature = tuple(skipped_jsns[:10])
+                if skipped_jsns and skipped_signature != last_skipped_signature:
+                    logger.info(
+                        f"[{worker_label}] Skipped JSNs not ready in remote DB: "
+                        + ", ".join(skipped_signature),
+                        allow_repeat=True,
+                    )
+                last_skipped_signature = skipped_signature if skipped_jsns else None
 
                 _sleep_with_stop(stop_event, check_interval)
 
