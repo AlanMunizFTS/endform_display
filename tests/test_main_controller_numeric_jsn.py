@@ -370,7 +370,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
 
         summary_logs = [
             call.args[0]
-            for call in fake_logger.info.call_args_list
+            for call in fake_logger.debug.call_args_list
             if "Sync summary:" in str(call.args[0])
         ]
         self.assertEqual(len(summary_logs), 1)
@@ -437,7 +437,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
 
         summary_logs = [
             call.args[0]
-            for call in fake_logger.info.call_args_list
+            for call in fake_logger.debug.call_args_list
             if "Sync summary:" in str(call.args[0])
         ]
         self.assertEqual(len(summary_logs), 2)

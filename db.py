@@ -308,7 +308,7 @@ class PostgresDB:
             ]
 
             if not pending_files:
-                logger.info("[DB] Schema already up to date", allow_repeat=True)
+                logger.debug("[DB] Schema already up to date", allow_repeat=True)
                 return []
 
             logger.info(

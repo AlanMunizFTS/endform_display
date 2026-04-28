@@ -267,7 +267,7 @@ def _download_images_background_worker(
                     downloaded_count,
                 )
                 if downloaded_count > 0 or sync_signature != last_sync_signature:
-                    logger.info(
+                    logger.debug(
                         f"[{worker_label}] Sync summary: "
                         f"remote_images={len(all_remote_images)}, "
                         f"candidate_jsns={len(candidate_jsns)}, "
@@ -279,7 +279,7 @@ def _download_images_background_worker(
 
                 skipped_signature = tuple(skipped_jsns[:10])
                 if skipped_jsns and skipped_signature != last_skipped_signature:
-                    logger.info(
+                    logger.debug(
                         f"[{worker_label}] Skipped JSNs not ready in remote DB: "
                         + ", ".join(skipped_signature),
                         allow_repeat=True,
