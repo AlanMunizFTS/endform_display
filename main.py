@@ -6,7 +6,6 @@ from main_controller import (
     _display_sort_key as _controller_display_sort_key,
     download_live_images_local as _download_live_images_local_impl,
     download_live_images_remote as _download_live_images_remote_impl,
-    process_remote_event as _process_remote_event_impl,
 )
 from settings import get_optional_sftp_settings
 from utilities.log import get_logger, install_print_logger
@@ -42,10 +41,6 @@ def _download_live_images_remote(
         logger=logger,
         max_images=max_images,
     )
-
-
-def _process_remote_event(msg, display, logger):
-    return _process_remote_event_impl(msg=msg, display=display, logger=logger)
 
 
 def main():

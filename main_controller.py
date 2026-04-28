@@ -4,7 +4,7 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from multiprocessing import Event, Process, Queue
+from multiprocessing import Event, Process
 from threading import Thread
 
 from dataset_exporter import (
@@ -505,61 +505,6 @@ def _download_live_images_remote_impl(
         return []
 
 
-def _process_remote_event_impl(msg, display, logger):
-    if not isinstance(msg, dict):
-        return
-
-    msg_type = msg.get("type")
-    if msg_type == "stdout":
-        line = str(msg.get("line", ""))
-        lower_line = line.lower()
-
-        if (not display.trigger_active) and ("waiting for trigger" in lower_line):
-            display.trigger_active = True
-            logger.info(
-                "[REMOTE] Trigger status: ACTIVATED (found 'Waiting for Trigger')",
-                allow_repeat=True,
-            )
-        if "done signal sent to plc" in lower_line:
-            if getattr(display, "manual_capture_pending", False):
-                display.manual_capture_pending = False
-
-    elif msg_type == "stderr":
-        return
-
-
-def _show_capture_modal(display, message, color, duration_sec=None):
-    if display is None:
-        return
-
-    modal_fn = getattr(display, "show_capture_modal", None)
-    if callable(modal_fn):
-        modal_fn(message, color, duration_sec=duration_sec)
-        return
-
-    display.capture_modal_text = str(message or "").strip()
-    display.capture_modal_color = tuple(color) if color is not None else (0, 0, 200)
-    display.capture_modal_visible = bool(display.capture_modal_text)
-    if duration_sec is None:
-        display.capture_modal_expires_at = 0.0
-    else:
-        display.capture_modal_expires_at = time.time() + max(0.05, float(duration_sec))
-
-
-def _clear_capture_modal(display):
-    if display is None:
-        return
-
-    clear_fn = getattr(display, "clear_capture_modal", None)
-    if callable(clear_fn):
-        clear_fn()
-        return
-
-    display.capture_modal_visible = False
-    display.capture_modal_text = ""
-    display.capture_modal_expires_at = 0.0
-
-
 def download_live_images_local(file_manager, local_path, rotation_state, logger, max_images=7):
     return _download_live_images_local_impl(
         file_manager=file_manager,
@@ -592,14 +537,6 @@ def download_live_images_remote(
     )
 
 
-def process_remote_event(msg, display, logger):
-    _process_remote_event_impl(
-        msg=msg,
-        display=display,
-        logger=logger,
-    )
-
-
 @dataclass
 class ControllerConfig:
     image_extensions: tuple = (".png", ".jpg", ".jpeg", ".bmp")
@@ -618,11 +555,6 @@ class ControllerConfig:
     remote_db_idle_backoff_sec: float = 2.0
     remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
-    remote_command: str = (
-        "sh -lc 'echo $$; "
-        "cd ~/Vision-Standard 2>/dev/null || cd ~/vision-standard; "
-        "stdbuf -oL -eL python3 -u main.py -f art_1861_endform -p omron -d teledyne 2>&1'"
-    )
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
@@ -659,12 +591,6 @@ class MainController:
         self.next_reconnect_ts = 0.0
         self.db_connected = False
         self.next_db_reconnect_ts = 0.0
-        self.remote_process = None
-        self.remote_pid = None
-        self.stop_event = None
-        self.pid_queue = None
-        self.event_queue = None
-        self.stdin_queue = None
 
         self.live_rotation_state = {
             "current_offset": 0,
@@ -2192,89 +2118,6 @@ class MainController:
         self.next_reconnect_ts = time.monotonic() + self.config.sftp_reconnect_interval_sec
         self.logger.warn("[SSH] Reconnect failed, keeping local fallback", allow_repeat=True)
         return False
-
-    def start_remote_process(self):
-        if self.remote_process and self.remote_process.is_alive():
-            self.display.remote_requested = True
-            return
-        if not self.sftp_app:
-            self.logger.warn("[REMOTE] Start requested but SFTP is disabled", allow_repeat=True)
-            self.display.remote_requested = False
-            _clear_capture_modal(self.display)
-            return
-        if not self.sftp_connected and not self.try_connect("remote-start"):
-            self.logger.warn("[REMOTE] Cannot start remote process while disconnected", allow_repeat=True)
-            self.display.remote_requested = False
-            _clear_capture_modal(self.display)
-            return
-
-        self.logger.info("[REMOTE] Start requested", allow_repeat=True)
-        self.stop_event = Event()
-        self.pid_queue = Queue()
-        self.event_queue = Queue()
-        self.stdin_queue = Queue()
-        self.remote_pid = None
-        self.remote_process = self.sftp_app.start_remote_process_multiprocess(
-            self.config.remote_command,
-            pid_queue=self.pid_queue,
-            stop_event=self.stop_event,
-            status_queue=self.event_queue,
-            stdin_queue=self.stdin_queue,
-        )
-        self.display.remote_requested = True
-        self.display.trigger_active = False
-        self.display.manual_capture_pending = False
-        _clear_capture_modal(self.display)
-        try:
-            self.remote_pid = self.pid_queue.get(timeout=5)
-            self.logger.info(f"[REMOTE] PID: {self.remote_pid}", allow_repeat=True)
-        except Exception:
-            self.remote_pid = None
-
-    def stop_remote_process(self, reason="user"):
-        if self.stop_event is None and self.remote_process is None and self.remote_pid is None:
-            self.display.remote_requested = False
-            self.display.trigger_active = False
-            self.display.manual_capture_pending = False
-            _clear_capture_modal(self.display)
-            return
-        self.logger.info(f"[REMOTE] Stop requested ({reason})", allow_repeat=True)
-        if self.stop_event is not None:
-            self.stop_event.set()
-        if self.remote_process and self.remote_process.is_alive():
-            self.remote_process.join(timeout=5)
-        if self.remote_process and self.remote_process.is_alive():
-            self.remote_process.terminate()
-            self.remote_process.join(timeout=2)
-        if self.remote_pid and self.sftp_app and self.sftp_connected and self.sftp_app.ssh_client:
-            try:
-                self.sftp_app.ssh_client.exec_command(f"kill {self.remote_pid}")
-            except Exception:
-                pass
-        self.logger.info("[REMOTE] Stop sequence completed", allow_repeat=True)
-        self.remote_process = None
-        self.remote_pid = None
-        self.stop_event = None
-        self.pid_queue = None
-        self.event_queue = None
-        self.stdin_queue = None
-        self.display.remote_requested = False
-        self.display.trigger_active = False
-        self.display.manual_capture_pending = False
-        _clear_capture_modal(self.display)
-
-    def _process_remote_events(self):
-        if self.event_queue is not None:
-            try:
-                while True:
-                    msg = self.event_queue.get_nowait()
-                    _process_remote_event_impl(
-                        msg=msg,
-                        display=self.display,
-                        logger=self.logger,
-                    )
-            except Exception:
-                pass
 
     def _download_live_images_local(self):
         return _download_live_images_local_impl(
@@ -4611,14 +4454,6 @@ class MainController:
             self.exit_historic_mode()
         elif action == "request_exit":
             d.exit_requested = True
-        elif action == "request_remote_start":
-            self.start_remote_process()
-        elif action == "request_remote_stop":
-            self.stop_remote_process("button")
-        elif action == "send_remote_input":
-            if self.stdin_queue is not None:
-                self.stdin_queue.put("t\n")
-                d.manual_capture_pending = True
         elif action == "next_historic_batch":
             self.next_historic_batch()
         elif action == "prev_historic_batch":
@@ -4840,16 +4675,6 @@ class MainController:
                     self._check_and_register_new_historic_images()
                     self.last_historic_check = time.monotonic()
 
-                if self.display.remote_action_request:
-                    action = self.display.remote_action_request
-                    self.display.remote_action_request = None
-                    if action == "start":
-                        self.start_remote_process()
-                    elif action == "stop":
-                        self.stop_remote_process("button")
-
-                self._process_remote_events()
-
                 if self.sftp_app and not self.sftp_connected and time.monotonic() >= self.next_reconnect_ts:
                     self.try_connect("periodic-retry")
 
@@ -4874,7 +4699,6 @@ class MainController:
                     elif self.sftp_connected and self.sftp_app:
                         remote_images = self._download_live_images_remote()
                         if not self.sftp_app.sftp_client:
-                            self.stop_remote_process("sftp-disconnect")
                             self.handle_disconnect("live-download-failure")
                         elif remote_images:
                             # Delete old files immediately so tmp_display never exceeds max_images
@@ -4907,7 +4731,6 @@ class MainController:
 
     def shutdown(self):
         self.stop_remote_db_polling()
-        self.stop_remote_process("exit")
         if self.sftp_app:
             self.sftp_app.disconnect_sftp()
         self.stop_historic_download_worker()

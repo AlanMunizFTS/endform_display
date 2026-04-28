@@ -46,7 +46,6 @@ class DisplayWindow:
         self.refresh_interval = refresh_interval  # Seconds between updates
         self.last_refresh_time = 0
         self.sftp_client = None  # SFTP client to upload images
-        self.remote_controls_enabled = False
         self.sftp_credentials = sftp_credentials  # Credenciales SFTP para multiprocessing
         self.file_manager = file_manager or FileManager()
         self.controller = controller
@@ -88,9 +87,6 @@ class DisplayWindow:
         self.import_button_rect = None  # Import button rect
         self.export_button_rect = None  # Export button rect
         self.exit_button_rect = None  # Exit button rect
-        self.start_stop_button_rect = None  # Start/Stop button rect
-        self.remote_action_request = None  # "start" or "stop" requested by UI
-        self.remote_requested = False  # Whether remote process is requested to run
         self.show_reset_confirm = False  # Show reset confirmation dialog
         self.reset_confirm_button_rect = None  # Confirm button rect
         self.reset_cancel_button_rect = None  # Cancel button rect
@@ -117,7 +113,6 @@ class DisplayWindow:
         self.reset_progress_title = "Resetting Dataset"
         self.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
         self.exit_requested = False
-        self.trigger_active = False  # Trigger status for normal view
         self.trash_icon = None
         self.trash_icon_size = None
         self._trash_icon_warned = False
@@ -194,11 +189,6 @@ class DisplayWindow:
         self.toast_message_is_error = False
         self.toast_message_time = 0.0
         self.toast_message_duration_sec = 1.8
-        self.capture_modal_visible = False
-        self.capture_modal_text = ""
-        self.capture_modal_color = (0, 0, 200)
-        self.capture_modal_expires_at = 0.0
-        self.manual_capture_pending = False
         self.set_sftp_client(sftp_client)
 
     def set_db_connection(self, db_client):
@@ -218,16 +208,8 @@ class DisplayWindow:
         )
 
     def set_sftp_client(self, sftp_client):
-        """Update active SFTP client and dependent UI/control state."""
+        """Update active SFTP client."""
         self.sftp_client = sftp_client
-        self.remote_controls_enabled = bool(self.sftp_client)
-
-        if not self.remote_controls_enabled:
-            self.remote_action_request = None
-            self.remote_requested = False
-            self.trigger_active = False
-            self.manual_capture_pending = False
-            self.clear_capture_modal()
 
     def set_controller(self, controller):
         self.controller = controller
@@ -320,84 +302,6 @@ class DisplayWindow:
         self.toast_message_is_error = bool(is_error)
         self.toast_message_time = time.time()
         self.toast_message_duration_sec = max(0.5, float(duration_sec))
-
-    def show_capture_modal(self, message, color, duration_sec=None):
-        """Show a large blocking-style modal for remote capture status."""
-        self.capture_modal_text = str(message or "").strip()
-        self.capture_modal_color = tuple(color) if color is not None else (0, 0, 200)
-        self.capture_modal_visible = bool(self.capture_modal_text)
-        if duration_sec is None:
-            self.capture_modal_expires_at = 0.0
-        else:
-            self.capture_modal_expires_at = time.time() + max(0.05, float(duration_sec))
-
-    def clear_capture_modal(self):
-        """Clear any active remote capture status modal."""
-        self.capture_modal_visible = False
-        self.capture_modal_text = ""
-        self.capture_modal_expires_at = 0.0
-
-    def draw_capture_modal(self, canvas):
-        """Draw a large centered modal for remote capture status."""
-        if not self.capture_modal_visible or not self.capture_modal_text:
-            return canvas
-
-        if self.capture_modal_expires_at and time.time() >= self.capture_modal_expires_at:
-            self.clear_capture_modal()
-            return canvas
-
-        dialog_width = max(320, int(self.width * 0.75))
-        dialog_height = max(240, int(self.height * 0.75))
-        dialog_x = (self.width - dialog_width) // 2
-        dialog_y = (self.height - dialog_height) // 2
-
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
-
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (245, 245, 245),
-            -1,
-        )
-        cv2.rectangle(
-            canvas,
-            (dialog_x, dialog_y),
-            (dialog_x + dialog_width, dialog_y + dialog_height),
-            (0, 0, 0),
-            4,
-        )
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        text = self.capture_modal_text
-        available_width = max(40, dialog_width - 80)
-        available_height = max(40, dialog_height - 80)
-        font_scale = 8.0
-        thickness = 10
-        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-
-        while (
-            font_scale > 0.6
-            and (text_size[0] > available_width or text_size[1] > available_height)
-        ):
-            font_scale -= 0.1
-            thickness = max(2, int(round(font_scale * 1.2)))
-            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-
-        text_x = dialog_x + (dialog_width - text_size[0]) // 2
-        text_y = dialog_y + (dialog_height + text_size[1]) // 2
-        cv2.putText(
-            canvas,
-            text,
-            (text_x, text_y),
-            font,
-            font_scale,
-            self.capture_modal_color,
-            thickness,
-        )
-        return canvas
 
     def _copy_text_to_clipboard(self, text):
         """Copy text to the system clipboard with a Windows-first fallback."""
@@ -2272,21 +2176,6 @@ class DisplayWindow:
                         self._emit_action("import_display_state", package_path=package_path)
                     return
 
-            # START/STOP button - only in normal mode
-            if (
-                self.remote_controls_enabled
-                and self.start_stop_button_rect
-                and not self.historic_mode
-                and not self.show_no_images_dialog
-            ):
-                bx, by, bw, bh = self.start_stop_button_rect
-                if bx <= x <= bx + bw and by <= y <= by + bh:
-                    if self.remote_requested:
-                        self._emit_action("request_remote_stop")
-                    else:
-                        self._emit_action("request_remote_start")
-                    return
-            
             # BACK button - exit historic mode
             if self.back_button_rect and self.historic_mode:
                 bx, by, bw, bh = self.back_button_rect
@@ -2924,75 +2813,6 @@ class DisplayWindow:
         cv2.putText(canvas, text_exit, (text_x_exit, text_y_exit), font, font_scale,
                    (255, 255, 255), thickness)
 
-        return canvas
-
-    def draw_start_stop_button(self, canvas):
-        """Draw START/STOP button on canvas (normal mode)"""
-        button_width = 180
-        button_height = 60
-        margin_bottom = 10
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.0
-        thickness = 2
-
-        x_button = (self.width - button_width) // 2
-        y_button = self.height - button_height - margin_bottom
-
-        self.start_stop_button_rect = (x_button, y_button, button_width, button_height)
-        
-        # Check if button is hovered or pressed
-        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.start_stop_button_rect)
-        is_pressed = is_hovered and self.mouse_button_down
-        
-        # Scale button on hover
-        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
-        scaled_rect = self._scale_rect(self.start_stop_button_rect, scale_factor)
-        x_draw, y_draw, w_draw, h_draw = scaled_rect
-
-        if self.remote_requested:
-            button_color = (0, 0, 200)
-            text_label = "STOP"
-        else:
-            button_color = (0, 150, 0)
-            text_label = "START"
-        
-        border_color = (0, 0, 0)
-        border_width = 2
-
-        cv2.rectangle(canvas, (x_draw, y_draw), (x_draw + w_draw, y_draw + h_draw),
-                     button_color, -1)
-        cv2.rectangle(canvas, (x_draw, y_draw), (x_draw + w_draw, y_draw + h_draw),
-                     border_color, border_width)
-
-        text_size = cv2.getTextSize(text_label, font, font_scale, thickness)[0]
-        text_x = x_draw + (w_draw - text_size[0]) // 2
-        text_y = y_draw + (h_draw + text_size[1]) // 2
-
-        cv2.putText(canvas, text_label, (text_x, text_y), font, font_scale,
-                   (255, 255, 255), thickness)
-
-        return canvas
-
-    def draw_trigger_status(self, canvas):
-        """Draw trigger status in the top section (normal mode)."""
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.2
-        thickness = 3
-        if self.trigger_active:
-            text = "ACTIVATED"
-            color = (0, 200, 0)
-        elif self.remote_requested:
-            text = "INITIATING"
-            color = (0, 165, 255)
-        else:
-            text = "DEACTIVATED"
-            color = (0, 0, 200)
-
-        text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
-        text_x = (self.width - text_size[0]) // 2
-        text_y = 60
-        cv2.putText(canvas, text, (text_x, text_y), font, font_scale, color, thickness)
         return canvas
 
     def draw_info_icon(self, canvas):
@@ -4425,18 +4245,6 @@ class DisplayWindow:
                     self._emit_action("search_append_digit", digit=chr(key))
                     return True
 
-            # Enter key sends "t\n" to remote process stdin when it's running
-            if (
-                key == 13
-                and not self.search_active
-                and self.remote_requested
-                and not self.show_stats_class_modal
-                and not self.show_piece_date_dialog
-                and not self.show_piece_number_dialog
-                and not self.show_no_images_dialog
-            ):
-                self._emit_action("send_remote_input")
-
             # Historic navigation with keyboard arrows (left/right)
             if (
                 key_ex != -1
@@ -4720,15 +4528,9 @@ class DisplayWindow:
 
         # Normal mode: only HISTORIC button
         if not self.historic_mode:
-            if self.remote_controls_enabled:
-                canvas = self.draw_trigger_status(canvas)
             canvas = self.draw_historic_button(canvas)
             canvas = self.draw_import_button(canvas)
             canvas = self.draw_export_button(canvas)
-            if self.remote_controls_enabled:
-                canvas = self.draw_start_stop_button(canvas)
-            else:
-                self.start_stop_button_rect = None
             canvas = self.draw_exit_button(canvas)
         else:
             # Historic mode: show JSN in upper blue bar
@@ -4797,7 +4599,6 @@ class DisplayWindow:
         else:
             canvas = self.draw_sync_message(canvas)
             canvas = self.draw_toast_message(canvas)
-        canvas = self.draw_capture_modal(canvas)
         if self.db_blocking:
             canvas = self.draw_db_block_dialog(canvas)
 

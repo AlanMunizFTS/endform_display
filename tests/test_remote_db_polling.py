@@ -1,5 +1,4 @@
 import threading
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -9,12 +8,13 @@ from main_controller import ControllerConfig, MainController
 class _PollingTestController(MainController):
     def __init__(self, *args, **kwargs):
         self.worker_started_event = threading.Event()
+        self.worker_release_event = threading.Event()
         super().__init__(*args, **kwargs)
 
     def _remote_db_polling_worker(self):
         self.worker_started_event.set()
         while self.remote_db_stop_event is not None and not self.remote_db_stop_event.is_set():
-            time.sleep(0.01)
+            self.worker_release_event.wait(0.01)
 
 
 class TestRemoteDbPolling(unittest.TestCase):
@@ -27,9 +27,6 @@ class TestRemoteDbPolling(unittest.TestCase):
         display.historic_db_registered = False
         display.image_paths = []
         display.exit_requested = False
-        display.remote_action_request = None
-        display.remote_requested = False
-        display.trigger_active = False
         display.file_manager = None
         display.sftp_credentials = None
         display.set_controller = MagicMock()
@@ -73,18 +70,24 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_shutdown_stops_remote_db_polling(self):
         display = self._build_display()
         logger = self._build_logger()
-        controller = MainController(display=display, logger=logger, config=ControllerConfig())
+        sftp_app = MagicMock()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(),
+            sftp_app=sftp_app,
+        )
         controller.stop_remote_db_polling = MagicMock()
-        controller.stop_remote_process = MagicMock()
         controller.stop_historic_download_worker = MagicMock()
 
         controller.shutdown()
 
         controller.stop_remote_db_polling.assert_called_once_with()
-        controller.stop_remote_process.assert_called_once_with("exit")
+        sftp_app.disconnect_sftp.assert_called_once_with()
         controller.stop_historic_download_worker.assert_called_once_with()
         display.close.assert_called_once_with()
 
+    @patch("main_controller.Event", threading.Event)
     def test_start_remote_db_polling_does_not_duplicate_worker(self):
         display = self._build_display()
         logger = self._build_logger()
