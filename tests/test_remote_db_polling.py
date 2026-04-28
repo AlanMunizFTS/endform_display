@@ -146,7 +146,7 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         delay = controller._run_remote_db_poll_iteration()
 
-        self.assertEqual(delay, 0.0)
+        self.assertEqual(delay, 1.0)
         remote_db_factory.assert_called_once_with(
             ssh_host="192.168.1.179",
             ssh_port=22,
@@ -226,7 +226,7 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         delay = controller._run_remote_db_poll_iteration()
 
-        self.assertEqual(delay, 0.0)
+        self.assertEqual(delay, 1.0)
         self.assertEqual(local_db.execute.call_count, 1)
         self.assertEqual(
             local_db.execute.call_args_list[0].args,
@@ -533,7 +533,7 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         delay = controller._run_remote_db_poll_iteration()
 
-        self.assertEqual(delay, 0.0)
+        self.assertEqual(delay, 1.0)
         self.assertEqual(
             remote_db.fetch.call_args_list[0].args,
             (

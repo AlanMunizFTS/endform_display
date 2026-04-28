@@ -120,6 +120,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = []
+        fake_manager.sftp_stat.side_effect = RuntimeError("stat unsupported")
         fake_manager.sftp_listdir.return_value = [
             "22700003_front_OK.png",
             "22700003_side_OK.png",
@@ -202,6 +203,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = []
+        fake_manager.sftp_stat.side_effect = RuntimeError("stat unsupported")
         fake_manager.sftp_listdir.return_value = [
             "22700003_front_OK.png",
             "22700003_side_OK.png",
@@ -276,6 +278,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = []
+        fake_manager.sftp_stat.side_effect = RuntimeError("stat unsupported")
         fake_manager.sftp_listdir.return_value = [
             "22700003_side_OK.png",
             "22700002_side_OK.png",
@@ -327,6 +330,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = ["22700003_side_OK.png"]
+        fake_manager.sftp_stat.side_effect = RuntimeError("stat unsupported")
         fake_manager.join.side_effect = lambda directory, name: str(Path(directory) / name)
 
         poll_counter = {"count": 0}
@@ -387,6 +391,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         fake_manager = MagicMock()
         fake_manager.exists.return_value = True
         fake_manager.listdir.return_value = ["22700003_side_OK.png"]
+        fake_manager.sftp_stat.side_effect = RuntimeError("stat unsupported")
         fake_manager.join.side_effect = lambda directory, name: str(Path(directory) / name)
 
         remote_file_batches = [
@@ -443,6 +448,63 @@ class TestMainControllerNumericJsn(unittest.TestCase):
         self.assertEqual(len(summary_logs), 2)
         self.assertIn("downloaded=0", summary_logs[0])
         self.assertIn("downloaded=1", summary_logs[1])
+
+    def test_download_images_background_worker_reuses_cached_remote_listing_when_remote_dir_is_unchanged(self):
+        stop_event = Event()
+        fake_logger = MagicMock()
+        fake_sftp_client = MagicMock()
+        fake_ssh_client = MagicMock()
+        fake_ssh_client.open_sftp.return_value = fake_sftp_client
+
+        fake_manager = MagicMock()
+        fake_manager.exists.return_value = True
+        fake_manager.listdir.return_value = ["22700003_side_OK.png"]
+        fake_manager.join.side_effect = lambda directory, name: str(Path(directory) / name)
+        fake_manager.sftp_listdir.return_value = ["22700003_side_OK.png"]
+
+        remote_stat = types.SimpleNamespace(st_mtime=1714300000, st_size=0, st_mode=16877)
+        stat_counter = {"count": 0}
+
+        def _fake_stat(_client, _remote_dir):
+            stat_counter["count"] += 1
+            if stat_counter["count"] >= 2:
+                stop_event.set()
+            return remote_stat
+
+        fake_manager.sftp_stat.side_effect = _fake_stat
+
+        fake_paramiko = types.SimpleNamespace(
+            SSHClient=MagicMock(return_value=fake_ssh_client),
+            AutoAddPolicy=MagicMock(return_value=object()),
+        )
+
+        with patch("main_controller.install_print_logger"), patch(
+            "main_controller.get_logger",
+            return_value=fake_logger,
+        ), patch(
+            "main_controller.FileManager",
+            return_value=fake_manager,
+        ), patch.dict(
+            sys.modules,
+            {"paramiko": fake_paramiko},
+        ):
+            _download_images_background_worker(
+                hostname="host",
+                port=22,
+                username="user",
+                password="pwd",
+                remote_dir="/remote",
+                local_temp_dir="C:\\tmp\\images",
+                check_interval=0,
+                reconnect_interval=0,
+                stop_event=stop_event,
+                worker_label="TEST_SYNC",
+                validate_remote_jsn=False,
+            )
+
+        self.assertEqual(fake_manager.sftp_listdir.call_count, 1)
+        self.assertEqual(fake_manager.sftp_chdir.call_count, 1)
+        fake_manager.sftp_get.assert_not_called()
 
 
 if __name__ == "__main__":

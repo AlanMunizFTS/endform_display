@@ -110,6 +110,16 @@ def _sleep_with_stop(stop_event, seconds):
         time.sleep(0.2)
 
 
+def _build_sftp_stat_signature(stat_result):
+    if stat_result is None:
+        return None
+    return (
+        getattr(stat_result, "st_mtime", None),
+        getattr(stat_result, "st_size", None),
+        getattr(stat_result, "st_mode", None),
+    )
+
+
 def _download_images_background_worker(
     hostname,
     port,
@@ -139,6 +149,10 @@ def _download_images_background_worker(
     sftp_client = None
     last_sync_signature = None
     last_skipped_signature = None
+    cached_remote_images = None
+    last_remote_dir_signature = None
+    last_remote_catalog_refresh_ts = 0.0
+    catalog_refresh_interval = max(15.0, float(check_interval) * 5.0)
 
     file_manager.makedirs(local_temp_dir, exist_ok=True)
 
@@ -195,15 +209,39 @@ def _download_images_background_worker(
                     if file_manager.exists(local_temp_dir)
                     else set()
                 )
+                now = time.monotonic()
+                remote_dir_signature = None
+                try:
+                    remote_dir_signature = _build_sftp_stat_signature(
+                        file_manager.sftp_stat(sftp_client, remote_dir)
+                    )
+                except Exception:
+                    remote_dir_signature = None
 
-                file_manager.sftp_chdir(sftp_client, remote_dir)
-                remote_files = file_manager.sftp_listdir(sftp_client)
+                refresh_remote_catalog = cached_remote_images is None
+                if not refresh_remote_catalog:
+                    if remote_dir_signature is None:
+                        refresh_remote_catalog = True
+                    elif remote_dir_signature != last_remote_dir_signature:
+                        refresh_remote_catalog = True
+                    elif (now - last_remote_catalog_refresh_ts) >= catalog_refresh_interval:
+                        refresh_remote_catalog = True
 
-                all_remote_images = [
-                    f
-                    for f in remote_files
-                    if f.lower().endswith(image_extensions) and _extract_numeric_jsn(f) is not None
-                ]
+                if refresh_remote_catalog:
+                    file_manager.sftp_chdir(sftp_client, remote_dir)
+                    remote_files = file_manager.sftp_listdir(sftp_client)
+                    cached_remote_images = tuple(
+                        sorted(
+                            f
+                            for f in remote_files
+                            if f.lower().endswith(image_extensions)
+                            and _extract_numeric_jsn(f) is not None
+                        )
+                    )
+                    last_remote_dir_signature = remote_dir_signature
+                    last_remote_catalog_refresh_ts = now
+
+                all_remote_images = list(cached_remote_images or ())
 
                 missing_remote_images = [
                     img for img in all_remote_images if img not in existing_local
@@ -576,7 +614,7 @@ class ControllerConfig:
     remote_db_target_sync_batch: int = 25
     remote_db_max_scan_pages: int = 20
     remote_db_forward_scan_ratio: float = 0.7
-    remote_db_success_interval_sec: float = 0.0
+    remote_db_success_interval_sec: float = 1.0
     remote_db_idle_backoff_sec: float = 2.0
     remote_db_error_backoff_sec: float = 5.0
     max_images: int = 7
@@ -598,7 +636,7 @@ class ControllerConfig:
     historic_gate_remote_db_required_status: int = 1
     display_cols: int = 4
     display_rows: int = 2
-    historic_download_check_interval: int = 10
+    historic_download_check_interval: float = 2.0
 
 class MainController:
     def __init__(
@@ -1142,10 +1180,11 @@ class MainController:
                 )
                 self._remote_db_idle_logged = True
 
+            success_interval_sec = max(1.0, float(self.config.remote_db_success_interval_sec))
             if sync_summary["synced_count"] > 0 or sync_summary["deleted_count"] > 0:
-                return max(0.0, float(self.config.remote_db_success_interval_sec))
+                return success_interval_sec
             return max(
-                float(self.config.remote_db_success_interval_sec),
+                success_interval_sec,
                 float(self.config.remote_db_idle_backoff_sec),
             )
         except Exception as exc:
