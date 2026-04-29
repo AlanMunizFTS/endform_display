@@ -102,10 +102,13 @@ def _build_manifest(annotated_names, historic_names, data_payload, image_extensi
     return {
         "package_version": STATE_PACKAGE_VERSION,
         "package_kind": PACKAGE_KIND,
+        "export_complete": True,
         "created_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "source_host": socket.gethostname(),
         "annotated_count": len(annotated_names),
         "historic_count": len(historic_names),
+        "annotated_images": list(annotated_names),
+        "historic_images": list(historic_names),
         "table_counts": {
             table_name: len(rows)
             for table_name, rows in data_payload.items()
@@ -187,6 +190,8 @@ def _validate_manifest(manifest):
         raise ValueError("Invalid package manifest")
     if manifest.get("package_kind") != PACKAGE_KIND:
         raise ValueError("Unsupported package kind")
+    if manifest.get("export_complete") is not True:
+        raise ValueError("Export folder is incomplete")
     if int(manifest.get("package_version") or 0) != STATE_PACKAGE_VERSION:
         raise ValueError(
             f"Unsupported package version: {manifest.get('package_version')}"
@@ -197,9 +202,45 @@ def _package_file_path(package_path, relative_path):
     return os.path.join(package_path, *relative_path.split("/"))
 
 
+def _validate_manifest_image_entries(package_path, manifest):
+    expected_groups = (
+        ("annotated", manifest.get("annotated_images"), manifest.get("annotated_count")),
+        ("historic", manifest.get("historic_images"), manifest.get("historic_count")),
+    )
+    missing = []
+    count_mismatches = []
+
+    for group_name, image_names, expected_count in expected_groups:
+        if not isinstance(image_names, list):
+            raise ValueError(f"Export folder manifest is missing {group_name}_images")
+        if expected_count is not None and int(expected_count) != len(image_names):
+            count_mismatches.append(
+                f"{group_name}: count={expected_count}, listed={len(image_names)}"
+            )
+        for image_name in image_names:
+            if not isinstance(image_name, str) or not image_name:
+                raise ValueError(f"Export folder manifest has invalid {group_name} image name")
+            if os.path.basename(image_name) != image_name:
+                raise ValueError(f"Export folder manifest has unsafe image name: {image_name}")
+            image_path = os.path.join(package_path, group_name, image_name)
+            if not os.path.isfile(image_path):
+                missing.append(f"{group_name}/{image_name}")
+
+    if count_mismatches:
+        raise ValueError(
+            "Export folder manifest count mismatch: " + ", ".join(count_mismatches)
+        )
+    if missing:
+        raise ValueError(
+            "Export folder is missing manifest-listed images: " + ", ".join(missing[:20])
+        )
+
+
 def _load_package(package_path):
     if not package_path or not os.path.isdir(package_path):
         raise FileNotFoundError(f"Export folder not found: {package_path}")
+    if os.path.basename(os.path.normpath(package_path)).endswith(".partial"):
+        raise ValueError("Export folder is incomplete")
 
     missing_entries = [
         entry
@@ -214,6 +255,7 @@ def _load_package(package_path):
     with open(_package_file_path(package_path, "manifest.json"), "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     _validate_manifest(manifest)
+    _validate_manifest_image_entries(package_path, manifest)
 
     with open(_package_file_path(package_path, "db/data.json"), "r", encoding="utf-8") as handle:
         data_payload = json.load(handle)
@@ -230,14 +272,16 @@ def _write_text_file(path, content):
 def _build_unique_export_dir(file_manager, output_root):
     base_name = f"display_state_{datetime.now():%Y%m%d_%H%M%S}"
     export_path = file_manager.join(output_root, base_name)
-    if not file_manager.exists(export_path):
+    partial_path = f"{export_path}.partial"
+    if not file_manager.exists(export_path) and not file_manager.exists(partial_path):
         return base_name, export_path
 
     suffix = 1
     while True:
         export_name = f"{base_name}_{suffix:02d}"
         export_path = file_manager.join(output_root, export_name)
-        if not file_manager.exists(export_path):
+        partial_path = f"{export_path}.partial"
+        if not file_manager.exists(export_path) and not file_manager.exists(partial_path):
             return export_name, export_path
         suffix += 1
 
@@ -526,6 +570,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     output_root = str(output_dir or EXPORTS_DIR)
     file_manager.makedirs(output_root, exist_ok=True)
     package_name, package_path = _build_unique_export_dir(file_manager, output_root)
+    partial_package_path = f"{package_path}.partial"
     total_steps = len(annotated_names) + len(historic_names) + 3
     done = 0
 
@@ -537,17 +582,16 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     if callable(progress_callback):
         progress_callback(done, total_steps, "Serializing database")
 
-    file_manager.makedirs(package_path, exist_ok=False)
+    file_manager.makedirs(partial_package_path, exist_ok=False)
     metadata_files = {
-        "manifest.json": json.dumps(manifest, indent=2, sort_keys=True),
         "db/data.json": json.dumps(data_payload, indent=2, sort_keys=True),
         "db/database.sql": database_sql,
     }
     for relative_path, content in metadata_files.items():
-        _write_text_file(_package_file_path(package_path, relative_path), content)
+        _write_text_file(_package_file_path(partial_package_path, relative_path), content)
 
-    annotated_package_dir = file_manager.join(package_path, "annotated")
-    historic_package_dir = file_manager.join(package_path, "historic")
+    annotated_package_dir = file_manager.join(partial_package_path, "annotated")
+    historic_package_dir = file_manager.join(partial_package_path, "historic")
     file_manager.makedirs(annotated_package_dir, exist_ok=True)
     file_manager.makedirs(historic_package_dir, exist_ok=True)
 
@@ -572,6 +616,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
         done += 1
         if callable(progress_callback):
             progress_callback(done, total_steps, "Copying historic images")
+
+    _write_text_file(
+        _package_file_path(partial_package_path, "manifest.json"),
+        json.dumps(manifest, indent=2, sort_keys=True),
+    )
+    os.rename(partial_package_path, package_path)
 
     done = total_steps
     if callable(progress_callback):

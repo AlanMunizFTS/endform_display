@@ -319,6 +319,7 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue(result["ok"])
             package_path = Path(result["package_path"])
             self.assertTrue(package_path.is_dir())
+            self.assertFalse(Path(f"{package_path}.partial").exists())
             self.assertTrue((package_path / "manifest.json").is_file())
             self.assertTrue((package_path / "db" / "data.json").is_file())
             self.assertTrue((package_path / "db" / "database.sql").is_file())
@@ -327,8 +328,11 @@ class TestStatePackage(unittest.TestCase):
 
             manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["package_kind"], "display_state")
+            self.assertTrue(manifest["export_complete"])
             self.assertEqual(manifest["annotated_count"], 2)
             self.assertEqual(manifest["historic_count"], 2)
+            self.assertEqual(len(manifest["annotated_images"]), 2)
+            self.assertEqual(len(manifest["historic_images"]), 2)
             self.assertEqual(manifest["table_counts"]["img_results"], 2)
 
             data_payload = json.loads((package_path / "db" / "data.json").read_text(encoding="utf-8"))
@@ -467,6 +471,39 @@ class TestStatePackage(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 import_display_state(controller, str(invalid_package), db_client=controller.display.db)
+
+    def test_import_display_state_rejects_partial_export_folder(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            partial_package = Path(tmp_dir) / "display_state_20260429_120000.partial"
+            partial_package.mkdir()
+            controller, _annotated_dir, _historic_dir = build_controller(tmp_dir, FakePackageDB())
+
+            with self.assertRaises(ValueError):
+                import_display_state(controller, str(partial_package), db_client=controller.display.db)
+
+    def test_import_display_state_rejects_missing_manifest_listed_image(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_source_db()
+            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
+            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
+            (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
+            package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
+            package_path = Path(package_result["package_path"])
+            (package_path / "historic" / "11861_A_front_NOK.png").unlink()
+
+            target_controller, _target_annotated, _target_historic = build_controller(
+                target_tmp,
+                FakePackageDB(),
+            )
+
+            with self.assertRaises(ValueError):
+                import_display_state(
+                    target_controller,
+                    package_result["package_path"],
+                    db_client=target_controller.display.db,
+                )
 
     def test_export_import_roundtrip_reproduces_files_and_db_rows(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
