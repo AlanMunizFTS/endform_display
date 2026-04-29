@@ -38,7 +38,7 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
         display.set_db_connection = MagicMock()
         return display
 
-    def test_load_historic_index_uses_annotated_source(self):
+    def test_load_historic_index_uses_historic_source(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             annotated_dir = tmp_path / "annotated"
@@ -46,15 +46,15 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             annotated_dir.mkdir()
             historic_dir.mkdir()
 
-            annotated_names = [
+            historic_names = [
                 "118610000000000000001_Cam2_Diag1_OK.png",
                 "118610000000000000001_Cam1_Side1_OK.png",
                 "118610000000000000002_Cam3_Front_NOK.png",
             ]
-            for name in annotated_names:
-                (annotated_dir / name).write_bytes(b"annotated")
+            for name in historic_names:
+                (historic_dir / name).write_bytes(b"historic")
 
-            (historic_dir / "118619999999999999999_Cam1_Side1_OK.png").write_bytes(b"historic")
+            (annotated_dir / "118619999999999999999_Cam1_Side1_OK.png").write_bytes(b"annotated")
 
             controller = MainController(
                 display=self._build_display(),
@@ -77,14 +77,14 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
                 ],
             )
 
-    def test_download_historic_batch_returns_annotated_paths(self):
+    def test_download_historic_batch_returns_historic_paths(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            annotated_dir = tmp_path / "annotated"
-            annotated_dir.mkdir()
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
             img_name = "118610000000000000001_Cam1_Side1_OK.png"
-            img_path = annotated_dir / img_name
-            img_path.write_bytes(b"annotated")
+            img_path = historic_dir / img_name
+            img_path.write_bytes(b"historic")
 
             display = self._build_display()
             display.historic_images = [[img_name]]
@@ -99,8 +99,83 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             self.assertEqual(result, [str(img_path)])
             controller._register_local_images_in_db.assert_called_once_with(
-                str(annotated_dir),
+                str(historic_dir),
                 image_names=[img_name],
+            )
+
+    def test_download_historic_batch_uses_annotated_fallback_without_db_coordinates(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            annotated_dir = tmp_path / "annotated"
+            historic_dir = tmp_path / "historic"
+            annotated_dir.mkdir()
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            annotated_path = annotated_dir / img_name
+            historic_path = historic_dir / img_name
+            annotated_path.write_bytes(b"annotated")
+            historic_path.write_bytes(b"historic")
+
+            display = self._build_display()
+            display.historic_images = [[img_name]]
+            logger = MagicMock()
+            controller = MainController(
+                display=display,
+                logger=logger,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(result, [str(annotated_path)])
+            self.assertTrue(
+                any(f"{img_name}=annotated" in call.args[0] for call in logger.info.call_args_list)
+            )
+
+    def test_download_historic_batch_prefers_db_coordinates_over_annotated_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            annotated_dir = tmp_path / "annotated"
+            historic_dir = tmp_path / "historic"
+            annotated_dir.mkdir()
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            annotated_path = annotated_dir / img_name
+            historic_path = historic_dir / img_name
+            annotated_path.write_bytes(b"annotated")
+            historic_path.write_bytes(b"historic")
+
+            db = MagicMock()
+            db.fetch.return_value = [
+                {
+                    "img_name": img_name,
+                    "class_name": "scratch",
+                    "confidence": 0.91,
+                    "model_name": "model",
+                    "geometry_type": "bbox",
+                    "coordinates": [10, 20, 100, 120],
+                    "image_width": 360,
+                    "image_height": 360,
+                }
+            ]
+            display = self._build_display(db=db)
+            display.historic_images = [[img_name]]
+            logger = MagicMock()
+            controller = MainController(
+                display=display,
+                logger=logger,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(result, [str(historic_path)])
+            self.assertTrue(
+                any(f"{img_name}=db_coordinates+historic" in call.args[0] for call in logger.info.call_args_list)
             )
 
     def test_save_classification_results_reports_missing_historic_source(self):
@@ -304,11 +379,11 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             controller.file_manager.sftp_remove.assert_any_call(
                 display.sftp_client,
-                "/remote/annotated/remote_annotated.png",
+                "/remote/historic/remote_historic.png",
             )
             controller.file_manager.sftp_remove.assert_any_call(
                 display.sftp_client,
-                "/remote/historic/remote_historic.png",
+                "/remote/annotated/remote_annotated.png",
             )
 
 

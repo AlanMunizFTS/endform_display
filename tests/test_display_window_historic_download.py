@@ -49,6 +49,7 @@ class TestDisplayWindowHistoricDownload(unittest.TestCase):
             self.assertEqual(historic_args[13], "status")
             self.assertEqual(historic_args[14], 1)
 
+            self.assertTrue(fake_process.daemon)
             annotated_args = process_cls.call_args_list[1].kwargs["args"]
             self.assertEqual(annotated_args[0], "host")
             self.assertEqual(annotated_args[1], 22)
@@ -63,7 +64,6 @@ class TestDisplayWindowHistoricDownload(unittest.TestCase):
             self.assertEqual(annotated_args[13], "status")
             self.assertEqual(annotated_args[14], 1)
 
-            self.assertTrue(fake_process.daemon)
             self.assertEqual(fake_process.start.call_count, 2)
 
     @patch("display_window.get_db_connection", return_value=MagicMock())

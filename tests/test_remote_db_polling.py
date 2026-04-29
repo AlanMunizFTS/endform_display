@@ -18,6 +18,12 @@ class _PollingTestController(MainController):
 
 
 class TestRemoteDbPolling(unittest.TestCase):
+    REMOTE_MODEL_RESULTS_QUERY = (
+        'SELECT "id", "img_name", "class_name", "confidence", "created_at", '
+        '"model_name", "geometry_type", "coordinates", "image_width", "image_height" '
+        'FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s'
+    )
+
     def _build_display(self):
         display = MagicMock()
         display.db = None
@@ -157,22 +163,31 @@ class TestRemoteDbPolling(unittest.TestCase):
             ssh_password="secret",
         )
         remote_db.fetch.assert_called_once_with(
-            'SELECT "id", "img_name", "class_name", "confidence" FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s',
+            self.REMOTE_MODEL_RESULTS_QUERY,
             (0, 25),
         )
         local_db.fetch.assert_called_once_with(
             "SELECT id, img_name FROM classified_images WHERE img_name = ANY(%s)",
             (["img_001.png"],),
         )
-        self.assertEqual(local_db.execute.call_count, 1)
+        self.assertEqual(local_db.execute.call_count, 2)
         self.assertEqual(
-            local_db.execute.call_args_list[0].args,
+            local_db.execute.call_args_list[0].args[0],
+            "INSERT INTO model_results "
+            "(img_name, class_name, confidence, created_at, model_name, geometry_type, "
+            "coordinates, image_width, image_height) "
+            "VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP), %s, %s, %s, %s, %s) "
+            "ON CONFLICT DO NOTHING",
+        )
+        self.assertEqual(
+            local_db.execute.call_args_list[1].args,
             (
                 "INSERT INTO classified_image_defects "
-                "(classified_image_id, class_name, confidence) "
-                "VALUES (%s, %s, %s) "
-                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
-                (77, "dent", 0.9321),
+                "(classified_image_id, class_name, confidence, remote_model_result_id, "
+                "model_name, geometry_type, coordinates, image_width, image_height) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (77, "dent", 0.9321, 101, None, None, None, None, None),
             ),
         )
         remote_db.execute.assert_called_once_with(
@@ -230,15 +245,16 @@ class TestRemoteDbPolling(unittest.TestCase):
         delay = controller._run_remote_db_poll_iteration()
 
         self.assertEqual(delay, 1.0)
-        self.assertEqual(local_db.execute.call_count, 1)
+        self.assertEqual(local_db.execute.call_count, 2)
         self.assertEqual(
-            local_db.execute.call_args_list[0].args,
+            local_db.execute.call_args_list[1].args,
             (
                 "INSERT INTO classified_image_defects "
-                "(classified_image_id, class_name, confidence) "
-                "VALUES (%s, %s, %s) "
-                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
-                (77, "STREAKED", 0.9321),
+                "(classified_image_id, class_name, confidence, remote_model_result_id, "
+                "model_name, geometry_type, coordinates, image_width, image_height) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (77, "STREAKED", 0.9321, 101, None, None, None, None, None),
             ),
         )
 
@@ -538,16 +554,16 @@ class TestRemoteDbPolling(unittest.TestCase):
 
         self.assertEqual(delay, 1.0)
         self.assertEqual(
-            remote_db.fetch.call_args_list[0].args,
+                remote_db.fetch.call_args_list[0].args,
             (
-                'SELECT "id", "img_name", "class_name", "confidence" FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s',
+                self.REMOTE_MODEL_RESULTS_QUERY,
                 (0, 1),
             ),
         )
         self.assertEqual(
-            remote_db.fetch.call_args_list[1].args,
+                remote_db.fetch.call_args_list[1].args,
             (
-                'SELECT "id", "img_name", "class_name", "confidence" FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s',
+                self.REMOTE_MODEL_RESULTS_QUERY,
                 (25, 1),
             ),
         )

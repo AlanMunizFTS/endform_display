@@ -1,5 +1,6 @@
 
 import cv2
+import json
 import numpy as np
 import os
 import re
@@ -179,6 +180,10 @@ class DisplayWindow:
         self._image_cache = OrderedDict()
         self._image_cache_max_items = 64
         self._db_result_cache = {}
+        self._model_overlay_cache_key = None
+        self._model_overlay_cache_value = {}
+        self._model_overlay_cache_time = 0.0
+        self._model_overlay_cache_ttl = 1.0
         self._db_registered_images = set()
         self._historic_index_cache = None
         self._historic_index_mtime = None
@@ -2349,6 +2354,9 @@ class DisplayWindow:
 
     def get_result_for_image(self, img_name):
         return self._require_controller().get_result_for_image(img_name)
+
+    def get_model_overlays_for_images(self, image_names):
+        return self._require_controller().get_model_overlays_for_images(image_names)
     
     def save_temp_results_to_db(self):
         self._require_controller().save_temp_results_to_db()
@@ -3766,8 +3774,8 @@ class DisplayWindow:
 
         body_block = self._prepare_wrapped_text_block(
             [
-                "Rebuild the app database from annotated historic images?",
-                "This clears img_results, classified_images, and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
+                "Rebuild the app database from historic images?",
+                "This clears app DB tables before rebuilding from the historic folder.",
                 "Classified and final folders will be preserved.",
                 "Historic images will be preserved.",
             ],
@@ -4368,6 +4376,225 @@ class DisplayWindow:
             self._image_cache.popitem(last=False)
         return img
 
+    def _get_cached_model_overlays(self, image_paths):
+        image_names = tuple(self.file_manager.basename(path) for path in image_paths or [])
+        if not image_names:
+            return {}
+
+        now = time.monotonic()
+        if (
+            self._model_overlay_cache_key == image_names
+            and now - self._model_overlay_cache_time < self._model_overlay_cache_ttl
+        ):
+            return self._model_overlay_cache_value
+
+        try:
+            overlays = self.get_model_overlays_for_images(image_names) or {}
+        except Exception as exc:
+            print(f"Error loading model overlays: {exc}")
+            overlays = {}
+
+        self._model_overlay_cache_key = image_names
+        self._model_overlay_cache_value = overlays
+        self._model_overlay_cache_time = now
+        return overlays
+
+    def _decode_overlay_coordinates(self, coordinates):
+        if coordinates is None:
+            return None
+        if isinstance(coordinates, str):
+            try:
+                return json.loads(coordinates)
+            except Exception:
+                return None
+        return coordinates
+
+    def _as_float(self, value):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _bbox_points_from_dict(self, data):
+        x1 = self._as_float(data.get("x1", data.get("xmin", data.get("left"))))
+        y1 = self._as_float(data.get("y1", data.get("ymin", data.get("top"))))
+        x2 = self._as_float(data.get("x2", data.get("xmax", data.get("right"))))
+        y2 = self._as_float(data.get("y2", data.get("ymax", data.get("bottom"))))
+
+        if None not in (x1, y1, x2, y2):
+            return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+        x = self._as_float(data.get("x"))
+        y = self._as_float(data.get("y"))
+        w = self._as_float(data.get("width", data.get("w")))
+        h = self._as_float(data.get("height", data.get("h")))
+        if None not in (x, y, w, h):
+            return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+        return None
+
+    def _points_from_overlay_coordinates(self, coordinates, geometry_type):
+        decoded = self._decode_overlay_coordinates(coordinates)
+        if decoded is None:
+            return None
+
+        if isinstance(decoded, dict):
+            for key in ("points", "polygon", "coordinates"):
+                if key in decoded:
+                    points = self._points_from_overlay_coordinates(decoded.get(key), geometry_type)
+                    if points:
+                        return points
+            if "bbox" in decoded:
+                points = self._points_from_overlay_coordinates(decoded.get("bbox"), "bbox")
+                if points:
+                    return points
+            return self._bbox_points_from_dict(decoded)
+
+        if not isinstance(decoded, (list, tuple)):
+            return None
+
+        if len(decoded) == 4 and all(not isinstance(item, (list, tuple, dict)) for item in decoded):
+            x1, y1, x2, y2 = [self._as_float(item) for item in decoded]
+            if None in (x1, y1, x2, y2):
+                return None
+            if x2 <= x1 or y2 <= y1:
+                x2 = x1 + max(0.0, x2)
+                y2 = y1 + max(0.0, y2)
+            return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+        if decoded and all(not isinstance(item, (list, tuple, dict)) for item in decoded):
+            values = [self._as_float(item) for item in decoded]
+            if any(value is None for value in values) or len(values) < 6 or len(values) % 2 != 0:
+                return None
+            return list(zip(values[0::2], values[1::2]))
+
+        points = []
+        for item in decoded:
+            if isinstance(item, dict):
+                x = self._as_float(item.get("x"))
+                y = self._as_float(item.get("y"))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                x = self._as_float(item[0])
+                y = self._as_float(item[1])
+            else:
+                x = y = None
+            if x is None or y is None:
+                return None
+            points.append((x, y))
+
+        if geometry_type == "bbox" and len(points) == 2:
+            (x1, y1), (x2, y2) = points
+            return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+        return points if len(points) >= 2 else None
+
+    def _scale_overlay_points(self, points, overlay, target_w, target_h, fallback_source_w, fallback_source_h):
+        flat_values = [value for point in points for value in point]
+        normalized = flat_values and all(0.0 <= value <= 1.0 for value in flat_values)
+        if normalized:
+            return [
+                (
+                    int(round(max(0.0, min(1.0, x)) * target_w)),
+                    int(round(max(0.0, min(1.0, y)) * target_h)),
+                )
+                for x, y in points
+            ]
+
+        source_w = self._as_float(overlay.get("image_width")) or fallback_source_w or target_w
+        source_h = self._as_float(overlay.get("image_height")) or fallback_source_h or target_h
+        source_w = max(1.0, float(source_w))
+        source_h = max(1.0, float(source_h))
+        return [
+            (
+                int(round(max(0.0, min(source_w, x)) * target_w / source_w)),
+                int(round(max(0.0, min(source_h, y)) * target_h / source_h)),
+            )
+            for x, y in points
+        ]
+
+    def _overlay_color(self, class_name):
+        label = str(class_name or "").strip().upper()
+        if label == "OK":
+            return (103, 122, 20)
+        palette = [
+            (49, 49, 255),
+            (0, 180, 255),
+            (64, 220, 64),
+            (255, 160, 64),
+            (220, 80, 220),
+        ]
+        return palette[sum(ord(ch) for ch in label) % len(palette)]
+
+    def _draw_model_overlays(self, img, overlays, source_w, source_h):
+        if img is None or not overlays:
+            return img
+
+        target_h, target_w = img.shape[:2]
+        for overlay in overlays:
+            geometry_type = str(overlay.get("geometry_type") or "bbox").strip().lower()
+            if geometry_type == "classification":
+                continue
+
+            points = self._points_from_overlay_coordinates(
+                overlay.get("coordinates"),
+                geometry_type,
+            )
+            if not points:
+                continue
+
+            scaled_points = self._scale_overlay_points(
+                points,
+                overlay,
+                target_w,
+                target_h,
+                source_w,
+                source_h,
+            )
+            if len(scaled_points) < 2:
+                continue
+
+            color = self._overlay_color(overlay.get("class_name"))
+            pts = np.array(scaled_points, dtype=np.int32).reshape((-1, 1, 2))
+            if geometry_type == "bbox" and len(scaled_points) >= 4:
+                xs = [point[0] for point in scaled_points]
+                ys = [point[1] for point in scaled_points]
+                cv2.rectangle(img, (min(xs), min(ys)), (max(xs), max(ys)), color, 3)
+                label_x, label_y = min(xs), min(ys)
+            else:
+                cv2.polylines(img, [pts], isClosed=True, color=color, thickness=3)
+                label_x, label_y = scaled_points[0]
+
+            class_name = str(overlay.get("class_name") or "").strip()
+            confidence = overlay.get("confidence")
+            label = class_name
+            if confidence is not None:
+                try:
+                    label = f"{class_name} {float(confidence):.2f}"
+                except (TypeError, ValueError):
+                    pass
+            if label:
+                font = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 0.5
+                thickness = 1
+                text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+                text_x = max(0, min(target_w - text_size[0] - 4, int(label_x)))
+                text_y = max(text_size[1] + 6, min(target_h - 4, int(label_y) - 6))
+                cv2.rectangle(
+                    img,
+                    (text_x, text_y - text_size[1] - 6),
+                    (text_x + text_size[0] + 6, text_y + 3),
+                    color,
+                    -1,
+                )
+                cv2.putText(
+                    img,
+                    label,
+                    (text_x + 3, text_y),
+                    font,
+                    font_scale,
+                    (255, 255, 255),
+                    thickness,
+                )
+        return img
+
     def show_image_grid(self, image_paths, cols=4, rows=2, img_size=None, padding=None):
         """Show images without scaling, with fixed padding"""
         if img_size is None:
@@ -4384,6 +4611,11 @@ class DisplayWindow:
         
         # Clear result buttons list at start
         self.result_buttons = []
+        overlays_by_image = (
+            self._get_cached_model_overlays(image_paths)
+            if self.historic_mode
+            else {}
+        )
 
         # Pre-blank the 7 active tile slots (skip last slot = bottom-right)
         for slot in range(cols * rows - 1):
@@ -4400,6 +4632,8 @@ class DisplayWindow:
             img = self._get_cached_image(img_path)
             if img is None:
                 continue
+            source_h, source_w = img.shape[:2]
+            img = img.copy()
 
             # Normalize input image size for display tiles.
             if img.shape[0] != img_size or img.shape[1] != img_size:
@@ -4429,6 +4663,14 @@ class DisplayWindow:
                     # Resize image to scaled size
                     img = cv2.resize(img, (size_draw, size_draw))
 
+            img_filename = self.file_manager.basename(img_path)
+            img = self._draw_model_overlays(
+                img,
+                overlays_by_image.get(img_filename),
+                source_w,
+                source_h,
+            )
+
             canvas[y_draw:y_draw + size_draw, x_draw:x_draw + size_draw] = img
 
             # Show camera label above each image (normal + historic)
@@ -4439,7 +4681,6 @@ class DisplayWindow:
             # If we are in historic mode, show result below each image
             if self.historic_mode:
                 # Extract filename from path
-                img_filename = self.file_manager.basename(img_path)
                 result_text = self.get_result_for_image(img_filename)
                 
                 # Dibujar etiqueta debajo de la imagen
@@ -4479,7 +4720,6 @@ class DisplayWindow:
 
             else:
                 # Vista normal: extraer estado OK/NOK desde el nombre del archivo
-                img_filename = self.file_manager.basename(img_path)
                 base_name = os.path.splitext(img_filename)[0]
                 if base_name.endswith('_OK'):
                     result_text = 'OK'

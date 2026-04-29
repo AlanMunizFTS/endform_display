@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from multiprocessing import Event, Process
 from threading import Thread
 
+from psycopg2.extras import Json
+
 from dataset_exporter import (
     ALL_CLASSES_LABEL,
     DEFAULT_ANGLE_OPTIONS,
@@ -546,7 +548,17 @@ class ControllerConfig:
     db_reconnect_interval_sec: float = 3.0
     remote_db_polling_enabled: bool = field(default_factory=is_remote_db_enabled)
     remote_db_table: str = "model_results"
-    remote_db_columns: tuple = ("img_name", "class_name", "confidence")
+    remote_db_columns: tuple = (
+        "img_name",
+        "class_name",
+        "confidence",
+        "created_at",
+        "model_name",
+        "geometry_type",
+        "coordinates",
+        "image_width",
+        "image_height",
+    )
     remote_db_query_limit: int = 25
     remote_db_target_sync_batch: int = 25
     remote_db_max_scan_pages: int = 20
@@ -640,10 +652,27 @@ class MainController:
         return self.file_manager.join(self.config.temp_dir, subdir_name)
 
     def _get_visible_historic_dir(self):
-        return self._resolve_temp_subdir(ANNOTATED_SUBDIR_NAME, ANNOTATED_LOCAL_DIR)
+        return self._resolve_temp_subdir(HISTORIC_SUBDIR_NAME, HISTORIC_LOCAL_DIR)
 
     def _get_export_historic_dir(self):
         return self._resolve_temp_subdir(HISTORIC_SUBDIR_NAME, HISTORIC_LOCAL_DIR)
+
+    def _get_annotated_historic_dir(self):
+        return self._resolve_temp_subdir(ANNOTATED_SUBDIR_NAME, ANNOTATED_LOCAL_DIR)
+
+    def _dedupe_local_sources(self, sources):
+        deduped = []
+        seen_paths = set()
+        for label, path in sources:
+            try:
+                key = os.path.normcase(os.path.abspath(os.fspath(path)))
+            except Exception:
+                key = str(path)
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            deduped.append((label, path))
+        return deduped
 
     def _list_local_image_names(self, directory, require_jsn_prefix=False):
         """List local images, optionally restricting results to numeric-JSN filenames."""
@@ -829,15 +858,43 @@ class MainController:
         for row in matched_rows:
             img_name = row["img_name"]
             class_name = self._normalize_remote_defect_class_name(row.get("class_name"))
+            coordinates = row.get("coordinates")
+            coordinates_value = Json(coordinates) if coordinates is not None else None
+
+            local_db.execute(
+                "INSERT INTO model_results "
+                "(img_name, class_name, confidence, created_at, model_name, geometry_type, "
+                "coordinates, image_width, image_height) "
+                "VALUES (%s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP), %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (
+                    img_name,
+                    class_name,
+                    row.get("confidence"),
+                    row.get("created_at"),
+                    row.get("model_name"),
+                    row.get("geometry_type"),
+                    coordinates_value,
+                    row.get("image_width"),
+                    row.get("image_height"),
+                ),
+            )
             local_db.execute(
                 "INSERT INTO classified_image_defects "
-                "(classified_image_id, class_name, confidence) "
-                "VALUES (%s, %s, %s) "
-                "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+                "(classified_image_id, class_name, confidence, remote_model_result_id, "
+                "model_name, geometry_type, coordinates, image_width, image_height) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
                 (
                     row["classified_image_id"],
                     class_name,
                     row.get("confidence"),
+                    row.get("remote_id"),
+                    row.get("model_name"),
+                    row.get("geometry_type"),
+                    coordinates_value,
+                    row.get("image_width"),
+                    row.get("image_height"),
                 ),
             )
             synced_img_names.append(img_name)
@@ -910,6 +967,12 @@ class MainController:
                         "img_name": img_name,
                         "class_name": row.get("class_name"),
                         "confidence": row.get("confidence"),
+                        "created_at": row.get("created_at"),
+                        "model_name": row.get("model_name"),
+                        "geometry_type": row.get("geometry_type"),
+                        "coordinates": row.get("coordinates"),
+                        "image_width": row.get("image_width"),
+                        "image_height": row.get("image_height"),
                     }
                 )
 
@@ -970,6 +1033,12 @@ class MainController:
                     "img_name": img_name,
                     "class_name": row.get("class_name"),
                     "confidence": row.get("confidence"),
+                    "created_at": row.get("created_at"),
+                    "model_name": row.get("model_name"),
+                    "geometry_type": row.get("geometry_type"),
+                    "coordinates": row.get("coordinates"),
+                    "image_width": row.get("image_width"),
+                    "image_height": row.get("image_height"),
                 }
             )
 
@@ -2517,10 +2586,13 @@ class MainController:
         print(f"STARTING PIECE DELETE (JSN {jsn})")
         print("=" * 70)
 
-        local_sources = [
-            ("annotated", self._get_visible_historic_dir()),
-            ("historic", self._get_export_historic_dir()),
-        ]
+        local_sources = self._dedupe_local_sources(
+            [
+                ("historic", self._get_visible_historic_dir()),
+                ("annotated", self._get_annotated_historic_dir()),
+                ("historic-export", self._get_export_historic_dir()),
+            ]
+        )
         local_deleted = 0
         local_candidates = []
         for label, local_dir in local_sources:
@@ -2545,8 +2617,8 @@ class MainController:
 
         remote_deleted = 0
         remote_sources = [
-            ("annotated", self.config.remote_annotated_dir),
             ("historic", self.config.remote_hist_dir),
+            ("annotated", self.config.remote_annotated_dir),
         ]
         if d.sftp_client:
             for label, remote_dir in remote_sources:
@@ -2719,7 +2791,7 @@ class MainController:
         d = self.display
         db = db_client or d.db
         print("\n" + "=" * 70)
-        print("STARTING DATABASE REBUILD FROM ANNOTATED HISTORIC SOURCE")
+        print("STARTING DATABASE REBUILD FROM HISTORIC SOURCE")
         print("=" * 70)
 
         visible_dir = self._get_visible_historic_dir()
@@ -2744,9 +2816,9 @@ class MainController:
         if not self.file_manager.exists(visible_dir):
             try:
                 self.file_manager.makedirs(visible_dir, exist_ok=True)
-                print(f"Annotated directory not found; created empty folder: {visible_dir}")
+                print(f"Historic directory not found; created empty folder: {visible_dir}")
             except Exception as exc:
-                message = f"Unable to create annotated directory: {exc}"
+                message = f"Unable to create historic directory: {exc}"
                 print(message)
                 return {"ok": False, "error": message}
 
@@ -2759,11 +2831,11 @@ class MainController:
                 ]
             )
         except Exception as exc:
-            message = f"Unable to scan annotated directory: {exc}"
+            message = f"Unable to scan historic directory: {exc}"
             print(message)
             return {"ok": False, "error": message}
 
-        _advance("Scanning annotated images")
+        _advance("Scanning historic images")
 
         try:
             truncated_tables = db.truncate_app_tables()
@@ -2784,18 +2856,18 @@ class MainController:
             self._backfill_piece_result(db_client=db)
             count_rows = db.fetch("SELECT COUNT(*) AS cnt FROM img_results")
             inserted_count = int(count_rows[0]["cnt"]) if count_rows else 0
-            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from annotated")
+            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from historic")
             if inserted_count != len(historic_images):
                 errors.append(
                     f"Expected {len(historic_images)} img_results rows after rebuild, found {inserted_count}"
                 )
             if not historic_images:
-                print("Annotated directory is empty; database remains empty after rebuild")
+                print("Historic directory is empty; database remains empty after rebuild")
         except Exception as exc:
-            message = f"Error rebuilding database from annotated: {exc}"
+            message = f"Error rebuilding database from historic: {exc}"
             print(message)
             return {"ok": False, "error": message}
-        _advance("Rebuilding database from annotated")
+        _advance("Rebuilding database from historic")
 
         self._invalidate_dataset_runtime_state(clear_historic_images=False)
         if historic_images:
@@ -2826,10 +2898,13 @@ class MainController:
         errors = []
         result = None
 
-        local_targets = [
-            ("historic", self._get_export_historic_dir()),
-            ("annotated", self._get_visible_historic_dir()),
-        ]
+        local_targets = self._dedupe_local_sources(
+            [
+                ("historic", self._get_export_historic_dir()),
+                ("historic-visible", self._get_visible_historic_dir()),
+                ("annotated", self._get_annotated_historic_dir()),
+            ]
+        )
         remote_targets = [
             ("historic", self.config.remote_hist_dir),
             ("annotated", self.config.remote_annotated_dir),
@@ -3004,7 +3079,9 @@ class MainController:
                 try:
                     query_delete = "DELETE FROM img_results"
                     affected_rows = db.execute(query_delete)
+                    model_result_rows = db.execute("DELETE FROM model_results")
                     print(f"Deleted {affected_rows} records from database")
+                    print(f"Deleted {model_result_rows} model result records")
                 except Exception as exc:
                     errors.append(f"Error clearing database: {exc}")
                     print(f"Error clearing database: {exc}")
@@ -3175,19 +3252,54 @@ class MainController:
             return []
 
         try:
+            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
             annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
             batch_images = d.historic_images[d.historic_offset]
+            overlays_by_image = self.get_model_overlays_for_images(batch_images)
 
             downloaded_files = []
+            render_sources = []
             for img in batch_images:
-                local_file = self.file_manager.join(annotated_temp_dir, img)
-                if self.file_manager.exists(local_file):
-                    downloaded_files.append(local_file)
+                historic_file = self.file_manager.join(historic_temp_dir, img)
+                annotated_file = self.file_manager.join(annotated_temp_dir, img)
+                has_db_coordinates = bool(overlays_by_image.get(img))
+                historic_exists = self.file_manager.exists(historic_file)
+                annotated_exists = self.file_manager.exists(annotated_file)
+
+                selected_file = None
+                source_label = None
+                if has_db_coordinates:
+                    if historic_exists:
+                        selected_file = historic_file
+                        source_label = "db_coordinates+historic"
+                    elif annotated_exists:
+                        selected_file = annotated_file
+                        source_label = "db_coordinates+annotated"
+                elif annotated_exists:
+                    selected_file = annotated_file
+                    source_label = "annotated"
+                elif historic_exists:
+                    selected_file = historic_file
+                    source_label = "historic"
+
+                if selected_file:
+                    downloaded_files.append(selected_file)
+                    render_sources.append(f"{img}={source_label}")
+                else:
+                    render_sources.append(f"{img}=missing")
+
+            log_key = (d.historic_offset, tuple(batch_images), tuple(render_sources))
+            if getattr(self, "_last_historic_render_source_log_key", None) != log_key:
+                self.logger.info(
+                    "[HIST_RENDER] Sources for current piece: " + "; ".join(render_sources),
+                    allow_repeat=True,
+                )
+                self._last_historic_render_source_log_key = log_key
 
             # Only register when the batch changes, not every loop iteration
             batch_key = (d.historic_offset, tuple(batch_images))
             if getattr(self, '_last_registered_batch_key', None) != batch_key:
-                self._register_local_images_in_db(annotated_temp_dir, image_names=batch_images)
+                self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
                 self._last_registered_batch_key = batch_key
 
             return downloaded_files
@@ -3766,7 +3878,7 @@ class MainController:
             return {
                 "verified": False,
                 "issue_count": 1,
-                "issues": {"annotated": [f"Annotated folder not found: {visible_dir}"]},
+                "issues": {"historic": [f"Historic folder not found: {visible_dir}"]},
             }
 
         if rows_snapshot is not None:
@@ -3787,7 +3899,7 @@ class MainController:
             return {
                 "verified": False,
                 "issue_count": 1,
-                "issues": {"annotated_images": ["No image files found in annotated folder"]},
+                "issues": {"historic_images": ["No image files found in historic folder"]},
             }
 
         db_status_by_image = defaultdict(set)
@@ -4364,6 +4476,52 @@ class MainController:
         d._db_result_cache[img_name] = result_text
         return result_text
 
+    def get_model_overlays_for_images(self, image_names):
+        d = self.display
+        names = [
+            str(name or "").strip()
+            for name in (image_names or [])
+            if str(name or "").strip()
+        ]
+        if not names or not d.db:
+            return {}
+
+        try:
+            rows = d.db.fetch(
+                "SELECT img_name, class_name, confidence, model_name, geometry_type, "
+                "coordinates, image_width, image_height "
+                "FROM model_results "
+                "WHERE img_name = ANY(%s) "
+                "AND coordinates IS NOT NULL "
+                "AND (geometry_type IS NULL OR geometry_type <> 'classification') "
+                "ORDER BY confidence DESC, created_at DESC, id DESC",
+                (names,),
+            )
+        except Exception as exc:
+            self.logger.warn(
+                f"[DB] Error querying model overlays: {exc}",
+                allow_repeat=True,
+            )
+            return {}
+
+        overlays_by_name = defaultdict(list)
+        for row in rows or []:
+            img_name = row.get("img_name")
+            if not img_name:
+                continue
+            overlays_by_name[img_name].append(
+                {
+                    "class_name": row.get("class_name"),
+                    "confidence": row.get("confidence"),
+                    "model_name": row.get("model_name"),
+                    "geometry_type": row.get("geometry_type"),
+                    "coordinates": row.get("coordinates"),
+                    "image_width": row.get("image_width"),
+                    "image_height": row.get("image_height"),
+                }
+            )
+        return dict(overlays_by_name)
+
     def _set_default_piece_stats_dataset_filters(self, filter_options=None):
         d = self.display
         filter_options = filter_options or self.get_piece_stats_dataset_filter_options()
@@ -4711,7 +4869,7 @@ class MainController:
                                         pass
                             self._pending_remote_images = remote_images
                             # Live batches in tmp_display are display-only; DB state
-                            # must come from annotated images exclusively.
+                            # is registered from the historic image cache.
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()

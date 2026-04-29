@@ -245,10 +245,10 @@ class PostgresDB:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(
-                    "TRUNCATE TABLE piece_result, classified_images, img_results "
+                    "TRUNCATE TABLE piece_result, classified_images, img_results, model_results "
                     "RESTART IDENTITY CASCADE"
                 )
-                return 3
+                return 4
         except Exception as e:
             logger.error(f"DB truncate_app_tables error: {e}")
             raise

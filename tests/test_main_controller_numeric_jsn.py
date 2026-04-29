@@ -86,7 +86,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
                 "11861-0007_side_OK.png",
                 "JSN001_side_OK.png",
             ):
-                (annotated_dir / name).write_bytes(b"x")
+                (historic_dir / name).write_bytes(b"x")
 
             controller = MainController(
                 display=_DisplayNumericJsnStub(),
