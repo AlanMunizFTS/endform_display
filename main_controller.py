@@ -1599,7 +1599,7 @@ class MainController:
         d.sync_progress = 0
         d.sync_stage = "Preparing export..."
         d.sync_progress_title = "Exporting Dataset"
-        d.sync_progress_helper_text = "Creating a portable package from the current local state."
+        d.sync_progress_helper_text = "Creating an export folder from the current local state."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -1625,7 +1625,7 @@ class MainController:
                         stage_text,
                         percent,
                         title="Exporting Dataset",
-                        helper_text="Creating a portable package from the current local state.",
+                        helper_text="Creating an export folder from the current local state.",
                     )
 
                 result = export_display_state(
@@ -1873,7 +1873,7 @@ class MainController:
         d.sync_progress = 0
         d.sync_stage = "Preparing import..."
         d.sync_progress_title = "Importing Dataset"
-        d.sync_progress_helper_text = "Merging package contents into the local display state."
+        d.sync_progress_helper_text = "Merging export folder contents into the local display state."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -1899,7 +1899,7 @@ class MainController:
                         stage_text,
                         percent,
                         title="Importing Dataset",
-                        helper_text="Merging package contents into the local display state.",
+                        helper_text="Merging export folder contents into the local display state.",
                     )
 
                 result = import_display_state(

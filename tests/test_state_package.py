@@ -1,7 +1,6 @@
 import json
 import tempfile
 import unittest
-import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -301,7 +300,7 @@ def build_source_db():
 
 
 class TestStatePackage(unittest.TestCase):
-    def test_export_display_state_creates_expected_zip_structure(self):
+    def test_export_display_state_creates_expected_folder_structure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()
             controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
@@ -319,25 +318,22 @@ class TestStatePackage(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             package_path = Path(result["package_path"])
-            self.assertTrue(package_path.exists())
+            self.assertTrue(package_path.is_dir())
+            self.assertTrue((package_path / "manifest.json").is_file())
+            self.assertTrue((package_path / "db" / "data.json").is_file())
+            self.assertTrue((package_path / "db" / "database.sql").is_file())
+            self.assertTrue((package_path / "annotated" / "11861_A_side_OK.png").is_file())
+            self.assertTrue((package_path / "historic" / "11861_A_front_NOK.png").is_file())
 
-            with zipfile.ZipFile(package_path, "r") as archive:
-                archive_names = set(archive.namelist())
-                self.assertIn("manifest.json", archive_names)
-                self.assertIn("db/data.json", archive_names)
-                self.assertIn("db/database.sql", archive_names)
-                self.assertIn("annotated/11861_A_side_OK.png", archive_names)
-                self.assertIn("historic/11861_A_front_NOK.png", archive_names)
+            manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["package_kind"], "display_state")
+            self.assertEqual(manifest["annotated_count"], 2)
+            self.assertEqual(manifest["historic_count"], 2)
+            self.assertEqual(manifest["table_counts"]["img_results"], 2)
 
-                manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-                self.assertEqual(manifest["package_kind"], "display_state")
-                self.assertEqual(manifest["annotated_count"], 2)
-                self.assertEqual(manifest["historic_count"], 2)
-                self.assertEqual(manifest["table_counts"]["img_results"], 2)
-
-                data_payload = json.loads(archive.read("db/data.json").decode("utf-8"))
-                self.assertEqual(len(data_payload["classified_images"]), 2)
-                self.assertEqual(len(data_payload["classified_image_defects"]), 1)
+            data_payload = json.loads((package_path / "db" / "data.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(data_payload["classified_images"]), 2)
+            self.assertEqual(len(data_payload["classified_image_defects"]), 1)
 
     def test_import_display_state_merges_missing_data_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
@@ -463,14 +459,14 @@ class TestStatePackage(unittest.TestCase):
 
     def test_import_display_state_rejects_invalid_package(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            invalid_zip = Path(tmp_dir) / "invalid.zip"
-            with zipfile.ZipFile(invalid_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                archive.writestr("db/data.json", "{}")
+            invalid_package = Path(tmp_dir) / "invalid_package"
+            (invalid_package / "db").mkdir(parents=True)
+            (invalid_package / "db" / "data.json").write_text("{}", encoding="utf-8")
 
             controller, _annotated_dir, _historic_dir = build_controller(tmp_dir, FakePackageDB())
 
             with self.assertRaises(ValueError):
-                import_display_state(controller, str(invalid_zip), db_client=controller.display.db)
+                import_display_state(controller, str(invalid_package), db_client=controller.display.db)
 
     def test_export_import_roundtrip_reproduces_files_and_db_rows(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:

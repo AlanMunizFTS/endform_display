@@ -376,7 +376,7 @@ class DisplayWindow:
         return copied
 
     def _choose_import_package_path(self):
-        """Open a file picker and return the selected package path."""
+        """Open a folder picker and return the selected export folder path."""
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -384,9 +384,8 @@ class DisplayWindow:
             root = tk.Tk()
             root.withdraw()
             root.update_idletasks()
-            package_path = filedialog.askopenfilename(
-                title="Select Display State Package",
-                filetypes=[("ZIP files", "*.zip")],
+            package_path = filedialog.askdirectory(
+                title="Select Display State Folder",
             )
             root.destroy()
             return package_path or None

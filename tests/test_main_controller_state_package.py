@@ -61,8 +61,8 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
             export_mock.return_value = {
                 "ok": True,
-                "package_path": f"{tmp_dir}\\display_state_20260326_120000.zip",
-                "package_name": "display_state_20260326_120000.zip",
+                "package_path": f"{tmp_dir}\\display_state_20260326_120000",
+                "package_name": "display_state_20260326_120000",
             }
 
             with patch("db.get_db_connection", return_value=fake_db):
@@ -78,7 +78,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             export_mock.assert_called_once()
             self.assertFalse(display.sync_in_progress)
             self.assertEqual(display.sync_progress_title, "Exporting Dataset")
-            self.assertEqual(display.sync_message, "Export completed: display_state_20260326_120000.zip")
+            self.assertEqual(display.sync_message, "Export completed: display_state_20260326_120000")
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
 
@@ -124,10 +124,13 @@ class TestMainControllerStatePackage(unittest.TestCase):
             }
 
             with patch("db.get_db_connection", return_value=fake_db):
-                controller.start_import_display_state_async("C:\\tmp\\package.zip")
+                controller.start_import_display_state_async("C:\\tmp\\display_state_20260326_120000")
 
             import_mock.assert_called_once()
-            self.assertEqual(import_mock.call_args.kwargs["package_path"], "C:\\tmp\\package.zip")
+            self.assertEqual(
+                import_mock.call_args.kwargs["package_path"],
+                "C:\\tmp\\display_state_20260326_120000",
+            )
             controller.stop_historic_download_worker.assert_called_once_with()
             controller.stop_remote_db_polling.assert_called_once_with()
             controller.start_historic_download_on_startup.assert_called_once_with(
