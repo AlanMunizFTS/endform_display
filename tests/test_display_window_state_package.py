@@ -34,7 +34,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         with patch.object(
             display,
             "_choose_import_package_path",
-            return_value="C:\\tmp\\display_state.zip",
+            return_value="C:\\tmp\\display_state_20260326_120000",
         ):
             display.mouse_callback(
                 cv2.EVENT_LBUTTONDOWN,
@@ -46,7 +46,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
 
         action_handler.assert_called_once_with(
             "import_display_state",
-            package_path="C:\\tmp\\display_state.zip",
+            package_path="C:\\tmp\\display_state_20260326_120000",
         )
 
     @patch("display_window.get_db_connection")

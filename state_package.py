@@ -1,8 +1,6 @@
 import json
 import os
 import socket
-import tempfile
-import zipfile
 from datetime import datetime
 from decimal import Decimal
 
@@ -10,7 +8,7 @@ from paths_config import EXPORTS_DIR, STATE_PACKAGE_VERSION
 
 
 PACKAGE_KIND = "display_state"
-REQUIRED_PACKAGE_ENTRIES = (
+REQUIRED_PACKAGE_FILES = (
     "manifest.json",
     "db/data.json",
     "db/database.sql",
@@ -195,25 +193,53 @@ def _validate_manifest(manifest):
         )
 
 
+def _package_file_path(package_path, relative_path):
+    return os.path.join(package_path, *relative_path.split("/"))
+
+
 def _load_package(package_path):
-    if not package_path or not os.path.isfile(package_path):
-        raise FileNotFoundError(f"Package not found: {package_path}")
+    if not package_path or not os.path.isdir(package_path):
+        raise FileNotFoundError(f"Export folder not found: {package_path}")
 
-    with zipfile.ZipFile(package_path, "r") as archive:
-        archive_names = set(archive.namelist())
-        missing_entries = [
-            entry for entry in REQUIRED_PACKAGE_ENTRIES if entry not in archive_names
-        ]
-        if missing_entries:
-            raise ValueError(
-                "Package is missing required entries: " + ", ".join(missing_entries)
-            )
+    missing_entries = [
+        entry
+        for entry in REQUIRED_PACKAGE_FILES
+        if not os.path.isfile(_package_file_path(package_path, entry))
+    ]
+    if missing_entries:
+        raise ValueError(
+            "Export folder is missing required files: " + ", ".join(missing_entries)
+        )
 
-        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-        _validate_manifest(manifest)
-        data_payload = json.loads(archive.read("db/data.json").decode("utf-8"))
+    with open(_package_file_path(package_path, "manifest.json"), "r", encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    _validate_manifest(manifest)
+
+    with open(_package_file_path(package_path, "db/data.json"), "r", encoding="utf-8") as handle:
+        data_payload = json.load(handle)
 
     return manifest, data_payload
+
+
+def _write_text_file(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
+def _build_unique_export_dir(file_manager, output_root):
+    base_name = f"display_state_{datetime.now():%Y%m%d_%H%M%S}"
+    export_path = file_manager.join(output_root, base_name)
+    if not file_manager.exists(export_path):
+        return base_name, export_path
+
+    suffix = 1
+    while True:
+        export_name = f"{base_name}_{suffix:02d}"
+        export_path = file_manager.join(output_root, export_name)
+        if not file_manager.exists(export_path):
+            return export_name, export_path
+        suffix += 1
 
 
 def _copy_missing_files(
@@ -499,8 +525,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
 
     output_root = str(output_dir or EXPORTS_DIR)
     file_manager.makedirs(output_root, exist_ok=True)
-    package_name = f"display_state_{datetime.now():%Y%m%d_%H%M%S}.zip"
-    package_path = file_manager.join(output_root, package_name)
+    package_name, package_path = _build_unique_export_dir(file_manager, output_root)
     total_steps = len(annotated_names) + len(historic_names) + 3
     done = 0
 
@@ -512,37 +537,41 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     if callable(progress_callback):
         progress_callback(done, total_steps, "Serializing database")
 
-    with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "manifest.json",
-            json.dumps(manifest, indent=2, sort_keys=True),
+    file_manager.makedirs(package_path, exist_ok=False)
+    metadata_files = {
+        "manifest.json": json.dumps(manifest, indent=2, sort_keys=True),
+        "db/data.json": json.dumps(data_payload, indent=2, sort_keys=True),
+        "db/database.sql": database_sql,
+    }
+    for relative_path, content in metadata_files.items():
+        _write_text_file(_package_file_path(package_path, relative_path), content)
+
+    annotated_package_dir = file_manager.join(package_path, "annotated")
+    historic_package_dir = file_manager.join(package_path, "historic")
+    file_manager.makedirs(annotated_package_dir, exist_ok=True)
+    file_manager.makedirs(historic_package_dir, exist_ok=True)
+
+    done += 1
+    if callable(progress_callback):
+        progress_callback(done, total_steps, "Writing metadata")
+
+    for name in annotated_names:
+        file_manager.copy2(
+            file_manager.join(annotated_dir, name),
+            file_manager.join(annotated_package_dir, name),
         )
-        archive.writestr(
-            "db/data.json",
-            json.dumps(data_payload, indent=2, sort_keys=True),
-        )
-        archive.writestr("db/database.sql", database_sql)
         done += 1
         if callable(progress_callback):
-            progress_callback(done, total_steps, "Writing metadata")
+            progress_callback(done, total_steps, "Copying annotated images")
 
-        for name in annotated_names:
-            archive.write(
-                file_manager.join(annotated_dir, name),
-                arcname=f"annotated/{name}",
-            )
-            done += 1
-            if callable(progress_callback):
-                progress_callback(done, total_steps, "Packing annotated images")
-
-        for name in historic_names:
-            archive.write(
-                file_manager.join(historic_dir, name),
-                arcname=f"historic/{name}",
-            )
-            done += 1
-            if callable(progress_callback):
-                progress_callback(done, total_steps, "Packing historic images")
+    for name in historic_names:
+        file_manager.copy2(
+            file_manager.join(historic_dir, name),
+            file_manager.join(historic_package_dir, name),
+        )
+        done += 1
+        if callable(progress_callback):
+            progress_callback(done, total_steps, "Copying historic images")
 
     done = total_steps
     if callable(progress_callback):
@@ -570,64 +599,60 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     )
 
     db_row_total = sum(len(rows) for rows in data_payload.values())
-    with tempfile.TemporaryDirectory(prefix="display_state_import_") as temp_dir:
-        with zipfile.ZipFile(package_path, "r") as archive:
-            archive.extractall(temp_dir)
+    annotated_source_dir = file_manager.join(package_path, "annotated")
+    historic_source_dir = file_manager.join(package_path, "historic")
+    if not os.path.isdir(annotated_source_dir):
+        raise ValueError("Export folder is missing annotated directory")
+    if not os.path.isdir(historic_source_dir):
+        raise ValueError("Export folder is missing historic directory")
 
-        annotated_source_dir = os.path.join(temp_dir, "annotated")
-        historic_source_dir = os.path.join(temp_dir, "historic")
-        if not os.path.isdir(annotated_source_dir):
-            raise ValueError("Package is missing annotated directory")
-        if not os.path.isdir(historic_source_dir):
-            raise ValueError("Package is missing historic directory")
+    total_steps = (
+        len(_list_image_names(file_manager, annotated_source_dir, image_extensions))
+        + len(_list_image_names(file_manager, historic_source_dir, image_extensions))
+        + db_row_total
+        + 1
+    )
+    progress_state = {"done": 0, "total": max(1, total_steps)}
 
-        total_steps = (
-            len(_list_image_names(file_manager, annotated_source_dir, image_extensions))
-            + len(_list_image_names(file_manager, historic_source_dir, image_extensions))
-            + db_row_total
-            + 1
-        )
-        progress_state = {"done": 0, "total": max(1, total_steps)}
+    if callable(progress_callback):
+        progress_callback(0, progress_state["total"], "Preparing import")
 
-        if callable(progress_callback):
-            progress_callback(0, progress_state["total"], "Preparing import")
+    annotated_stats = _copy_missing_files(
+        file_manager=file_manager,
+        source_dir=annotated_source_dir,
+        target_dir=annotated_target_dir,
+        image_extensions=image_extensions,
+        progress_callback=progress_callback,
+        progress_state=progress_state,
+        stage_label="Importing annotated images",
+    )
+    historic_stats = _copy_missing_files(
+        file_manager=file_manager,
+        source_dir=historic_source_dir,
+        target_dir=historic_target_dir,
+        image_extensions=image_extensions,
+        progress_callback=progress_callback,
+        progress_state=progress_state,
+        stage_label="Importing historic images",
+    )
 
-        annotated_stats = _copy_missing_files(
-            file_manager=file_manager,
-            source_dir=annotated_source_dir,
-            target_dir=annotated_target_dir,
-            image_extensions=image_extensions,
-            progress_callback=progress_callback,
-            progress_state=progress_state,
-            stage_label="Importing annotated images",
-        )
-        historic_stats = _copy_missing_files(
-            file_manager=file_manager,
-            source_dir=historic_source_dir,
-            target_dir=historic_target_dir,
-            image_extensions=image_extensions,
-            progress_callback=progress_callback,
-            progress_state=progress_state,
-            stage_label="Importing historic images",
-        )
+    merge_stats = _merge_payload_into_db(
+        controller=controller,
+        db_client=db,
+        data_payload=data_payload,
+        progress_callback=progress_callback,
+        progress_state=progress_state,
+    )
 
-        merge_stats = _merge_payload_into_db(
-            controller=controller,
-            db_client=db,
-            data_payload=data_payload,
-            progress_callback=progress_callback,
-            progress_state=progress_state,
-        )
+    for jsn in sorted(merge_stats["affected_jsns"]):
+        try:
+            controller._recalculate_piece_result(jsn, db_client=db)
+        except Exception:
+            pass
 
-        for jsn in sorted(merge_stats["affected_jsns"]):
-            try:
-                controller._recalculate_piece_result(jsn, db_client=db)
-            except Exception:
-                pass
-
-        progress_state["done"] += 1
-        if callable(progress_callback):
-            progress_callback(progress_state["done"], progress_state["total"], "Refreshing runtime state")
+    progress_state["done"] += 1
+    if callable(progress_callback):
+        progress_callback(progress_state["done"], progress_state["total"], "Refreshing runtime state")
 
     controller._invalidate_dataset_runtime_state(clear_historic_images=False)
     if getattr(controller.display, "historic_mode", False):
