@@ -37,8 +37,6 @@ class TestRemoteDbPolling(unittest.TestCase):
         display.show_image_grid = MagicMock()
         display.download_process = None
         display.download_stop_event = None
-        display.annotated_download_process = None
-        display.annotated_download_stop_event = None
         return display
 
     def _build_logger(self):

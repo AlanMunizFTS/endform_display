@@ -6,8 +6,6 @@ from pathlib import Path
 TMP_DISPLAY_DIR = Path("./tmp_display")
 HISTORIC_SUBDIR_NAME = "historic"
 HISTORIC_LOCAL_DIR = TMP_DISPLAY_DIR / HISTORIC_SUBDIR_NAME
-ANNOTATED_SUBDIR_NAME = "annotated"
-ANNOTATED_LOCAL_DIR = TMP_DISPLAY_DIR / ANNOTATED_SUBDIR_NAME
 
 RESOURCES_DIR = Path("./resources")
 CAMERA_ICON_PATH = RESOURCES_DIR / "camara.png"
@@ -24,7 +22,6 @@ SYNC_IMAGES_BASE_DIR = Path("./classified")
 # ----------------------------
 REMOTE_TEST_DISPLAY_DIR = "/media/ssd/test_display"
 REMOTE_HIST_DISPLAY_DIR = "/media/ssd/hist_display"
-REMOTE_ANNOTATED_DIR = "/media/ssd/annotated"
 
 # --------------------------------------
 # Status folders used by sync operations

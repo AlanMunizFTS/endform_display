@@ -98,13 +98,12 @@ def _build_data_payload(db_client):
     return payload
 
 
-def _build_manifest(annotated_names, historic_names, data_payload, image_extensions):
+def _build_manifest(historic_names, data_payload, image_extensions):
     return {
         "package_version": STATE_PACKAGE_VERSION,
         "package_kind": PACKAGE_KIND,
         "created_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "source_host": socket.gethostname(),
-        "annotated_count": len(annotated_names),
         "historic_count": len(historic_names),
         "table_counts": {
             table_name: len(rows)
@@ -509,15 +508,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     if db is None:
         return {"ok": False, "error": "No database connection available"}
 
-    annotated_dir = controller._get_visible_historic_dir()
     historic_dir = controller._get_export_historic_dir()
     image_extensions = tuple(getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS))
 
-    annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
     manifest = _build_manifest(
-        annotated_names=annotated_names,
         historic_names=historic_names,
         data_payload=data_payload,
         image_extensions=image_extensions,
@@ -526,7 +522,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     output_root = str(output_dir or EXPORTS_DIR)
     file_manager.makedirs(output_root, exist_ok=True)
     package_name, package_path = _build_unique_export_dir(file_manager, output_root)
-    total_steps = len(annotated_names) + len(historic_names) + 3
+    total_steps = len(historic_names) + 3
     done = 0
 
     if callable(progress_callback):
@@ -546,23 +542,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     for relative_path, content in metadata_files.items():
         _write_text_file(_package_file_path(package_path, relative_path), content)
 
-    annotated_package_dir = file_manager.join(package_path, "annotated")
     historic_package_dir = file_manager.join(package_path, "historic")
-    file_manager.makedirs(annotated_package_dir, exist_ok=True)
     file_manager.makedirs(historic_package_dir, exist_ok=True)
 
     done += 1
     if callable(progress_callback):
         progress_callback(done, total_steps, "Writing metadata")
-
-    for name in annotated_names:
-        file_manager.copy2(
-            file_manager.join(annotated_dir, name),
-            file_manager.join(annotated_package_dir, name),
-        )
-        done += 1
-        if callable(progress_callback):
-            progress_callback(done, total_steps, "Copying annotated images")
 
     for name in historic_names:
         file_manager.copy2(
@@ -592,23 +577,18 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
 
     manifest, data_payload = _load_package(package_path)
     file_manager = controller.file_manager
-    annotated_target_dir = controller._get_visible_historic_dir()
     historic_target_dir = controller._get_export_historic_dir()
     image_extensions = tuple(
         manifest.get("image_extensions") or getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS)
     )
 
     db_row_total = sum(len(rows) for rows in data_payload.values())
-    annotated_source_dir = file_manager.join(package_path, "annotated")
     historic_source_dir = file_manager.join(package_path, "historic")
-    if not os.path.isdir(annotated_source_dir):
-        raise ValueError("Export folder is missing annotated directory")
     if not os.path.isdir(historic_source_dir):
         raise ValueError("Export folder is missing historic directory")
 
     total_steps = (
-        len(_list_image_names(file_manager, annotated_source_dir, image_extensions))
-        + len(_list_image_names(file_manager, historic_source_dir, image_extensions))
+        len(_list_image_names(file_manager, historic_source_dir, image_extensions))
         + db_row_total
         + 1
     )
@@ -617,15 +597,6 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     if callable(progress_callback):
         progress_callback(0, progress_state["total"], "Preparing import")
 
-    annotated_stats = _copy_missing_files(
-        file_manager=file_manager,
-        source_dir=annotated_source_dir,
-        target_dir=annotated_target_dir,
-        image_extensions=image_extensions,
-        progress_callback=progress_callback,
-        progress_state=progress_state,
-        stage_label="Importing annotated images",
-    )
     historic_stats = _copy_missing_files(
         file_manager=file_manager,
         source_dir=historic_source_dir,
@@ -661,7 +632,6 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     return {
         "ok": True,
         "manifest": manifest,
-        "annotated": annotated_stats,
         "historic": historic_stats,
         "db": {
             "inserted": merge_stats["db_inserted"],

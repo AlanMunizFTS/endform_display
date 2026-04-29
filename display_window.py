@@ -69,8 +69,6 @@ class DisplayWindow:
             self.db_block_detail = str(exc)
         self.download_process = None  # Process for background download
         self.download_stop_event = None
-        self.annotated_download_process = None  # Process for annotated background download
-        self.annotated_download_stop_event = None
         self.historic_db_registered = False  # Tracks whether visible historic images were registered in DB.
         self.search_button_rect = None  # Search button rect
         self.search_input_rect = None  # Search input field rect
@@ -111,7 +109,7 @@ class DisplayWindow:
         self.reset_progress = 0
         self.reset_stage = ""
         self.reset_progress_title = "Resetting Dataset"
-        self.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
+        self.reset_progress_helper_text = "Clearing historic, classified, and final folders."
         self.exit_requested = False
         self.trash_icon = None
         self.trash_icon_size = None
@@ -3692,7 +3690,7 @@ class DisplayWindow:
 
         body_block = self._prepare_wrapped_text_block(
             [
-                "Warning: This will reset DB and delete images in historic, annotated, classified, and final_classification.",
+                "Warning: This will reset DB and delete images in historic, classified, and final_classification.",
                 "Confirm reset operation?",
             ],
             font,
@@ -3766,8 +3764,8 @@ class DisplayWindow:
 
         body_block = self._prepare_wrapped_text_block(
             [
-                "Rebuild the app database from annotated historic images?",
-                "This clears img_results, classified_images, and piece_result before rebuilding from ANNOTATED_LOCAL_DIR.",
+                "Rebuild the app database from historic images?",
+                "This clears img_results, classified_images, and piece_result before rebuilding from HISTORIC_LOCAL_DIR.",
                 "Classified and final folders will be preserved.",
                 "Historic images will be preserved.",
             ],
@@ -4304,7 +4302,6 @@ class DisplayWindow:
             setattr(self, stop_attr, None)
 
         _stop_worker("download_process", "download_stop_event")
-        _stop_worker("annotated_download_process", "annotated_download_stop_event")
 
         try:
             cv2.destroyWindow(self.window_name)

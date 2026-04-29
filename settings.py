@@ -97,7 +97,7 @@ def is_remote_db_enabled():
 
 
 def is_historic_download_remote_jsn_validation_enabled():
-    """Return whether startup historic/annotated downloads should validate JSNs in remote DB."""
+    """Return whether startup historic downloads should validate JSNs in remote DB."""
     return _get_bool_env("APP_HISTORIC_DOWNLOAD_VALIDATE_REMOTE_JSN", default=False)
 
 

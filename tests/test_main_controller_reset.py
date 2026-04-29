@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock
 
 from main_controller import ControllerConfig, MainController
-from paths_config import ANNOTATED_SUBDIR_NAME, HISTORIC_SUBDIR_NAME
+from paths_config import HISTORIC_SUBDIR_NAME
 
 
 class _DisplayStub:
@@ -38,22 +38,16 @@ class _DisplayStub:
 
         self.download_process = None
         self.download_stop_event = None
-        self.annotated_download_process = None
-        self.annotated_download_stop_event = None
 
 
 class TestMainControllerReset(unittest.TestCase):
-    def test_perform_reset_clears_local_and_remote_annotated_content(self):
+    def test_perform_reset_clears_local_and_remote_historic_content(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             historic_dir = os.path.join(tmpdir, HISTORIC_SUBDIR_NAME)
-            annotated_dir = os.path.join(tmpdir, ANNOTATED_SUBDIR_NAME)
             os.makedirs(historic_dir, exist_ok=True)
-            os.makedirs(annotated_dir, exist_ok=True)
 
             with open(os.path.join(historic_dir, "historic_a.png"), "w", encoding="utf-8") as f:
                 f.write("historic")
-            with open(os.path.join(annotated_dir, "annotated_a.png"), "w", encoding="utf-8") as f:
-                f.write("annotated")
 
             db = MagicMock()
             db.execute.return_value = 2
@@ -61,7 +55,6 @@ class TestMainControllerReset(unittest.TestCase):
             sftp_client = MagicMock()
             sftp_client.listdir.side_effect = [
                 ["remote_hist_a.png"],
-                ["remote_annotated_a.png"],
             ]
 
             display = _DisplayStub(db=db, sftp_client=sftp_client)
@@ -79,18 +72,12 @@ class TestMainControllerReset(unittest.TestCase):
 
             self.assertEqual(result, {"ok": True})
             self.assertTrue(os.path.isdir(historic_dir))
-            self.assertTrue(os.path.isdir(annotated_dir))
             self.assertEqual(os.listdir(historic_dir), [])
-            self.assertEqual(os.listdir(annotated_dir), [])
 
             db.execute.assert_called_once_with("DELETE FROM img_results")
             sftp_client.chdir.assert_any_call(controller.config.remote_hist_dir)
-            sftp_client.chdir.assert_any_call(controller.config.remote_annotated_dir)
             sftp_client.remove.assert_any_call(
                 f"{controller.config.remote_hist_dir}/remote_hist_a.png"
-            )
-            sftp_client.remove.assert_any_call(
-                f"{controller.config.remote_annotated_dir}/remote_annotated_a.png"
             )
             controller.stop_historic_download_worker.assert_called_once_with()
             controller.start_historic_download_on_startup.assert_called_once_with(

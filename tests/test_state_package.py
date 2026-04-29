@@ -229,22 +229,20 @@ class FakePackageDB:
 
 def build_controller(tmp_dir, db, historic_mode=False):
     tmp_path = Path(tmp_dir)
-    annotated_dir = tmp_path / "annotated"
     historic_dir = tmp_path / "historic"
-    annotated_dir.mkdir(exist_ok=True)
     historic_dir.mkdir(exist_ok=True)
     display = SimpleNamespace(db=db, historic_mode=historic_mode)
     controller = SimpleNamespace(
         file_manager=FileManager(),
         display=display,
         config=SimpleNamespace(image_extensions=(".png", ".jpg", ".jpeg", ".bmp")),
-        _get_visible_historic_dir=lambda: str(annotated_dir),
+        _get_visible_historic_dir=lambda: str(historic_dir),
         _get_export_historic_dir=lambda: str(historic_dir),
         _recalculate_piece_result=MagicMock(),
         _invalidate_dataset_runtime_state=MagicMock(),
         enter_historic_mode=MagicMock(),
     )
-    return controller, annotated_dir, historic_dir
+    return controller, historic_dir
 
 
 def build_source_db():
@@ -303,9 +301,7 @@ class TestStatePackage(unittest.TestCase):
     def test_export_display_state_creates_expected_folder_structure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()
-            controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            controller, historic_dir = build_controller(tmp_dir, source_db)
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
@@ -322,12 +318,13 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue((package_path / "manifest.json").is_file())
             self.assertTrue((package_path / "db" / "data.json").is_file())
             self.assertTrue((package_path / "db" / "database.sql").is_file())
-            self.assertTrue((package_path / "annotated" / "11861_A_side_OK.png").is_file())
+            self.assertFalse((package_path / "annotated").exists())
+            self.assertTrue((package_path / "historic" / "11861_A_side_OK.png").is_file())
             self.assertTrue((package_path / "historic" / "11861_A_front_NOK.png").is_file())
 
             manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["package_kind"], "display_state")
-            self.assertEqual(manifest["annotated_count"], 2)
+            self.assertNotIn("annotated_count", manifest)
             self.assertEqual(manifest["historic_count"], 2)
             self.assertEqual(manifest["table_counts"]["img_results"], 2)
 
@@ -338,9 +335,7 @@ class TestStatePackage(unittest.TestCase):
     def test_import_display_state_merges_missing_data_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
-            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"source-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"source-front")
+            source_controller, historic_dir = build_controller(source_tmp, source_db)
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"source-historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"source-historic-front")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
@@ -367,8 +362,7 @@ class TestStatePackage(unittest.TestCase):
                     }
                 ],
             )
-            target_controller, target_annotated, target_historic = build_controller(target_tmp, target_db)
-            (target_annotated / "11861_A_side_OK.png").write_bytes(b"existing-annotated")
+            target_controller, target_historic = build_controller(target_tmp, target_db)
             (target_historic / "11861_A_side_OK.png").write_bytes(b"existing-historic")
 
             result = import_display_state(
@@ -378,11 +372,8 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual((target_annotated / "11861_A_side_OK.png").read_bytes(), b"existing-annotated")
-            self.assertTrue((target_annotated / "11861_A_front_NOK.png").exists())
+            self.assertEqual((target_historic / "11861_A_side_OK.png").read_bytes(), b"existing-historic")
             self.assertTrue((target_historic / "11861_A_front_NOK.png").exists())
-            self.assertEqual(result["annotated"]["copied"], 1)
-            self.assertEqual(result["annotated"]["skipped"], 1)
             self.assertEqual(result["historic"]["copied"], 1)
             self.assertEqual(result["historic"]["skipped"], 1)
             self.assertEqual(result["db"]["inserted"]["img_results"], 1)
@@ -416,8 +407,7 @@ class TestStatePackage(unittest.TestCase):
                     }
                 ],
             )
-            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-annotated")
+            source_controller, historic_dir = build_controller(source_tmp, source_db)
             (historic_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-historic")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
 
@@ -443,7 +433,7 @@ class TestStatePackage(unittest.TestCase):
                     }
                 ],
             )
-            target_controller, target_annotated, _target_historic = build_controller(target_tmp, target_db)
+            target_controller, target_historic = build_controller(target_tmp, target_db)
 
             result = import_display_state(
                 target_controller,
@@ -452,7 +442,7 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertTrue((target_annotated / "11861_extra_diag_NOK.png").exists())
+            self.assertTrue((target_historic / "11861_extra_diag_NOK.png").exists())
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.img_results])
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.classified_images])
             target_controller._recalculate_piece_result.assert_called_with("11861", db_client=target_db)
@@ -463,7 +453,7 @@ class TestStatePackage(unittest.TestCase):
             (invalid_package / "db").mkdir(parents=True)
             (invalid_package / "db" / "data.json").write_text("{}", encoding="utf-8")
 
-            controller, _annotated_dir, _historic_dir = build_controller(tmp_dir, FakePackageDB())
+            controller, _historic_dir = build_controller(tmp_dir, FakePackageDB())
 
             with self.assertRaises(ValueError):
                 import_display_state(controller, str(invalid_package), db_client=controller.display.db)
@@ -471,16 +461,14 @@ class TestStatePackage(unittest.TestCase):
     def test_export_import_roundtrip_reproduces_files_and_db_rows(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
-            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            source_controller, historic_dir = build_controller(source_tmp, source_db)
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
 
             target_db = FakePackageDB()
-            target_controller, target_annotated, target_historic = build_controller(target_tmp, target_db)
+            target_controller, target_historic = build_controller(target_tmp, target_db)
             result = import_display_state(
                 target_controller,
                 package_result["package_path"],
@@ -488,10 +476,6 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(sorted(p.name for p in target_annotated.iterdir()), [
-                "11861_A_front_NOK.png",
-                "11861_A_side_OK.png",
-            ])
             self.assertEqual(sorted(p.name for p in target_historic.iterdir()), [
                 "11861_A_front_NOK.png",
                 "11861_A_side_OK.png",

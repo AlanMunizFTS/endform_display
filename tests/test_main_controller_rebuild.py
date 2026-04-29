@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from file_manager import FileManager
-from main_controller import MainController
+from main_controller import ControllerConfig, MainController
 
 class TestMainControllerRebuild(unittest.TestCase):
     def _build_display(self, db):
@@ -15,9 +15,9 @@ class TestMainControllerRebuild(unittest.TestCase):
     def test_rebuild_preserves_classified_and_final_classification_folders(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            annotated_dir = tmp_path / "annotated"
-            annotated_dir.mkdir()
-            (annotated_dir / "JSN001_side_OK.png").write_bytes(b"test-image")
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            (historic_dir / "JSN001_side_OK.png").write_bytes(b"test-image")
 
             sync_base_dir = tmp_path / "classified"
             (sync_base_dir / "side_ok").mkdir(parents=True)
@@ -32,6 +32,7 @@ class TestMainControllerRebuild(unittest.TestCase):
 
             controller = MainController(
                 display=self._build_display(db),
+                config=ControllerConfig(temp_dir=tmp_dir),
                 file_manager=FileManager(),
             )
             controller._register_local_images_in_db = MagicMock()
@@ -44,9 +45,7 @@ class TestMainControllerRebuild(unittest.TestCase):
 
             progress_updates = []
 
-            with patch("main_controller.ANNOTATED_LOCAL_DIR", annotated_dir), patch(
-                "main_controller.SYNC_IMAGES_BASE_DIR", sync_base_dir
-            ), patch(
+            with patch("main_controller.SYNC_IMAGES_BASE_DIR", sync_base_dir), patch(
                 "main_controller.FINAL_CLASSIFICATION_DIR", final_classification_dir
             ):
                 result = controller.perform_rebuild_db_from_historic(

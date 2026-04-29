@@ -2,7 +2,7 @@
 classifier.py
 Watches test_images/ for new images, classifies them with YOLO models,
 and injects results into tmp_display/ (normal view), tmp_display/historic/
-(historic view), and tmp_display/annotated/ (annotated, NOK only).
+(historic view).
 
 Images are processed JSN by JSN. After each piece, the script waits
 PIECE_DISPLAY_DURATION seconds before clearing tmp_display/ and showing
@@ -26,7 +26,6 @@ from ultralytics import YOLO
 TEST_IMAGES_DIR = "./test_images"
 TMP_DISPLAY_DIR = "./tmp_display"
 HISTORIC_DIR    = "./tmp_display/historic"
-ANNOTATED_DIR   = "./tmp_display/annotated"
 MODELS_FOLDER   = "./models"
 
 # ---------------------------------------------------------------------------
@@ -174,7 +173,6 @@ def main():
     os.makedirs(TEST_IMAGES_DIR, exist_ok=True)
     os.makedirs(TMP_DISPLAY_DIR, exist_ok=True)
     os.makedirs(HISTORIC_DIR, exist_ok=True)
-    os.makedirs(ANNOTATED_DIR, exist_ok=True)
 
     models = load_models(MODELS_FOLDER)
     if not models:
@@ -265,12 +263,12 @@ def main():
                         shutil.copy2(src_path, os.path.join(TMP_DISPLAY_DIR, out_name))
 
                 for hist_name, annotated_image, src_path in historic_batch:
-                    ext = os.path.splitext(hist_name)[1].lower()
-                    base_no_status = hist_name.rsplit("_", 1)[0]
                     is_nok = hist_name.rsplit("_", 1)[-1].startswith("NOK")
+                    historic_path = os.path.join(HISTORIC_DIR, hist_name)
                     if is_nok and annotated_image is not None:
-                        cv2.imwrite(os.path.join(ANNOTATED_DIR, hist_name), annotated_image)
-                    shutil.copy2(src_path, os.path.join(HISTORIC_DIR, hist_name))
+                        cv2.imwrite(historic_path, annotated_image)
+                    else:
+                        shutil.copy2(src_path, historic_path)
 
                 # Hold this JSN visible for PIECE_DISPLAY_DURATION seconds
                 time.sleep(PIECE_DISPLAY_DURATION)

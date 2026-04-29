@@ -103,7 +103,6 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
             import_mock.return_value = {
                 "ok": True,
-                "annotated": {"copied": 2, "skipped": 1},
                 "historic": {"copied": 2, "skipped": 1},
                 "db": {
                     "inserted": {
@@ -142,7 +141,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertEqual(display.sync_progress_title, "Importing Dataset")
             self.assertEqual(
                 display.sync_message,
-                "Import completed: 4 files, 6 DB rows added, 4 duplicates skipped",
+                "Import completed: 2 files, 6 DB rows added, 3 duplicates skipped",
             )
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
@@ -245,9 +244,9 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
     def test_check_and_register_new_historic_images_skips_during_dataset_transfer(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            annotated_dir = Path(tmp_dir) / "annotated"
-            annotated_dir.mkdir()
-            (annotated_dir / "11861_test_side_OK.png").write_bytes(b"image")
+            historic_dir = Path(tmp_dir) / "historic"
+            historic_dir.mkdir()
+            (historic_dir / "11861_test_side_OK.png").write_bytes(b"image")
 
             display = self._build_display(db=MagicMock())
             controller = MainController(
@@ -270,9 +269,9 @@ class TestMainControllerStatePackage(unittest.TestCase):
     @patch("main_controller.Thread", _ImmediateThread)
     def test_check_and_register_new_historic_images_does_not_export_report(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            annotated_dir = Path(tmp_dir) / "annotated"
-            annotated_dir.mkdir()
-            (annotated_dir / "11861_test_side_OK.png").write_bytes(b"image")
+            historic_dir = Path(tmp_dir) / "historic"
+            historic_dir.mkdir()
+            (historic_dir / "11861_test_side_OK.png").write_bytes(b"image")
 
             fake_db = MagicMock()
             display = self._build_display(db=MagicMock())

@@ -15,13 +15,10 @@ from dataset_exporter import (
 )
 from file_manager import FileManager
 from paths_config import (
-    ANNOTATED_LOCAL_DIR,
-    ANNOTATED_SUBDIR_NAME,
     FINAL_CLASSIFICATION_DIR,
     FINAL_CLASSIFICATION_DIRS,
     HISTORIC_LOCAL_DIR,
     HISTORIC_SUBDIR_NAME,
-    REMOTE_ANNOTATED_DIR,
     REMOTE_HIST_DISPLAY_DIR,
     REMOTE_TEST_DISPLAY_DIR,
     STATUS_SYNC_DIRS,
@@ -558,7 +555,6 @@ class ControllerConfig:
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
-    remote_annotated_dir: str = REMOTE_ANNOTATED_DIR
     historic_gate_remote_db_validation_enabled: bool = field(
         default_factory=is_historic_download_remote_jsn_validation_enabled
     )
@@ -640,7 +636,7 @@ class MainController:
         return self.file_manager.join(self.config.temp_dir, subdir_name)
 
     def _get_visible_historic_dir(self):
-        return self._resolve_temp_subdir(ANNOTATED_SUBDIR_NAME, ANNOTATED_LOCAL_DIR)
+        return self._get_export_historic_dir()
 
     def _get_export_historic_dir(self):
         return self._resolve_temp_subdir(HISTORIC_SUBDIR_NAME, HISTORIC_LOCAL_DIR)
@@ -1911,11 +1907,10 @@ class MainController:
                 if not result.get("ok", False):
                     raise RuntimeError(result.get("error", "Dataset import failed"))
 
-                annotated = result.get("annotated", {})
                 historic = result.get("historic", {})
                 db_stats = result.get("db", {})
-                file_imported = int(annotated.get("copied", 0)) + int(historic.get("copied", 0))
-                file_skipped = int(annotated.get("skipped", 0)) + int(historic.get("skipped", 0))
+                file_imported = int(historic.get("copied", 0))
+                file_skipped = int(historic.get("skipped", 0))
                 db_inserted_total = sum((db_stats.get("inserted") or {}).values())
                 db_skipped_total = sum((db_stats.get("skipped") or {}).values())
                 d.sync_message = (
@@ -1959,7 +1954,7 @@ class MainController:
         d.reset_progress = 0
         d.reset_stage = "Preparing reset..."
         d.reset_progress_title = "Resetting Dataset"
-        d.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
+        d.reset_progress_helper_text = "Clearing historic, classified, and final folders."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -1982,7 +1977,7 @@ class MainController:
                         stage_text,
                         phase_percent,
                         title="Resetting Dataset",
-                        helper_text="Clearing historic, annotated, classified, and final folders.",
+                        helper_text="Clearing historic, classified, and final folders.",
                     )
 
                 result = self.perform_reset(
@@ -2518,7 +2513,6 @@ class MainController:
         print("=" * 70)
 
         local_sources = [
-            ("annotated", self._get_visible_historic_dir()),
             ("historic", self._get_export_historic_dir()),
         ]
         local_deleted = 0
@@ -2545,7 +2539,6 @@ class MainController:
 
         remote_deleted = 0
         remote_sources = [
-            ("annotated", self.config.remote_annotated_dir),
             ("historic", self.config.remote_hist_dir),
         ]
         if d.sftp_client:
@@ -2719,7 +2712,7 @@ class MainController:
         d = self.display
         db = db_client or d.db
         print("\n" + "=" * 70)
-        print("STARTING DATABASE REBUILD FROM ANNOTATED HISTORIC SOURCE")
+        print("STARTING DATABASE REBUILD FROM HISTORIC SOURCE")
         print("=" * 70)
 
         visible_dir = self._get_visible_historic_dir()
@@ -2744,9 +2737,9 @@ class MainController:
         if not self.file_manager.exists(visible_dir):
             try:
                 self.file_manager.makedirs(visible_dir, exist_ok=True)
-                print(f"Annotated directory not found; created empty folder: {visible_dir}")
+                print(f"Historic directory not found; created empty folder: {visible_dir}")
             except Exception as exc:
-                message = f"Unable to create annotated directory: {exc}"
+                message = f"Unable to create historic directory: {exc}"
                 print(message)
                 return {"ok": False, "error": message}
 
@@ -2759,11 +2752,11 @@ class MainController:
                 ]
             )
         except Exception as exc:
-            message = f"Unable to scan annotated directory: {exc}"
+            message = f"Unable to scan historic directory: {exc}"
             print(message)
             return {"ok": False, "error": message}
 
-        _advance("Scanning annotated images")
+        _advance("Scanning historic images")
 
         try:
             truncated_tables = db.truncate_app_tables()
@@ -2784,18 +2777,18 @@ class MainController:
             self._backfill_piece_result(db_client=db)
             count_rows = db.fetch("SELECT COUNT(*) AS cnt FROM img_results")
             inserted_count = int(count_rows[0]["cnt"]) if count_rows else 0
-            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from annotated")
+            print(f"Rebuilt {inserted_count}/{len(historic_images)} img_results rows from historic")
             if inserted_count != len(historic_images):
                 errors.append(
                     f"Expected {len(historic_images)} img_results rows after rebuild, found {inserted_count}"
                 )
             if not historic_images:
-                print("Annotated directory is empty; database remains empty after rebuild")
+                print("Historic directory is empty; database remains empty after rebuild")
         except Exception as exc:
-            message = f"Error rebuilding database from annotated: {exc}"
+            message = f"Error rebuilding database from historic: {exc}"
             print(message)
             return {"ok": False, "error": message}
-        _advance("Rebuilding database from annotated")
+        _advance("Rebuilding database from historic")
 
         self._invalidate_dataset_runtime_state(clear_historic_images=False)
         if historic_images:
@@ -2828,11 +2821,9 @@ class MainController:
 
         local_targets = [
             ("historic", self._get_export_historic_dir()),
-            ("annotated", self._get_visible_historic_dir()),
         ]
         remote_targets = [
             ("historic", self.config.remote_hist_dir),
-            ("annotated", self.config.remote_annotated_dir),
         ]
 
         self.stop_historic_download_worker()
@@ -3064,9 +3055,7 @@ class MainController:
     def start_historic_download_on_startup(self, local_path, check_interval=30):
         d = self.display
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-        annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         self.file_manager.makedirs(historic_temp_dir, exist_ok=True)
-        self.file_manager.makedirs(annotated_temp_dir, exist_ok=True)
 
         creds = self.sftp_credentials or d.sftp_credentials
         if not creds:
@@ -3131,13 +3120,6 @@ class MainController:
             stop_attr="download_stop_event",
             worker_label="HIST_SYNC_SSH",
         )
-        _start_worker(
-            remote_dir=self.config.remote_annotated_dir,
-            local_dir=annotated_temp_dir,
-            process_attr="annotated_download_process",
-            stop_attr="annotated_download_stop_event",
-            worker_label="ANNOTATED_SYNC_SSH",
-        )
 
     def stop_historic_download_worker(self):
         d = self.display
@@ -3167,7 +3149,6 @@ class MainController:
             setattr(d, stop_attr, None)
 
         _stop_worker("download_process", "download_stop_event")
-        _stop_worker("annotated_download_process", "annotated_download_stop_event")
 
     def download_historic_batch(self, local_path, max_images=7):
         d = self.display
@@ -3175,19 +3156,19 @@ class MainController:
             return []
 
         try:
-            annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
+            historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
             batch_images = d.historic_images[d.historic_offset]
 
             downloaded_files = []
             for img in batch_images:
-                local_file = self.file_manager.join(annotated_temp_dir, img)
+                local_file = self.file_manager.join(historic_temp_dir, img)
                 if self.file_manager.exists(local_file):
                     downloaded_files.append(local_file)
 
             # Only register when the batch changes, not every loop iteration
             batch_key = (d.historic_offset, tuple(batch_images))
             if getattr(self, '_last_registered_batch_key', None) != batch_key:
-                self._register_local_images_in_db(annotated_temp_dir, image_names=batch_images)
+                self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
                 self._last_registered_batch_key = batch_key
 
             return downloaded_files
@@ -3766,7 +3747,7 @@ class MainController:
             return {
                 "verified": False,
                 "issue_count": 1,
-                "issues": {"annotated": [f"Annotated folder not found: {visible_dir}"]},
+                "issues": {"historic": [f"Historic folder not found: {visible_dir}"]},
             }
 
         if rows_snapshot is not None:
@@ -3787,7 +3768,7 @@ class MainController:
             return {
                 "verified": False,
                 "issue_count": 1,
-                "issues": {"annotated_images": ["No image files found in annotated folder"]},
+                "issues": {"historic_images": ["No image files found in historic folder"]},
             }
 
         db_status_by_image = defaultdict(set)
@@ -4711,7 +4692,7 @@ class MainController:
                                         pass
                             self._pending_remote_images = remote_images
                             # Live batches in tmp_display are display-only; DB state
-                            # must come from annotated images exclusively.
+                            # must come from historic images exclusively.
                             images = self.display.image_paths or []
                         else:
                             images = self._download_live_images_local()

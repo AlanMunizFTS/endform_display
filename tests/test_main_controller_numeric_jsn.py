@@ -46,7 +46,7 @@ class _DisplayNumericJsnStub:
 class TestMainControllerNumericJsn(unittest.TestCase):
     def test_list_local_image_names_requires_numeric_jsn_prefix(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            image_dir = Path(tmp_dir) / "annotated"
+            image_dir = Path(tmp_dir) / "historic"
             image_dir.mkdir()
             for name in (
                 "22700001_side_OK.png",
@@ -75,9 +75,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
 
     def test_load_historic_index_ignores_non_numeric_jsn_names(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            annotated_dir = Path(tmp_dir) / "annotated"
             historic_dir = Path(tmp_dir) / "historic"
-            annotated_dir.mkdir()
             historic_dir.mkdir()
 
             for name in (
@@ -86,7 +84,7 @@ class TestMainControllerNumericJsn(unittest.TestCase):
                 "11861-0007_side_OK.png",
                 "JSN001_side_OK.png",
             ):
-                (annotated_dir / name).write_bytes(b"x")
+                (historic_dir / name).write_bytes(b"x")
 
             controller = MainController(
                 display=_DisplayNumericJsnStub(),

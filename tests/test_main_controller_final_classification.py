@@ -49,13 +49,13 @@ class TestMainControllerFinalClassification(unittest.TestCase):
         return display
 
     @patch("main_controller.Thread", _ImmediateThread)
-    def test_new_annotated_images_do_not_auto_save_final_classification(self):
+    def test_new_historic_images_do_not_auto_save_final_classification(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
-            annotated_dir = tmp_path / "annotated"
-            annotated_dir.mkdir()
-            (annotated_dir / "118610000000000000001_Cam1_Side1_OK.png").write_bytes(
-                b"annotated"
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            (historic_dir / "118610000000000000001_Cam1_Side1_OK.png").write_bytes(
+                b"historic"
             )
 
             fake_db = MagicMock()
@@ -73,7 +73,7 @@ class TestMainControllerFinalClassification(unittest.TestCase):
                 controller._check_and_register_new_historic_images()
 
             controller._register_local_images_in_db.assert_any_call(
-                str(annotated_dir),
+                str(historic_dir),
                 db_client=fake_db,
             )
             controller._backfill_piece_result.assert_any_call(db_client=fake_db)
