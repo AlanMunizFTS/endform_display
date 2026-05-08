@@ -110,7 +110,7 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
                 image_names=[img_name],
             )
 
-    def test_download_historic_batch_uses_annotated_fallback_without_db_coordinates(self):
+    def test_download_historic_batch_uses_historic_without_db_coordinates_even_when_annotated_exists(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             annotated_dir = tmp_path / "annotated"
@@ -138,14 +138,14 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]["img_name"], img_name)
-            self.assertEqual(result[0]["path"], str(annotated_path))
+            self.assertEqual(result[0]["path"], str(historic_path))
             self.assertEqual(result[0]["status"], "ready")
-            self.assertEqual(result[0]["source"], "annotated_fallback")
+            self.assertEqual(result[0]["source"], "historic")
             self.assertTrue(
-                any(f"{img_name}=annotated_fallback" in call.args[0] for call in logger.info.call_args_list)
+                any(f"{img_name}=historic" in call.args[0] for call in logger.info.call_args_list)
             )
 
-    def test_download_historic_batch_prefers_db_coordinates_over_annotated_fallback(self):
+    def test_download_historic_batch_uses_db_coordinates_on_historic_even_when_annotated_exists(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             annotated_dir = tmp_path / "annotated"
@@ -273,9 +273,54 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             result = controller.download_historic_batch(tmp_dir)
 
-            self.assertEqual(result[0]["path"], str(annotated_path))
+            self.assertEqual(result[0]["path"], str(historic_dir / img_name))
             self.assertEqual(result[0]["status"], "ready")
-            self.assertEqual(result[0]["source"], "annotated_fallback")
+            self.assertEqual(result[0]["source"], "historic")
+
+    def test_download_historic_batch_refreshes_overlay_when_coordinates_arrive_later(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            historic_path = historic_dir / img_name
+            cv2.imwrite(str(historic_path), np.zeros((40, 40, 3), dtype=np.uint8))
+
+            db = MagicMock()
+            db.fetch.side_effect = [
+                [],
+                [
+                    {
+                        "img_name": img_name,
+                        "class_name": "scratch",
+                        "confidence": 0.91,
+                        "model_name": "model",
+                        "geometry_type": "bbox",
+                        "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                        "image_width": 360,
+                        "image_height": 360,
+                    }
+                ],
+            ]
+            display = self._build_display(db=db)
+            display.historic_images = [[img_name]]
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            first_result = controller.download_historic_batch(tmp_dir)
+            controller.historic_render_overlay_checked_at -= (
+                controller.historic_render_overlay_refresh_sec + 0.1
+            )
+            second_result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(first_result[0]["source"], "historic")
+            self.assertEqual(first_result[0]["status"], "ready")
+            self.assertEqual(second_result[0]["source"], "db_coordinates+historic")
+            self.assertEqual(second_result[0]["status"], "loading")
 
     def test_download_historic_batch_finishes_overlay_worker_and_reuses_cache(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

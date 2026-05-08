@@ -3313,7 +3313,6 @@ class MainController:
 
     def _build_historic_render_plan(self, local_path, batch_images, overlays_by_image):
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-        annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
 
         items = {}
@@ -3321,11 +3320,9 @@ class MainController:
         render_sources = []
         for img_name in batch_images:
             historic_file = self.file_manager.join(historic_temp_dir, img_name)
-            annotated_file = self.file_manager.join(annotated_temp_dir, img_name)
             overlays = overlays_by_image.get(img_name) or []
             has_db_coordinates = bool(overlays)
             historic_exists = self.file_manager.exists(historic_file)
-            annotated_exists = self.file_manager.exists(annotated_file)
 
             if has_db_coordinates:
                 if historic_exists:
@@ -3370,13 +3367,6 @@ class MainController:
                         f"[HIST_RENDER] Coordinates exist but historic image is missing: {img_name}",
                         allow_repeat=True,
                     )
-            elif annotated_exists:
-                item = {
-                    "img_name": img_name,
-                    "status": "ready",
-                    "source": "annotated_fallback",
-                    "path": annotated_file,
-                }
             elif historic_exists:
                 item = {
                     "img_name": img_name,
