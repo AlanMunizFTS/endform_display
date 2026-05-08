@@ -10,6 +10,12 @@ from file_manager import FileManager
 from state_package import export_display_state, import_display_state
 
 
+def _unwrap_json_param(value):
+    if hasattr(value, "adapted"):
+        return value.adapted
+    return value
+
+
 class FakePackageCursor:
     def __init__(self, db):
         self.db = db
@@ -19,6 +25,12 @@ class FakePackageCursor:
         normalized = " ".join(query.split())
         params = params or ()
 
+        if normalized == "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s":
+            self._results = [
+                (column_name,)
+                for column_name in self.db.table_columns.get(params[0], set())
+            ]
+            return
         if normalized == "SELECT img_name FROM img_results":
             self._results = [(row["img_name"],) for row in self.db.img_results]
             return
@@ -28,13 +40,27 @@ class FakePackageCursor:
         if normalized == "SELECT img_name FROM classified_images":
             self._results = [(row["img_name"],) for row in self.db.classified_images]
             return
+        if normalized.startswith("SELECT img_name, class_name, confidence") and "FROM model_results" in normalized:
+            requested = [
+                column.strip()
+                for column in normalized.split("SELECT ", 1)[1].split(" FROM model_results", 1)[0].split(",")
+            ]
+            self._results = [
+                tuple(row.get(column) for column in requested)
+                for row in self.db.model_results
+            ]
+            return
         if normalized.startswith(
-            "SELECT ci.img_name, cid.class_name, cid.confidence FROM classified_image_defects"
+            "SELECT ci.img_name, cid.class_name, cid.confidence"
         ):
             rows = []
+            include_remote_id = "cid.remote_model_result_id" in normalized
             for row in self.db.classified_image_defects:
                 classified = self.db.classified_by_id[row["classified_image_id"]]
-                rows.append((classified["img_name"], row["class_name"], row["confidence"]))
+                values = [classified["img_name"], row["class_name"], row["confidence"]]
+                if include_remote_id:
+                    values.append(row.get("remote_model_result_id"))
+                rows.append(tuple(values))
             self._results = rows
             return
         if normalized.startswith(
@@ -98,16 +124,29 @@ class FakePackageCursor:
             self._results = []
             return
         if normalized.startswith(
-            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at)"
+            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at"
         ):
-            self.db.classified_image_defects.append(
-                {
-                    "classified_image_id": params[0],
-                    "class_name": params[1],
-                    "confidence": params[2],
-                    "created_at": params[3],
-                }
-            )
+            columns_text = normalized.split("INSERT INTO classified_image_defects (", 1)[1].split(")", 1)[0]
+            columns = [column.strip() for column in columns_text.split(",")]
+            new_row = {}
+            for index, column in enumerate(columns):
+                value = params[index]
+                if column == "coordinates":
+                    value = _unwrap_json_param(value)
+                new_row[column] = value
+            self.db.classified_image_defects.append(new_row)
+            self._results = []
+            return
+        if normalized.startswith("INSERT INTO model_results ("):
+            columns_text = normalized.split("INSERT INTO model_results (", 1)[1].split(")", 1)[0]
+            columns = [column.strip() for column in columns_text.split(",")]
+            new_row = {}
+            for index, column in enumerate(columns):
+                value = params[index]
+                if column == "coordinates":
+                    value = _unwrap_json_param(value)
+                new_row[column] = value
+            self.db.model_results.append(new_row)
             self._results = []
             return
         if normalized.startswith(
@@ -140,15 +179,64 @@ class FakePackageDB:
         piece_result=None,
         classified_images=None,
         classified_image_defects=None,
+        model_results=None,
         piece_result_defects=None,
+        has_coordinate_schema=False,
+        has_model_results_table=False,
     ):
         self.img_results = list(img_results or [])
         self.piece_result = list(piece_result or [])
         self.classified_images = list(classified_images or [])
         self.classified_image_defects = list(classified_image_defects or [])
+        self.model_results = list(model_results or [])
         self.piece_result_defects = list(piece_result_defects or [])
+        self.has_coordinate_schema = bool(has_coordinate_schema)
+        self.has_model_results_table = bool(has_model_results_table or model_results)
         self.next_piece_id = max((row["id"] for row in self.piece_result), default=0) + 1
         self.next_classified_id = max((row["id"] for row in self.classified_images), default=0) + 1
+        self.table_columns = {
+            "img_results": {"img_name", "result"},
+            "piece_result": {"id", "jsn", "operator_result", "model_result", "created_at"},
+            "classified_images": {"id", "img_name", "operator_result", "model_result", "piece_id", "created_at"},
+            "classified_image_defects": {
+                "id",
+                "classified_image_id",
+                "class_name",
+                "confidence",
+                "created_at",
+            },
+            "piece_result_defects": {
+                "id",
+                "piece_result_id",
+                "class_name",
+                "confidence",
+                "created_at",
+            },
+        }
+        if self.has_coordinate_schema:
+            self.table_columns["classified_image_defects"].update(
+                {
+                    "remote_model_result_id",
+                    "model_name",
+                    "geometry_type",
+                    "coordinates",
+                    "image_width",
+                    "image_height",
+                }
+            )
+        if self.has_model_results_table:
+            self.table_columns["model_results"] = {
+                "id",
+                "img_name",
+                "class_name",
+                "confidence",
+                "created_at",
+                "model_name",
+                "geometry_type",
+                "coordinates",
+                "image_width",
+                "image_height",
+            }
         self._reindex()
 
     def _reindex(self):
@@ -159,6 +247,11 @@ class FakePackageDB:
 
     def fetch(self, query, data=None):
         normalized = " ".join(query.split())
+        if normalized == "SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s":
+            return [
+                {"column_name": column_name}
+                for column_name in self.table_columns.get(data[0], set())
+            ]
         if normalized == "SELECT img_name, result FROM img_results ORDER BY img_name":
             return sorted(self.img_results, key=lambda row: row["img_name"])
         if normalized == "SELECT jsn, operator_result, model_result, created_at FROM piece_result ORDER BY jsn":
@@ -188,20 +281,40 @@ class FakePackageDB:
                 )
             return rows
         if normalized.startswith(
-            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at FROM classified_image_defects"
+            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at"
         ):
+            select_columns = [
+                column.strip()
+                for column in normalized.split("SELECT ", 1)[1].split(" FROM classified_image_defects", 1)[0].split(",")
+            ]
             rows = []
             for row in self.classified_image_defects:
                 classified = self.classified_by_id[row["classified_image_id"]]
-                rows.append(
-                    {
-                        "img_name": classified["img_name"],
-                        "class_name": row["class_name"],
-                        "confidence": row["confidence"],
-                        "created_at": row["created_at"],
-                    }
-                )
+                output_row = {}
+                for column in select_columns:
+                    key = column.split(".")[-1]
+                    if column == "ci.img_name":
+                        output_row[key] = classified["img_name"]
+                    else:
+                        output_row[key] = row.get(key)
+                rows.append(output_row)
             return sorted(rows, key=lambda entry: (entry["img_name"], entry["class_name"]))
+        if normalized.startswith("SELECT img_name, class_name, confidence") and "FROM model_results" in normalized:
+            select_columns = [
+                column.strip()
+                for column in normalized.split("SELECT ", 1)[1].split(" FROM model_results", 1)[0].split(",")
+            ]
+            return sorted(
+                [
+                    {column: row.get(column) for column in select_columns}
+                    for row in self.model_results
+                ],
+                key=lambda entry: (
+                    entry.get("img_name"),
+                    entry.get("class_name"),
+                    entry.get("confidence"),
+                ),
+            )
         if normalized.startswith(
             "SELECT pr.jsn, prd.class_name, prd.confidence, prd.created_at FROM piece_result_defects"
         ):
@@ -299,6 +412,70 @@ def build_source_db():
     )
 
 
+def build_coordinate_source_db():
+    return FakePackageDB(
+        img_results=[
+            {"img_name": "11861_A_front_NOK.png", "result": "NOK"},
+        ],
+        piece_result=[
+            {
+                "id": 1,
+                "jsn": "11861",
+                "operator_result": "NOK",
+                "model_result": "NOK",
+                "created_at": "2026-03-26 10:00:00",
+            }
+        ],
+        classified_images=[
+            {
+                "id": 1,
+                "img_name": "11861_A_front_NOK.png",
+                "operator_result": "NOK",
+                "model_result": "NOK",
+                "piece_id": 1,
+                "created_at": "2026-03-26 10:00:02",
+            },
+        ],
+        classified_image_defects=[
+            {
+                "classified_image_id": 1,
+                "class_name": "dent",
+                "confidence": "0.9000",
+                "created_at": "2026-03-26 10:00:03",
+                "remote_model_result_id": 25,
+                "model_name": "remote-yolo",
+                "geometry_type": "bbox",
+                "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                "image_width": 360,
+                "image_height": 360,
+            }
+        ],
+        model_results=[
+            {
+                "img_name": "11861_A_front_NOK.png",
+                "class_name": "dent",
+                "confidence": "0.9000",
+                "created_at": "2026-03-26 10:00:03",
+                "model_name": "remote-yolo",
+                "geometry_type": "bbox",
+                "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                "image_width": 360,
+                "image_height": 360,
+            },
+        ],
+        piece_result_defects=[
+            {
+                "piece_result_id": 1,
+                "class_name": "dent",
+                "confidence": "0.9000",
+                "created_at": "2026-03-26 10:00:04",
+            }
+        ],
+        has_coordinate_schema=True,
+        has_model_results_table=True,
+    )
+
+
 class TestStatePackage(unittest.TestCase):
     def test_export_display_state_creates_expected_folder_structure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -338,6 +515,106 @@ class TestStatePackage(unittest.TestCase):
             data_payload = json.loads((package_path / "db" / "data.json").read_text(encoding="utf-8"))
             self.assertEqual(len(data_payload["classified_images"]), 2)
             self.assertEqual(len(data_payload["classified_image_defects"]), 1)
+
+    def test_export_display_state_includes_coordinate_payload_when_schema_exists(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_coordinate_source_db()
+            controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
+
+            package_result = export_display_state(
+                controller,
+                output_dir=tmp_dir,
+                db_client=source_db,
+            )
+
+            data_payload = json.loads(
+                (Path(package_result["package_path"]) / "db" / "data.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            defect = data_payload["classified_image_defects"][0]
+            self.assertEqual(defect["geometry_type"], "bbox")
+            self.assertEqual(
+                defect["coordinates"],
+                {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
+            )
+            self.assertEqual(len(data_payload["model_results"]), 1)
+            self.assertEqual(
+                data_payload["model_results"][0]["coordinates"],
+                {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
+            )
+
+    def test_import_display_state_imports_coordinates_when_target_schema_supports_them(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_coordinate_source_db()
+            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
+            package_result = export_display_state(
+                source_controller,
+                output_dir=source_tmp,
+                db_client=source_db,
+            )
+
+            target_db = FakePackageDB(
+                has_coordinate_schema=True,
+                has_model_results_table=True,
+            )
+            target_controller, _target_annotated, _target_historic = build_controller(
+                target_tmp,
+                target_db,
+            )
+
+            result = import_display_state(
+                target_controller,
+                package_result["package_path"],
+                db_client=target_db,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["db"]["inserted"]["model_results"], 1)
+            self.assertEqual(len(target_db.model_results), 1)
+            self.assertEqual(
+                target_db.model_results[0]["coordinates"],
+                {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+            )
+            self.assertEqual(
+                target_db.classified_image_defects[0]["coordinates"],
+                {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+            )
+
+    def test_import_display_state_skips_coordinate_payload_when_target_schema_is_legacy(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_coordinate_source_db()
+            source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
+            (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
+            package_result = export_display_state(
+                source_controller,
+                output_dir=source_tmp,
+                db_client=source_db,
+            )
+
+            target_db = FakePackageDB()
+            target_controller, _target_annotated, _target_historic = build_controller(
+                target_tmp,
+                target_db,
+            )
+
+            result = import_display_state(
+                target_controller,
+                package_result["package_path"],
+                db_client=target_db,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["db"]["inserted"]["img_results"], 1)
+            self.assertEqual(result["db"]["inserted"]["classified_image_defects"], 1)
+            self.assertEqual(result["db"]["skipped"]["model_results"], 1)
+            self.assertEqual(len(target_db.model_results), 0)
+            self.assertNotIn("coordinates", target_db.classified_image_defects[0])
 
     def test_import_display_state_merges_missing_data_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:

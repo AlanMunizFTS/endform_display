@@ -4,6 +4,11 @@ import socket
 from datetime import datetime
 from decimal import Decimal
 
+try:
+    from psycopg2.extras import Json
+except Exception:  # pragma: no cover - psycopg2 is available in the app runtime.
+    Json = None
+
 from paths_config import EXPORTS_DIR, STATE_PACKAGE_VERSION
 
 
@@ -14,11 +19,35 @@ REQUIRED_PACKAGE_FILES = (
     "db/database.sql",
 )
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+CLASSIFIED_DEFECT_BASE_COLUMNS = ("class_name", "confidence", "created_at")
+CLASSIFIED_DEFECT_OPTIONAL_COLUMNS = (
+    "remote_model_result_id",
+    "model_name",
+    "geometry_type",
+    "coordinates",
+    "image_width",
+    "image_height",
+)
+MODEL_RESULT_COLUMNS = (
+    "img_name",
+    "class_name",
+    "confidence",
+    "created_at",
+    "model_name",
+    "geometry_type",
+    "coordinates",
+    "image_width",
+    "image_height",
+)
 
 
 def _json_safe(value):
     if value is None:
         return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
     if isinstance(value, Decimal):
         return format(value, "f")
     if hasattr(value, "isoformat"):
@@ -36,9 +65,124 @@ def _sql_literal(value):
         return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float, Decimal)):
         return str(value)
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(_json_safe(value), sort_keys=True).replace("'", "''")
+        return f"'{text}'"
 
     text = str(value).replace("'", "''")
     return f"'{text}'"
+
+
+def _sql_column_guard(table_name, column_names):
+    if not column_names:
+        return "TRUE"
+    column_list = ", ".join(_sql_literal(column_name) for column_name in column_names)
+    return (
+        "(SELECT COUNT(*) FROM information_schema.columns "
+        "WHERE table_schema = current_schema() "
+        f"AND table_name = {_sql_literal(table_name)} "
+        f"AND column_name = ANY(ARRAY[{column_list}]::text[])) = {len(column_names)}"
+    )
+
+
+def _guarded_sql(table_name, column_names, guarded_statement, fallback_statement=None):
+    guard = _sql_column_guard(table_name, column_names)
+    lines = [
+        "DO $$",
+        "BEGIN",
+        f"    IF {guard} THEN",
+        f"        EXECUTE {_sql_literal(guarded_statement)};",
+    ]
+    if fallback_statement:
+        lines.extend(
+            [
+                "    ELSE",
+                f"        {fallback_statement}",
+            ]
+        )
+    lines.extend(["    END IF;", "END $$;"])
+    return "\n".join(lines)
+
+
+def _json_db_value(value):
+    if value is None:
+        return None
+    if Json is None:
+        return json.dumps(_json_safe(value), sort_keys=True)
+    return Json(_json_safe(value))
+
+
+def _canonical_json_key(value):
+    if value is None:
+        return None
+    if hasattr(value, "adapted"):
+        value = value.adapted
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return value
+    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
+
+
+def _model_result_key(row):
+    return (
+        row.get("img_name"),
+        row.get("class_name"),
+        str(row.get("confidence")),
+        row.get("model_name"),
+        row.get("geometry_type"),
+        _canonical_json_key(row.get("coordinates")),
+        row.get("image_width"),
+        row.get("image_height"),
+    )
+
+
+def _column_list_from_rows(rows):
+    columns = set()
+    for row in rows or []:
+        columns.update(row.keys())
+    return columns
+
+
+def _fetch_table_columns(db_client, table_name):
+    try:
+        rows = db_client.fetch(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (table_name,),
+        )
+    except Exception:
+        return set()
+
+    columns = set()
+    for row in rows or []:
+        if hasattr(row, "get"):
+            column_name = row.get("column_name")
+        else:
+            column_name = row[0] if row else None
+        if column_name:
+            columns.add(str(column_name))
+    return columns
+
+
+def _fetch_table_columns_from_cursor(cursor, table_name):
+    try:
+        cursor.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = %s",
+            (table_name,),
+        )
+        rows = cursor.fetchall()
+    except Exception:
+        return set()
+
+    columns = set()
+    for row in rows or []:
+        column_name = _row_get(row, "column_name", _row_get(row, 0))
+        if column_name:
+            columns.add(str(column_name))
+    return columns
 
 
 def _list_image_names(file_manager, directory, image_extensions):
@@ -63,6 +207,22 @@ def _normalize_row(row):
 
 
 def _build_data_payload(db_client):
+    classified_defect_columns = _fetch_table_columns(
+        db_client,
+        "classified_image_defects",
+    )
+    classified_defect_optional_columns = [
+        column
+        for column in CLASSIFIED_DEFECT_OPTIONAL_COLUMNS
+        if column in classified_defect_columns
+    ]
+    classified_defect_select_columns = [
+        "ci.img_name",
+        "cid.class_name",
+        "cid.confidence",
+        "cid.created_at",
+    ] + [f"cid.{column}" for column in classified_defect_optional_columns]
+
     payload = {
         "img_results": _fetch_rows(
             db_client,
@@ -82,7 +242,9 @@ def _build_data_payload(db_client):
         ),
         "classified_image_defects": _fetch_rows(
             db_client,
-            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at "
+            "SELECT "
+            + ", ".join(classified_defect_select_columns)
+            + " "
             "FROM classified_image_defects cid "
             "JOIN classified_images ci ON ci.id = cid.classified_image_id "
             "ORDER BY ci.img_name, cid.class_name, cid.confidence",
@@ -95,6 +257,22 @@ def _build_data_payload(db_client):
             "ORDER BY pr.jsn, prd.class_name, prd.confidence",
         ),
     }
+
+    model_result_columns = _fetch_table_columns(db_client, "model_results")
+    if {"img_name", "class_name", "confidence"}.issubset(model_result_columns):
+        selected_model_result_columns = [
+            column for column in MODEL_RESULT_COLUMNS if column in model_result_columns
+        ]
+        payload["model_results"] = _fetch_rows(
+            db_client,
+            "SELECT "
+            + ", ".join(selected_model_result_columns)
+            + " FROM model_results "
+            "ORDER BY img_name, class_name, confidence",
+        )
+    else:
+        payload["model_results"] = []
+
     return payload
 
 
@@ -157,15 +335,85 @@ def _build_database_sql(data_payload):
 
     lines.append("")
 
-    for row in data_payload.get("classified_image_defects", []):
-        lines.append(
-            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at) "
+    classified_defect_rows = data_payload.get("classified_image_defects", [])
+    classified_defect_payload_columns = _column_list_from_rows(classified_defect_rows)
+    classified_defect_optional_columns = [
+        column
+        for column in CLASSIFIED_DEFECT_OPTIONAL_COLUMNS
+        if column in classified_defect_payload_columns
+    ]
+    classified_defect_insert_columns = [
+        "classified_image_id",
+        *CLASSIFIED_DEFECT_BASE_COLUMNS,
+        *classified_defect_optional_columns,
+    ]
+
+    for row in classified_defect_rows:
+        classified_defect_base_statement = (
+            "INSERT INTO classified_image_defects "
+            "(classified_image_id, class_name, confidence, created_at) "
             "SELECT "
             f"ci.id, {_sql_literal(row.get('class_name'))}, {_sql_literal(row.get('confidence'))}, "
             f"{_sql_literal(row.get('created_at'))} "
             "FROM classified_images ci "
             f"WHERE ci.img_name = {_sql_literal(row.get('img_name'))} "
             "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING;"
+        )
+        classified_defect_values = [
+            "ci.id",
+            _sql_literal(row.get("class_name")),
+            _sql_literal(row.get("confidence")),
+            _sql_literal(row.get("created_at")),
+            *[
+                _sql_literal(row.get(column))
+                for column in classified_defect_optional_columns
+            ],
+        ]
+        classified_defect_full_statement = (
+            "INSERT INTO classified_image_defects "
+            f"({', '.join(classified_defect_insert_columns)}) "
+            "SELECT "
+            + ", ".join(classified_defect_values)
+            + " "
+            "FROM classified_images ci "
+            f"WHERE ci.img_name = {_sql_literal(row.get('img_name'))} "
+            "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING;"
+        )
+        if classified_defect_optional_columns:
+            lines.append(
+                _guarded_sql(
+                    "classified_image_defects",
+                    classified_defect_insert_columns,
+                    classified_defect_full_statement,
+                    fallback_statement=classified_defect_base_statement,
+                )
+            )
+        else:
+            lines.append(classified_defect_base_statement)
+
+    lines.append("")
+
+    model_result_rows = data_payload.get("model_results", [])
+    model_result_payload_columns = [
+        column
+        for column in MODEL_RESULT_COLUMNS
+        if column in _column_list_from_rows(model_result_rows)
+    ]
+    for row in model_result_rows:
+        model_result_statement = (
+            "INSERT INTO model_results "
+            f"({', '.join(model_result_payload_columns)}) "
+            "VALUES ("
+            + ", ".join(_sql_literal(row.get(column)) for column in model_result_payload_columns)
+            + ") "
+            "ON CONFLICT DO NOTHING;"
+        )
+        lines.append(
+            _guarded_sql(
+                "model_results",
+                model_result_payload_columns,
+                model_result_statement,
+            )
         )
 
     lines.append("")
@@ -356,6 +604,7 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             "piece_result": 0,
             "classified_images": 0,
             "classified_image_defects": 0,
+            "model_results": 0,
             "piece_result_defects": 0,
         },
         "db_skipped": {
@@ -363,31 +612,87 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             "piece_result": 0,
             "classified_images": 0,
             "classified_image_defects": 0,
+            "model_results": 0,
             "piece_result_defects": 0,
         },
         "affected_jsns": affected_jsns,
     }
 
     with db_client.get_cursor() as cursor:
+        classified_defect_columns = _fetch_table_columns_from_cursor(
+            cursor,
+            "classified_image_defects",
+        )
+        if not classified_defect_columns:
+            classified_defect_columns = {
+                "classified_image_id",
+                "class_name",
+                "confidence",
+                "created_at",
+            }
+        model_result_columns = _fetch_table_columns_from_cursor(cursor, "model_results")
+        can_import_model_results = {"img_name", "class_name", "confidence"}.issubset(
+            model_result_columns
+        )
+
         existing_img_results = _fetch_existing_set(cursor, "SELECT img_name FROM img_results")
         existing_piece_result = _fetch_existing_set(cursor, "SELECT jsn FROM piece_result")
         existing_classified_images = _fetch_existing_set(
             cursor, "SELECT img_name FROM classified_images"
         )
+        existing_model_results = set()
+        existing_model_result_ok_img_names = set()
+        if can_import_model_results:
+            selected_model_result_columns = [
+                column for column in MODEL_RESULT_COLUMNS if column in model_result_columns
+            ]
+            cursor.execute(
+                "SELECT "
+                + ", ".join(selected_model_result_columns)
+                + " FROM model_results"
+            )
+            existing_model_result_rows = cursor.fetchall()
+            for existing_row in existing_model_result_rows:
+                normalized_existing = {
+                    column: _row_get(existing_row, column, _row_get(existing_row, index))
+                    for index, column in enumerate(selected_model_result_columns)
+                }
+                existing_model_results.add(_model_result_key(normalized_existing))
+                if normalized_existing.get("class_name") == "OK":
+                    existing_model_result_ok_img_names.add(
+                        normalized_existing.get("img_name")
+                    )
 
+        classified_defect_existing_select_columns = [
+            "ci.img_name",
+            "cid.class_name",
+            "cid.confidence",
+        ]
+        if "remote_model_result_id" in classified_defect_columns:
+            classified_defect_existing_select_columns.append("cid.remote_model_result_id")
         cursor.execute(
-            "SELECT ci.img_name, cid.class_name, cid.confidence "
+            "SELECT "
+            + ", ".join(classified_defect_existing_select_columns)
+            + " "
             "FROM classified_image_defects cid "
             "JOIN classified_images ci ON ci.id = cid.classified_image_id"
         )
+        existing_classified_defect_rows = cursor.fetchall()
         existing_classified_defects = {
             (
                 _row_get(row, "img_name", _row_get(row, 0)),
                 _row_get(row, "class_name", _row_get(row, 1)),
                 str(_row_get(row, "confidence", _row_get(row, 2))),
             )
-            for row in cursor.fetchall()
+            for row in existing_classified_defect_rows
         }
+        existing_remote_model_result_ids = set()
+        if "remote_model_result_id" in classified_defect_columns:
+            existing_remote_model_result_ids = {
+                _row_get(row, "remote_model_result_id", _row_get(row, 3))
+                for row in existing_classified_defect_rows
+                if _row_get(row, "remote_model_result_id", _row_get(row, 3)) is not None
+            }
 
         cursor.execute(
             "SELECT pr.jsn, prd.class_name "
@@ -470,13 +775,64 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             if callable(progress_callback):
                 progress_callback(progress_state["done"], progress_state["total"], "Merging database")
 
+        for row in data_payload.get("model_results", []):
+            img_name = row.get("img_name")
+            class_name = row.get("class_name")
+            result_key = _model_result_key(row)
+            if (
+                not can_import_model_results
+                or not img_name
+                or not class_name
+                or result_key in existing_model_results
+                or (class_name == "OK" and img_name in existing_model_result_ok_img_names)
+            ):
+                stats["db_skipped"]["model_results"] += 1
+            else:
+                insert_columns = [
+                    column
+                    for column in MODEL_RESULT_COLUMNS
+                    if column in model_result_columns and column in row
+                ]
+                insert_values = [
+                    _json_db_value(row.get(column))
+                    if column == "coordinates"
+                    else row.get(column)
+                    for column in insert_columns
+                ]
+                cursor.execute(
+                    "INSERT INTO model_results "
+                    f"({', '.join(insert_columns)}) "
+                    "VALUES ("
+                    + ", ".join(["%s"] * len(insert_columns))
+                    + ") ON CONFLICT DO NOTHING",
+                    tuple(insert_values),
+                )
+                existing_model_results.add(result_key)
+                if class_name == "OK":
+                    existing_model_result_ok_img_names.add(img_name)
+                stats["db_inserted"]["model_results"] += 1
+                affected_jsns.add(img_name.split("_")[0] if "_" in img_name else img_name)
+            progress_state["done"] += 1
+            if callable(progress_callback):
+                progress_callback(progress_state["done"], progress_state["total"], "Merging database")
+
         for row in data_payload.get("classified_image_defects", []):
             img_name = row.get("img_name")
             class_name = row.get("class_name")
             confidence = row.get("confidence")
             confidence_key = str(confidence)
             defect_key = (img_name, class_name, confidence_key)
-            if not img_name or not class_name or defect_key in existing_classified_defects:
+            remote_model_result_id = row.get("remote_model_result_id")
+            if (
+                not img_name
+                or not class_name
+                or defect_key in existing_classified_defects
+                or (
+                    "remote_model_result_id" in classified_defect_columns
+                    and remote_model_result_id is not None
+                    and remote_model_result_id in existing_remote_model_result_ids
+                )
+            ):
                 stats["db_skipped"]["classified_image_defects"] += 1
             else:
                 cursor.execute(
@@ -487,18 +843,41 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
                 if classified_row is None:
                     stats["db_skipped"]["classified_image_defects"] += 1
                 else:
+                    insert_columns = [
+                        "classified_image_id",
+                        "class_name",
+                        "confidence",
+                        "created_at",
+                    ] + [
+                        column
+                        for column in CLASSIFIED_DEFECT_OPTIONAL_COLUMNS
+                        if column in classified_defect_columns and column in row
+                    ]
+                    insert_values = [
+                        _row_get(classified_row, "id", _row_get(classified_row, 0)),
+                        class_name,
+                        confidence,
+                        row.get("created_at"),
+                    ] + [
+                        _json_db_value(row.get(column))
+                        if column == "coordinates"
+                        else row.get(column)
+                        for column in insert_columns[4:]
+                    ]
                     cursor.execute(
                         "INSERT INTO classified_image_defects "
-                        "(classified_image_id, class_name, confidence, created_at) "
-                        "VALUES (%s, %s, %s, %s)",
-                        (
-                            _row_get(classified_row, "id", _row_get(classified_row, 0)),
-                            class_name,
-                            confidence,
-                            row.get("created_at"),
-                        ),
+                        f"({', '.join(insert_columns)}) "
+                        "VALUES ("
+                        + ", ".join(["%s"] * len(insert_columns))
+                        + ") ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING",
+                        tuple(insert_values),
                     )
                     existing_classified_defects.add(defect_key)
+                    if (
+                        "remote_model_result_id" in classified_defect_columns
+                        and remote_model_result_id is not None
+                    ):
+                        existing_remote_model_result_ids.add(remote_model_result_id)
                     stats["db_inserted"]["classified_image_defects"] += 1
                     piece_id = _row_get(classified_row, "piece_id", _row_get(classified_row, 1))
                     if piece_id is not None:
