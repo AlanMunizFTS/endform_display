@@ -374,6 +374,28 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             self.assertEqual(controller.historic_render_items[img_name]["status"], "loading")
             display._draw_model_overlays.assert_not_called()
 
+    def test_exit_historic_mode_clears_tile_items_from_display_paths(self):
+        display = self._build_display()
+        display.image_paths = [
+            {
+                "img_name": "118610000000000000001_Cam1_Side1_OK.png",
+                "status": "loading",
+                "source": "db_coordinates+historic",
+            }
+        ]
+        display.historic_mode = True
+        display.historic_images = [["118610000000000000001_Cam1_Side1_OK.png"]]
+        controller = MainController(
+            display=display,
+            config=ControllerConfig(),
+            file_manager=FileManager(),
+        )
+
+        controller.exit_historic_mode()
+
+        self.assertFalse(display.historic_mode)
+        self.assertEqual(display.image_paths, [])
+
     def test_save_classification_results_reports_missing_historic_source(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)

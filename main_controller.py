@@ -643,7 +643,7 @@ class MainController:
         self.historic_render_lock = Lock()
         self.historic_render_worker_thread = None
         self.historic_render_cache = OrderedDict()
-        self.historic_render_cache_max_items = 128
+        self.historic_render_cache_max_items = 64
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -2384,6 +2384,7 @@ class MainController:
         d.historic_mode = False
         d.historic_offset = 0
         d.historic_images = []
+        d.image_paths = []
         d.search_jsn = ""
         d.search_active = False
         d.filtered_suggestions = []
@@ -5130,7 +5131,12 @@ class MainController:
                         elif remote_images:
                             # Delete old files immediately so tmp_display never exceeds max_images
                             new_images_set = set(remote_images)
-                            for prev_path in self.display.image_paths:
+                            previous_live_paths = [
+                                prev_path
+                                for prev_path in (self.display.image_paths or [])
+                                if isinstance(prev_path, (str, bytes, os.PathLike))
+                            ]
+                            for prev_path in previous_live_paths:
                                 if prev_path not in new_images_set:
                                     try:
                                         self.file_manager.remove(prev_path)
