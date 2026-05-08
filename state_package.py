@@ -4,6 +4,11 @@ import socket
 from datetime import datetime
 from decimal import Decimal
 
+try:
+    from psycopg2.extras import Json
+except Exception:  # pragma: no cover - psycopg2 is available in the app runtime.
+    Json = None
+
 from paths_config import EXPORTS_DIR, STATE_PACKAGE_VERSION
 
 
@@ -19,6 +24,10 @@ IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
 def _json_safe(value):
     if value is None:
         return None
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
     if isinstance(value, Decimal):
         return format(value, "f")
     if hasattr(value, "isoformat"):
@@ -36,9 +45,46 @@ def _sql_literal(value):
         return "TRUE" if value else "FALSE"
     if isinstance(value, (int, float, Decimal)):
         return str(value)
+    if isinstance(value, (dict, list, tuple)):
+        text = json.dumps(_json_safe(value), sort_keys=True).replace("'", "''")
+        return f"'{text}'"
 
     text = str(value).replace("'", "''")
     return f"'{text}'"
+
+
+def _json_db_value(value):
+    if value is None:
+        return None
+    if Json is None:
+        return json.dumps(_json_safe(value), sort_keys=True)
+    return Json(_json_safe(value))
+
+
+def _canonical_json_key(value):
+    if value is None:
+        return None
+    if hasattr(value, "adapted"):
+        value = value.adapted
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except Exception:
+            return value
+    return json.dumps(_json_safe(value), sort_keys=True, separators=(",", ":"))
+
+
+def _model_result_key(row):
+    return (
+        row.get("img_name"),
+        row.get("class_name"),
+        str(row.get("confidence")),
+        row.get("model_name"),
+        row.get("geometry_type"),
+        _canonical_json_key(row.get("coordinates")),
+        row.get("image_width"),
+        row.get("image_height"),
+    )
 
 
 def _list_image_names(file_manager, directory, image_extensions):
@@ -82,10 +128,19 @@ def _build_data_payload(db_client):
         ),
         "classified_image_defects": _fetch_rows(
             db_client,
-            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at "
+            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at, "
+            "cid.remote_model_result_id, cid.model_name, cid.geometry_type, "
+            "cid.coordinates, cid.image_width, cid.image_height "
             "FROM classified_image_defects cid "
             "JOIN classified_images ci ON ci.id = cid.classified_image_id "
             "ORDER BY ci.img_name, cid.class_name, cid.confidence",
+        ),
+        "model_results": _fetch_rows(
+            db_client,
+            "SELECT img_name, class_name, confidence, created_at, model_name, "
+            "geometry_type, coordinates, image_width, image_height "
+            "FROM model_results "
+            "ORDER BY img_name, class_name, confidence, created_at",
         ),
         "piece_result_defects": _fetch_rows(
             db_client,
@@ -98,16 +153,16 @@ def _build_data_payload(db_client):
     return payload
 
 
-def _build_manifest(annotated_names, historic_names, data_payload, image_extensions):
+def _build_manifest(historic_names, data_payload, image_extensions):
     return {
         "package_version": STATE_PACKAGE_VERSION,
         "package_kind": PACKAGE_KIND,
         "export_complete": True,
         "created_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "source_host": socket.gethostname(),
-        "annotated_count": len(annotated_names),
+        "annotated_count": 0,
         "historic_count": len(historic_names),
-        "annotated_images": list(annotated_names),
+        "annotated_images": [],
         "historic_images": list(historic_names),
         "table_counts": {
             table_name: len(rows)
@@ -159,13 +214,33 @@ def _build_database_sql(data_payload):
 
     for row in data_payload.get("classified_image_defects", []):
         lines.append(
-            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at) "
+            "INSERT INTO classified_image_defects "
+            "(classified_image_id, class_name, confidence, created_at, remote_model_result_id, "
+            "model_name, geometry_type, coordinates, image_width, image_height) "
             "SELECT "
             f"ci.id, {_sql_literal(row.get('class_name'))}, {_sql_literal(row.get('confidence'))}, "
-            f"{_sql_literal(row.get('created_at'))} "
+            f"{_sql_literal(row.get('created_at'))}, {_sql_literal(row.get('remote_model_result_id'))}, "
+            f"{_sql_literal(row.get('model_name'))}, {_sql_literal(row.get('geometry_type'))}, "
+            f"{_sql_literal(row.get('coordinates'))}, {_sql_literal(row.get('image_width'))}, "
+            f"{_sql_literal(row.get('image_height'))} "
             "FROM classified_images ci "
             f"WHERE ci.img_name = {_sql_literal(row.get('img_name'))} "
             "ON CONFLICT (classified_image_id, class_name, confidence) DO NOTHING;"
+        )
+
+    lines.append("")
+
+    for row in data_payload.get("model_results", []):
+        lines.append(
+            "INSERT INTO model_results "
+            "(img_name, class_name, confidence, created_at, model_name, geometry_type, "
+            "coordinates, image_width, image_height) "
+            f"VALUES ({_sql_literal(row.get('img_name'))}, {_sql_literal(row.get('class_name'))}, "
+            f"{_sql_literal(row.get('confidence'))}, {_sql_literal(row.get('created_at'))}, "
+            f"{_sql_literal(row.get('model_name'))}, {_sql_literal(row.get('geometry_type'))}, "
+            f"{_sql_literal(row.get('coordinates'))}, {_sql_literal(row.get('image_width'))}, "
+            f"{_sql_literal(row.get('image_height'))}) "
+            "ON CONFLICT DO NOTHING;"
         )
 
     lines.append("")
@@ -204,7 +279,6 @@ def _package_file_path(package_path, relative_path):
 
 def _validate_manifest_image_entries(package_path, manifest):
     expected_groups = (
-        ("annotated", manifest.get("annotated_images"), manifest.get("annotated_count")),
         ("historic", manifest.get("historic_images"), manifest.get("historic_count")),
     )
     missing = []
@@ -356,6 +430,7 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             "piece_result": 0,
             "classified_images": 0,
             "classified_image_defects": 0,
+            "model_results": 0,
             "piece_result_defects": 0,
         },
         "db_skipped": {
@@ -363,6 +438,7 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             "piece_result": 0,
             "classified_images": 0,
             "classified_image_defects": 0,
+            "model_results": 0,
             "piece_result_defects": 0,
         },
         "affected_jsns": affected_jsns,
@@ -374,9 +450,34 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
         existing_classified_images = _fetch_existing_set(
             cursor, "SELECT img_name FROM classified_images"
         )
+        cursor.execute(
+            "SELECT img_name, class_name, confidence, model_name, geometry_type, "
+            "coordinates, image_width, image_height FROM model_results"
+        )
+        existing_model_result_rows = cursor.fetchall()
+        existing_model_results = {
+            _model_result_key(
+                {
+                    "img_name": _row_get(row, "img_name", _row_get(row, 0)),
+                    "class_name": _row_get(row, "class_name", _row_get(row, 1)),
+                    "confidence": _row_get(row, "confidence", _row_get(row, 2)),
+                    "model_name": _row_get(row, "model_name", _row_get(row, 3)),
+                    "geometry_type": _row_get(row, "geometry_type", _row_get(row, 4)),
+                    "coordinates": _row_get(row, "coordinates", _row_get(row, 5)),
+                    "image_width": _row_get(row, "image_width", _row_get(row, 6)),
+                    "image_height": _row_get(row, "image_height", _row_get(row, 7)),
+                }
+            )
+            for row in existing_model_result_rows
+        }
+        existing_model_result_ok_img_names = {
+            _row_get(row, "img_name", _row_get(row, 0))
+            for row in existing_model_result_rows
+            if _row_get(row, "class_name", _row_get(row, 1)) == "OK"
+        }
 
         cursor.execute(
-            "SELECT ci.img_name, cid.class_name, cid.confidence "
+            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.remote_model_result_id "
             "FROM classified_image_defects cid "
             "JOIN classified_images ci ON ci.id = cid.classified_image_id"
         )
@@ -386,6 +487,14 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
                 _row_get(row, "class_name", _row_get(row, 1)),
                 str(_row_get(row, "confidence", _row_get(row, 2))),
             )
+            for row in cursor.fetchall()
+        }
+        cursor.execute(
+            "SELECT remote_model_result_id FROM classified_image_defects "
+            "WHERE remote_model_result_id IS NOT NULL"
+        )
+        existing_remote_model_result_ids = {
+            _row_get(row, "remote_model_result_id", _row_get(row, 0))
             for row in cursor.fetchall()
         }
 
@@ -470,13 +579,60 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
             if callable(progress_callback):
                 progress_callback(progress_state["done"], progress_state["total"], "Merging database")
 
+        for row in data_payload.get("model_results", []):
+            img_name = row.get("img_name")
+            class_name = row.get("class_name")
+            result_key = _model_result_key(row)
+            if (
+                not img_name
+                or not class_name
+                or result_key in existing_model_results
+                or (class_name == "OK" and img_name in existing_model_result_ok_img_names)
+            ):
+                stats["db_skipped"]["model_results"] += 1
+            else:
+                cursor.execute(
+                    "INSERT INTO model_results "
+                    "(img_name, class_name, confidence, created_at, model_name, geometry_type, "
+                    "coordinates, image_width, image_height) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        img_name,
+                        class_name,
+                        row.get("confidence"),
+                        row.get("created_at"),
+                        row.get("model_name"),
+                        row.get("geometry_type"),
+                        _json_db_value(row.get("coordinates")),
+                        row.get("image_width"),
+                        row.get("image_height"),
+                    ),
+                )
+                existing_model_results.add(result_key)
+                if class_name == "OK":
+                    existing_model_result_ok_img_names.add(img_name)
+                stats["db_inserted"]["model_results"] += 1
+                affected_jsns.add(img_name.split("_")[0] if "_" in img_name else img_name)
+            progress_state["done"] += 1
+            if callable(progress_callback):
+                progress_callback(progress_state["done"], progress_state["total"], "Merging database")
+
         for row in data_payload.get("classified_image_defects", []):
             img_name = row.get("img_name")
             class_name = row.get("class_name")
             confidence = row.get("confidence")
             confidence_key = str(confidence)
             defect_key = (img_name, class_name, confidence_key)
-            if not img_name or not class_name or defect_key in existing_classified_defects:
+            remote_model_result_id = row.get("remote_model_result_id")
+            if (
+                not img_name
+                or not class_name
+                or defect_key in existing_classified_defects
+                or (
+                    remote_model_result_id is not None
+                    and remote_model_result_id in existing_remote_model_result_ids
+                )
+            ):
                 stats["db_skipped"]["classified_image_defects"] += 1
             else:
                 cursor.execute(
@@ -489,16 +645,26 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
                 else:
                     cursor.execute(
                         "INSERT INTO classified_image_defects "
-                        "(classified_image_id, class_name, confidence, created_at) "
-                        "VALUES (%s, %s, %s, %s)",
+                        "(classified_image_id, class_name, confidence, created_at, "
+                        "remote_model_result_id, model_name, geometry_type, coordinates, "
+                        "image_width, image_height) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             _row_get(classified_row, "id", _row_get(classified_row, 0)),
                             class_name,
                             confidence,
                             row.get("created_at"),
+                            remote_model_result_id,
+                            row.get("model_name"),
+                            row.get("geometry_type"),
+                            _json_db_value(row.get("coordinates")),
+                            row.get("image_width"),
+                            row.get("image_height"),
                         ),
                     )
                     existing_classified_defects.add(defect_key)
+                    if remote_model_result_id is not None:
+                        existing_remote_model_result_ids.add(remote_model_result_id)
                     stats["db_inserted"]["classified_image_defects"] += 1
                     piece_id = _row_get(classified_row, "piece_id", _row_get(classified_row, 1))
                     if piece_id is not None:
@@ -553,15 +719,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     if db is None:
         return {"ok": False, "error": "No database connection available"}
 
-    annotated_dir = controller._get_visible_historic_dir()
     historic_dir = controller._get_export_historic_dir()
     image_extensions = tuple(getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS))
 
-    annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
     manifest = _build_manifest(
-        annotated_names=annotated_names,
         historic_names=historic_names,
         data_payload=data_payload,
         image_extensions=image_extensions,
@@ -571,7 +734,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     file_manager.makedirs(output_root, exist_ok=True)
     package_name, package_path = _build_unique_export_dir(file_manager, output_root)
     partial_package_path = f"{package_path}.partial"
-    total_steps = len(annotated_names) + len(historic_names) + 3
+    total_steps = len(historic_names) + 3
     done = 0
 
     if callable(progress_callback):
@@ -590,23 +753,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     for relative_path, content in metadata_files.items():
         _write_text_file(_package_file_path(partial_package_path, relative_path), content)
 
-    annotated_package_dir = file_manager.join(partial_package_path, "annotated")
     historic_package_dir = file_manager.join(partial_package_path, "historic")
-    file_manager.makedirs(annotated_package_dir, exist_ok=True)
     file_manager.makedirs(historic_package_dir, exist_ok=True)
 
     done += 1
     if callable(progress_callback):
         progress_callback(done, total_steps, "Writing metadata")
-
-    for name in annotated_names:
-        file_manager.copy2(
-            file_manager.join(annotated_dir, name),
-            file_manager.join(annotated_package_dir, name),
-        )
-        done += 1
-        if callable(progress_callback):
-            progress_callback(done, total_steps, "Copying annotated images")
 
     for name in historic_names:
         file_manager.copy2(
@@ -642,23 +794,18 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
 
     manifest, data_payload = _load_package(package_path)
     file_manager = controller.file_manager
-    annotated_target_dir = controller._get_visible_historic_dir()
     historic_target_dir = controller._get_export_historic_dir()
     image_extensions = tuple(
         manifest.get("image_extensions") or getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS)
     )
 
     db_row_total = sum(len(rows) for rows in data_payload.values())
-    annotated_source_dir = file_manager.join(package_path, "annotated")
     historic_source_dir = file_manager.join(package_path, "historic")
-    if not os.path.isdir(annotated_source_dir):
-        raise ValueError("Export folder is missing annotated directory")
     if not os.path.isdir(historic_source_dir):
         raise ValueError("Export folder is missing historic directory")
 
     total_steps = (
-        len(_list_image_names(file_manager, annotated_source_dir, image_extensions))
-        + len(_list_image_names(file_manager, historic_source_dir, image_extensions))
+        len(_list_image_names(file_manager, historic_source_dir, image_extensions))
         + db_row_total
         + 1
     )
@@ -667,15 +814,6 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     if callable(progress_callback):
         progress_callback(0, progress_state["total"], "Preparing import")
 
-    annotated_stats = _copy_missing_files(
-        file_manager=file_manager,
-        source_dir=annotated_source_dir,
-        target_dir=annotated_target_dir,
-        image_extensions=image_extensions,
-        progress_callback=progress_callback,
-        progress_state=progress_state,
-        stage_label="Importing annotated images",
-    )
     historic_stats = _copy_missing_files(
         file_manager=file_manager,
         source_dir=historic_source_dir,
@@ -711,7 +849,7 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     return {
         "ok": True,
         "manifest": manifest,
-        "annotated": annotated_stats,
+        "annotated": {"copied": 0, "skipped": 0, "copied_names": []},
         "historic": historic_stats,
         "db": {
             "inserted": merge_stats["db_inserted"],

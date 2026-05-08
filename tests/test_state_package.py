@@ -10,6 +10,12 @@ from file_manager import FileManager
 from state_package import export_display_state, import_display_state
 
 
+def _unwrap_json_param(value):
+    if hasattr(value, "adapted"):
+        return value.adapted
+    return value
+
+
 class FakePackageCursor:
     def __init__(self, db):
         self.db = db
@@ -28,14 +34,43 @@ class FakePackageCursor:
         if normalized == "SELECT img_name FROM classified_images":
             self._results = [(row["img_name"],) for row in self.db.classified_images]
             return
+        if normalized == "SELECT img_name, class_name, confidence, model_name, geometry_type, coordinates, image_width, image_height FROM model_results":
+            self._results = [
+                (
+                    row["img_name"],
+                    row["class_name"],
+                    row["confidence"],
+                    row.get("model_name"),
+                    row.get("geometry_type"),
+                    row.get("coordinates"),
+                    row.get("image_width"),
+                    row.get("image_height"),
+                )
+                for row in self.db.model_results
+            ]
+            return
         if normalized.startswith(
-            "SELECT ci.img_name, cid.class_name, cid.confidence FROM classified_image_defects"
+            "SELECT ci.img_name, cid.class_name, cid.confidence"
         ):
             rows = []
             for row in self.db.classified_image_defects:
                 classified = self.db.classified_by_id[row["classified_image_id"]]
-                rows.append((classified["img_name"], row["class_name"], row["confidence"]))
+                rows.append(
+                    (
+                        classified["img_name"],
+                        row["class_name"],
+                        row["confidence"],
+                        row.get("remote_model_result_id"),
+                    )
+                )
             self._results = rows
+            return
+        if normalized == "SELECT remote_model_result_id FROM classified_image_defects WHERE remote_model_result_id IS NOT NULL":
+            self._results = [
+                (row["remote_model_result_id"],)
+                for row in self.db.classified_image_defects
+                if row.get("remote_model_result_id") is not None
+            ]
             return
         if normalized.startswith(
             "SELECT pr.jsn, prd.class_name FROM piece_result_defects"
@@ -98,7 +133,7 @@ class FakePackageCursor:
             self._results = []
             return
         if normalized.startswith(
-            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at)"
+            "INSERT INTO classified_image_defects (classified_image_id, class_name, confidence, created_at"
         ):
             self.db.classified_image_defects.append(
                 {
@@ -106,6 +141,30 @@ class FakePackageCursor:
                     "class_name": params[1],
                     "confidence": params[2],
                     "created_at": params[3],
+                    "remote_model_result_id": params[4] if len(params) > 4 else None,
+                    "model_name": params[5] if len(params) > 5 else None,
+                    "geometry_type": params[6] if len(params) > 6 else None,
+                    "coordinates": _unwrap_json_param(params[7]) if len(params) > 7 else None,
+                    "image_width": params[8] if len(params) > 8 else None,
+                    "image_height": params[9] if len(params) > 9 else None,
+                }
+            )
+            self._results = []
+            return
+        if normalized.startswith(
+            "INSERT INTO model_results (img_name, class_name, confidence, created_at, model_name, geometry_type, coordinates, image_width, image_height)"
+        ):
+            self.db.model_results.append(
+                {
+                    "img_name": params[0],
+                    "class_name": params[1],
+                    "confidence": params[2],
+                    "created_at": params[3],
+                    "model_name": params[4],
+                    "geometry_type": params[5],
+                    "coordinates": _unwrap_json_param(params[6]),
+                    "image_width": params[7],
+                    "image_height": params[8],
                 }
             )
             self._results = []
@@ -140,12 +199,14 @@ class FakePackageDB:
         piece_result=None,
         classified_images=None,
         classified_image_defects=None,
+        model_results=None,
         piece_result_defects=None,
     ):
         self.img_results = list(img_results or [])
         self.piece_result = list(piece_result or [])
         self.classified_images = list(classified_images or [])
         self.classified_image_defects = list(classified_image_defects or [])
+        self.model_results = list(model_results or [])
         self.piece_result_defects = list(piece_result_defects or [])
         self.next_piece_id = max((row["id"] for row in self.piece_result), default=0) + 1
         self.next_classified_id = max((row["id"] for row in self.classified_images), default=0) + 1
@@ -188,7 +249,7 @@ class FakePackageDB:
                 )
             return rows
         if normalized.startswith(
-            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at FROM classified_image_defects"
+            "SELECT ci.img_name, cid.class_name, cid.confidence, cid.created_at"
         ):
             rows = []
             for row in self.classified_image_defects:
@@ -199,9 +260,39 @@ class FakePackageDB:
                         "class_name": row["class_name"],
                         "confidence": row["confidence"],
                         "created_at": row["created_at"],
+                        "remote_model_result_id": row.get("remote_model_result_id"),
+                        "model_name": row.get("model_name"),
+                        "geometry_type": row.get("geometry_type"),
+                        "coordinates": row.get("coordinates"),
+                        "image_width": row.get("image_width"),
+                        "image_height": row.get("image_height"),
                     }
                 )
             return sorted(rows, key=lambda entry: (entry["img_name"], entry["class_name"]))
+        if normalized.startswith(
+            "SELECT img_name, class_name, confidence, created_at, model_name, geometry_type, coordinates, image_width, image_height FROM model_results"
+        ):
+            return sorted(
+                [
+                    {
+                        "img_name": row["img_name"],
+                        "class_name": row["class_name"],
+                        "confidence": row["confidence"],
+                        "created_at": row["created_at"],
+                        "model_name": row.get("model_name"),
+                        "geometry_type": row.get("geometry_type"),
+                        "coordinates": row.get("coordinates"),
+                        "image_width": row.get("image_width"),
+                        "image_height": row.get("image_height"),
+                    }
+                    for row in self.model_results
+                ],
+                key=lambda entry: (
+                    entry["img_name"],
+                    entry["class_name"],
+                    entry["confidence"],
+                ),
+            )
         if normalized.startswith(
             "SELECT pr.jsn, prd.class_name, prd.confidence, prd.created_at FROM piece_result_defects"
         ):
@@ -286,7 +377,37 @@ def build_source_db():
                 "class_name": "dent",
                 "confidence": "0.9000",
                 "created_at": "2026-03-26 10:00:03",
+                "remote_model_result_id": 25,
+                "model_name": "remote-yolo",
+                "geometry_type": "bbox",
+                "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                "image_width": 360,
+                "image_height": 360,
             }
+        ],
+        model_results=[
+            {
+                "img_name": "11861_A_side_OK.png",
+                "class_name": "OK",
+                "confidence": "1.0000",
+                "created_at": "2026-03-26 10:00:01",
+                "model_name": "remote-yolo",
+                "geometry_type": "classification",
+                "coordinates": None,
+                "image_width": 360,
+                "image_height": 360,
+            },
+            {
+                "img_name": "11861_A_front_NOK.png",
+                "class_name": "dent",
+                "confidence": "0.9000",
+                "created_at": "2026-03-26 10:00:03",
+                "model_name": "remote-yolo",
+                "geometry_type": "bbox",
+                "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                "image_width": 360,
+                "image_height": 360,
+            },
         ],
         piece_result_defects=[
             {
@@ -304,8 +425,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()
             controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
@@ -323,28 +442,32 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue((package_path / "manifest.json").is_file())
             self.assertTrue((package_path / "db" / "data.json").is_file())
             self.assertTrue((package_path / "db" / "database.sql").is_file())
-            self.assertTrue((package_path / "annotated" / "11861_A_side_OK.png").is_file())
+            self.assertFalse((package_path / "annotated").exists())
             self.assertTrue((package_path / "historic" / "11861_A_front_NOK.png").is_file())
 
             manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["package_kind"], "display_state")
             self.assertTrue(manifest["export_complete"])
-            self.assertEqual(manifest["annotated_count"], 2)
+            self.assertEqual(manifest["annotated_count"], 0)
             self.assertEqual(manifest["historic_count"], 2)
-            self.assertEqual(len(manifest["annotated_images"]), 2)
+            self.assertEqual(len(manifest["annotated_images"]), 0)
             self.assertEqual(len(manifest["historic_images"]), 2)
             self.assertEqual(manifest["table_counts"]["img_results"], 2)
+            self.assertEqual(manifest["table_counts"]["model_results"], 2)
 
             data_payload = json.loads((package_path / "db" / "data.json").read_text(encoding="utf-8"))
             self.assertEqual(len(data_payload["classified_images"]), 2)
             self.assertEqual(len(data_payload["classified_image_defects"]), 1)
+            self.assertEqual(len(data_payload["model_results"]), 2)
+            self.assertEqual(
+                data_payload["classified_image_defects"][0]["coordinates"],
+                {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
+            )
 
     def test_import_display_state_merges_missing_data_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"source-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"source-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"source-historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"source-historic-front")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
@@ -383,14 +506,22 @@ class TestStatePackage(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual((target_annotated / "11861_A_side_OK.png").read_bytes(), b"existing-annotated")
-            self.assertTrue((target_annotated / "11861_A_front_NOK.png").exists())
+            self.assertFalse((target_annotated / "11861_A_front_NOK.png").exists())
             self.assertTrue((target_historic / "11861_A_front_NOK.png").exists())
-            self.assertEqual(result["annotated"]["copied"], 1)
-            self.assertEqual(result["annotated"]["skipped"], 1)
+            self.assertEqual(result["annotated"]["copied"], 0)
+            self.assertEqual(result["annotated"]["skipped"], 0)
             self.assertEqual(result["historic"]["copied"], 1)
             self.assertEqual(result["historic"]["skipped"], 1)
             self.assertEqual(result["db"]["inserted"]["img_results"], 1)
             self.assertEqual(result["db"]["inserted"]["classified_images"], 1)
+            self.assertEqual(result["db"]["inserted"]["model_results"], 2)
+            dent_result = next(
+                row for row in target_db.model_results if row["class_name"] == "dent"
+            )
+            self.assertEqual(
+                dent_result["coordinates"],
+                {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+            )
             target_controller._recalculate_piece_result.assert_called_with("11861", db_client=target_db)
             target_controller._invalidate_dataset_runtime_state.assert_called_once_with(
                 clear_historic_images=False
@@ -421,7 +552,6 @@ class TestStatePackage(unittest.TestCase):
                 ],
             )
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-annotated")
             (historic_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-historic")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
 
@@ -447,7 +577,7 @@ class TestStatePackage(unittest.TestCase):
                     }
                 ],
             )
-            target_controller, target_annotated, _target_historic = build_controller(target_tmp, target_db)
+            target_controller, target_annotated, target_historic = build_controller(target_tmp, target_db)
 
             result = import_display_state(
                 target_controller,
@@ -456,7 +586,8 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertTrue((target_annotated / "11861_extra_diag_NOK.png").exists())
+            self.assertFalse((target_annotated / "11861_extra_diag_NOK.png").exists())
+            self.assertTrue((target_historic / "11861_extra_diag_NOK.png").exists())
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.img_results])
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.classified_images])
             target_controller._recalculate_piece_result.assert_called_with("11861", db_client=target_db)
@@ -485,8 +616,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
@@ -509,8 +638,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
@@ -525,16 +652,14 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(sorted(p.name for p in target_annotated.iterdir()), [
-                "11861_A_front_NOK.png",
-                "11861_A_side_OK.png",
-            ])
+            self.assertEqual(sorted(p.name for p in target_annotated.iterdir()), [])
             self.assertEqual(sorted(p.name for p in target_historic.iterdir()), [
                 "11861_A_front_NOK.png",
                 "11861_A_side_OK.png",
             ])
             self.assertEqual(len(target_db.img_results), 2)
             self.assertEqual(len(target_db.classified_images), 2)
+            self.assertEqual(len(target_db.model_results), 2)
             self.assertEqual(len(target_db.piece_result), 1)
 
 
