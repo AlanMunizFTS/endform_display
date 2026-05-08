@@ -80,6 +80,31 @@ class TestDisplayWindowHistoricTiles(unittest.TestCase):
         self.assertIsInstance(display.image, np.ndarray)
         self.assertLess(int(display.image[250:350, 295:395].mean()), 250)
 
+    def test_show_image_grid_draws_filename_status_badge_in_historic_mode(self):
+        display = self._build_display()
+        display.historic_mode = True
+        display.historic_images = [["118610000000000000001_Cam1_Side1_NOK.png"]]
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        result = display.show_image_grid(
+            [
+                {
+                    "img_name": "118610000000000000001_Cam1_Side1_NOK.png",
+                    "status": "ready",
+                    "source": "db_coordinates+historic",
+                    "prepared_image": image,
+                }
+            ],
+            cols=2,
+            rows=1,
+            img_size=100,
+            padding=10,
+        )
+
+        self.assertTrue(result)
+        badge_region = display.image[258:285, 365:395]
+        self.assertGreater(int(badge_region[:, :, 2].mean()), 100)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

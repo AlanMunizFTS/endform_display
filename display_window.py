@@ -4668,6 +4668,46 @@ class DisplayWindow:
                 thickness,
             )
 
+    def _extract_status_from_filename(self, img_name):
+        base_name = os.path.splitext(str(img_name or ""))[0]
+        if base_name.upper().endswith("_OK"):
+            return "OK"
+        if base_name.upper().endswith("_NOK"):
+            return "NOK"
+        return None
+
+    def _draw_filename_status_badge(self, canvas, x, y, size, status_text):
+        status_text = self._extract_status_from_filename(status_text) or status_text
+        if status_text not in ("OK", "NOK"):
+            return
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.62
+        thickness = 2
+        padding_x = 10
+        padding_y = 7
+        margin = 8
+        text_size = cv2.getTextSize(status_text, font, font_scale, thickness)[0]
+        badge_w = text_size[0] + padding_x * 2
+        badge_h = text_size[1] + padding_y * 2
+        badge_x1 = x + size - badge_w - margin
+        badge_y1 = y + margin
+        badge_x2 = badge_x1 + badge_w
+        badge_y2 = badge_y1 + badge_h
+        fill = (49, 49, 255) if status_text == "NOK" else (103, 122, 20)
+
+        cv2.rectangle(canvas, (badge_x1, badge_y1), (badge_x2, badge_y2), fill, -1)
+        cv2.rectangle(canvas, (badge_x1, badge_y1), (badge_x2, badge_y2), (0, 0, 0), 1)
+        cv2.putText(
+            canvas,
+            status_text,
+            (badge_x1 + padding_x, badge_y2 - padding_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
+
     def show_image_grid(self, image_paths, cols=4, rows=2, img_size=None, padding=None):
         """Show images without scaling, with fixed padding"""
         if img_size is None:
@@ -4747,6 +4787,15 @@ class DisplayWindow:
                 self._draw_tile_placeholder(canvas, x_draw, y_draw, size_draw, status)
             else:
                 canvas[y_draw:y_draw + size_draw, x_draw:x_draw + size_draw] = img
+
+            if self.historic_mode:
+                self._draw_filename_status_badge(
+                    canvas,
+                    x_draw,
+                    y_draw,
+                    size_draw,
+                    img_filename,
+                )
 
             # Show camera label above each image (normal + historic)
             label_source = raw_path or img_filename
