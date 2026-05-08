@@ -2,11 +2,12 @@ import json
 import os
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from multiprocessing import Event, Process
-from threading import Thread
+from threading import Lock, Thread
 
+import cv2
 from psycopg2.extras import Json
 
 from dataset_exporter import (
@@ -633,6 +634,16 @@ class MainController:
         self.remote_db_backfill_cursor_id = 0
         self.last_historic_check = 0.0
         self.dataset_transfer_active = False
+        self.historic_render_generation_id = 0
+        self.historic_render_batch_key = None
+        self.historic_render_overlay_signature = None
+        self.historic_render_overlay_checked_at = 0.0
+        self.historic_render_overlay_refresh_sec = 1.0
+        self.historic_render_items = {}
+        self.historic_render_lock = Lock()
+        self.historic_render_worker_thread = None
+        self.historic_render_cache = OrderedDict()
+        self.historic_render_cache_max_items = 128
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -2369,6 +2380,7 @@ class MainController:
 
     def exit_historic_mode(self):
         d = self.display
+        self._clear_historic_render_state(clear_cache=False)
         d.historic_mode = False
         d.historic_offset = 0
         d.historic_images = []
@@ -2692,6 +2704,7 @@ class MainController:
 
     def _invalidate_dataset_runtime_state(self, clear_historic_images=False):
         d = self.display
+        self._clear_historic_render_state(clear_cache=True)
         if clear_historic_images:
             d.historic_images = []
             d.historic_offset = 0
@@ -3246,6 +3259,288 @@ class MainController:
         _stop_worker("download_process", "download_stop_event")
         _stop_worker("annotated_download_process", "annotated_download_stop_event")
 
+    def _overlay_signature(self, overlays_by_image):
+        try:
+            return json.dumps(
+                overlays_by_image or {},
+                ensure_ascii=True,
+                sort_keys=True,
+                default=str,
+            )
+        except Exception:
+            return str(overlays_by_image)
+
+    def _get_file_mtime_or_none(self, path):
+        try:
+            return self.file_manager.getmtime(path)
+        except Exception:
+            return None
+
+    def _get_historic_render_cache_key(self, img_name, path, overlays):
+        tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
+        return (
+            img_name,
+            os.path.normcase(os.path.abspath(os.fspath(path))),
+            self._get_file_mtime_or_none(path),
+            self._overlay_signature({img_name: overlays}),
+            tile_size,
+        )
+
+    def _remember_historic_render_cache(self, cache_key, image):
+        with self.historic_render_lock:
+            self.historic_render_cache[cache_key] = image
+            self.historic_render_cache.move_to_end(cache_key)
+            while len(self.historic_render_cache) > self.historic_render_cache_max_items:
+                self.historic_render_cache.popitem(last=False)
+
+    def _get_historic_render_cache(self, cache_key):
+        with self.historic_render_lock:
+            cached = self.historic_render_cache.get(cache_key)
+            if cached is not None:
+                self.historic_render_cache.move_to_end(cache_key)
+            return cached
+
+    def _clear_historic_render_state(self, clear_cache=False):
+        with self.historic_render_lock:
+            self.historic_render_generation_id += 1
+            self.historic_render_batch_key = None
+            self.historic_render_overlay_signature = None
+            self.historic_render_overlay_checked_at = 0.0
+            self.historic_render_items = {}
+            if clear_cache:
+                self.historic_render_cache.clear()
+
+    def _build_historic_render_plan(self, local_path, batch_images, overlays_by_image):
+        historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+        annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
+        tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
+
+        items = {}
+        work_items = []
+        render_sources = []
+        for img_name in batch_images:
+            historic_file = self.file_manager.join(historic_temp_dir, img_name)
+            annotated_file = self.file_manager.join(annotated_temp_dir, img_name)
+            overlays = overlays_by_image.get(img_name) or []
+            has_db_coordinates = bool(overlays)
+            historic_exists = self.file_manager.exists(historic_file)
+            annotated_exists = self.file_manager.exists(annotated_file)
+
+            if has_db_coordinates:
+                if historic_exists:
+                    cache_key = self._get_historic_render_cache_key(
+                        img_name,
+                        historic_file,
+                        overlays,
+                    )
+                    cached_image = self._get_historic_render_cache(cache_key)
+                    if cached_image is not None:
+                        item = {
+                            "img_name": img_name,
+                            "status": "ready",
+                            "source": "db_coordinates+historic",
+                            "path": historic_file,
+                            "prepared_image": cached_image,
+                        }
+                    else:
+                        item = {
+                            "img_name": img_name,
+                            "status": "loading",
+                            "source": "db_coordinates+historic",
+                            "path": historic_file,
+                        }
+                        work_items.append(
+                            {
+                                "img_name": img_name,
+                                "path": historic_file,
+                                "overlays": overlays,
+                                "cache_key": cache_key,
+                                "tile_size": tile_size,
+                            }
+                        )
+                else:
+                    item = {
+                        "img_name": img_name,
+                        "status": "missing",
+                        "source": "missing_historic_with_coordinates",
+                        "path": historic_file,
+                    }
+                    self.logger.warn(
+                        f"[HIST_RENDER] Coordinates exist but historic image is missing: {img_name}",
+                        allow_repeat=True,
+                    )
+            elif annotated_exists:
+                item = {
+                    "img_name": img_name,
+                    "status": "ready",
+                    "source": "annotated_fallback",
+                    "path": annotated_file,
+                }
+            elif historic_exists:
+                item = {
+                    "img_name": img_name,
+                    "status": "ready",
+                    "source": "historic",
+                    "path": historic_file,
+                }
+            else:
+                item = {
+                    "img_name": img_name,
+                    "status": "missing",
+                    "source": "missing",
+                    "path": historic_file,
+                }
+
+            items[img_name] = item
+            render_sources.append(f"{img_name}={item['source']}")
+
+        return items, work_items, render_sources
+
+    def _prepare_historic_render_worker(self, generation_id, work_items):
+        for work_item in work_items:
+            with self.historic_render_lock:
+                if generation_id != self.historic_render_generation_id:
+                    return
+
+            img_name = work_item["img_name"]
+            try:
+                base_image = self.file_manager.read_image(work_item["path"])
+                if base_image is None:
+                    raise ValueError("historic image could not be read")
+
+                source_h, source_w = base_image.shape[:2]
+                tile_size = int(work_item.get("tile_size") or 360)
+                if base_image.shape[0] != tile_size or base_image.shape[1] != tile_size:
+                    interpolation = (
+                        cv2.INTER_AREA
+                        if base_image.shape[0] > tile_size or base_image.shape[1] > tile_size
+                        else cv2.INTER_LINEAR
+                    )
+                    prepared = cv2.resize(
+                        base_image,
+                        (tile_size, tile_size),
+                        interpolation=interpolation,
+                    )
+                else:
+                    prepared = base_image.copy()
+
+                draw_overlays = getattr(self.display, "_draw_model_overlays", None)
+                if not callable(draw_overlays):
+                    raise RuntimeError("display overlay renderer is unavailable")
+
+                prepared = draw_overlays(
+                    prepared,
+                    work_item.get("overlays") or [],
+                    source_w,
+                    source_h,
+                )
+                cache_key = work_item["cache_key"]
+                self._remember_historic_render_cache(cache_key, prepared)
+
+                with self.historic_render_lock:
+                    if generation_id != self.historic_render_generation_id:
+                        return
+                    current = self.historic_render_items.get(img_name)
+                    if not current or current.get("source") != "db_coordinates+historic":
+                        continue
+                    self.historic_render_items[img_name] = {
+                        **current,
+                        "status": "ready",
+                        "prepared_image": prepared,
+                    }
+            except Exception as exc:
+                self.logger.warn(
+                    f"[HIST_RENDER] Overlay preparation failed for {img_name}: {exc}",
+                    allow_repeat=True,
+                )
+                with self.historic_render_lock:
+                    if generation_id != self.historic_render_generation_id:
+                        return
+                    current = self.historic_render_items.get(img_name)
+                    if not current:
+                        continue
+                    self.historic_render_items[img_name] = {
+                        **current,
+                        "status": "error",
+                        "source": "overlay_error",
+                        "error": str(exc),
+                    }
+
+    def _ensure_historic_render_batch(self, local_path, batch_images):
+        d = self.display
+        batch_images = list(batch_images or [])
+        batch_key = (d.historic_offset, tuple(batch_images))
+        now = time.monotonic()
+
+        with self.historic_render_lock:
+            same_batch = batch_key == self.historic_render_batch_key
+            recently_checked = (
+                same_batch
+                and now - self.historic_render_overlay_checked_at
+                < self.historic_render_overlay_refresh_sec
+            )
+            if recently_checked:
+                items = [
+                    dict(self.historic_render_items.get(img_name, {
+                        "img_name": img_name,
+                        "status": "missing",
+                        "source": "missing",
+                    }))
+                    for img_name in batch_images
+                ]
+                render_sources = [f"{item['img_name']}={item.get('source')}" for item in items]
+                return items, render_sources
+
+        overlays_by_image = self.get_model_overlays_for_images(batch_images)
+        overlay_signature = self._overlay_signature(overlays_by_image)
+        items, work_items, render_sources = self._build_historic_render_plan(
+            local_path,
+            batch_images,
+            overlays_by_image,
+        )
+
+        with self.historic_render_lock:
+            should_reset = (
+                batch_key != self.historic_render_batch_key
+                or overlay_signature != self.historic_render_overlay_signature
+            )
+            if should_reset:
+                self.historic_render_generation_id += 1
+                self.historic_render_batch_key = batch_key
+                self.historic_render_overlay_signature = overlay_signature
+                self.historic_render_items = items
+            else:
+                for img_name, item in items.items():
+                    current = self.historic_render_items.get(img_name)
+                    if current and current.get("status") == "ready" and current.get("prepared_image") is not None:
+                        continue
+                    self.historic_render_items[img_name] = item
+            self.historic_render_overlay_checked_at = now
+            generation_id = self.historic_render_generation_id
+            current_items = [dict(self.historic_render_items.get(img_name, items[img_name])) for img_name in batch_images]
+
+        worker_alive = False
+        try:
+            worker_alive = (
+                self.historic_render_worker_thread is not None
+                and self.historic_render_worker_thread.is_alive()
+                and not should_reset
+            )
+        except Exception:
+            worker_alive = False
+
+        if work_items and not worker_alive:
+            worker = Thread(
+                target=self._prepare_historic_render_worker,
+                args=(generation_id, work_items),
+                name="historic-render-worker",
+                daemon=True,
+            )
+            self.historic_render_worker_thread = worker
+            worker.start()
+
+        return current_items, render_sources
+
     def download_historic_batch(self, local_path, max_images=7):
         d = self.display
         if not d.historic_images:
@@ -3253,40 +3548,11 @@ class MainController:
 
         try:
             historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
-            annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
             batch_images = d.historic_images[d.historic_offset]
-            overlays_by_image = self.get_model_overlays_for_images(batch_images)
-
-            downloaded_files = []
-            render_sources = []
-            for img in batch_images:
-                historic_file = self.file_manager.join(historic_temp_dir, img)
-                annotated_file = self.file_manager.join(annotated_temp_dir, img)
-                has_db_coordinates = bool(overlays_by_image.get(img))
-                historic_exists = self.file_manager.exists(historic_file)
-                annotated_exists = self.file_manager.exists(annotated_file)
-
-                selected_file = None
-                source_label = None
-                if has_db_coordinates:
-                    if historic_exists:
-                        selected_file = historic_file
-                        source_label = "db_coordinates+historic"
-                    elif annotated_exists:
-                        selected_file = annotated_file
-                        source_label = "db_coordinates+annotated"
-                elif annotated_exists:
-                    selected_file = annotated_file
-                    source_label = "annotated"
-                elif historic_exists:
-                    selected_file = historic_file
-                    source_label = "historic"
-
-                if selected_file:
-                    downloaded_files.append(selected_file)
-                    render_sources.append(f"{img}={source_label}")
-                else:
-                    render_sources.append(f"{img}=missing")
+            tile_items, render_sources = self._ensure_historic_render_batch(
+                local_path,
+                batch_images,
+            )
 
             log_key = (d.historic_offset, tuple(batch_images), tuple(render_sources))
             if getattr(self, "_last_historic_render_source_log_key", None) != log_key:
@@ -3302,7 +3568,7 @@ class MainController:
                 self._register_local_images_in_db(historic_temp_dir, image_names=batch_images)
                 self._last_registered_batch_key = batch_key
 
-            return downloaded_files
+            return tile_items
 
         except Exception as exc:
             print(f"Error reading historic batch: {exc}")
@@ -4508,6 +4774,9 @@ class MainController:
         for row in rows or []:
             img_name = row.get("img_name")
             if not img_name:
+                continue
+            geometry_type = str(row.get("geometry_type") or "").strip().lower()
+            if geometry_type == "classification" or row.get("coordinates") is None:
                 continue
             overlays_by_name[img_name].append(
                 {

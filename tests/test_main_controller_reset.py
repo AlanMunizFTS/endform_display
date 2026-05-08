@@ -83,7 +83,8 @@ class TestMainControllerReset(unittest.TestCase):
             self.assertEqual(os.listdir(historic_dir), [])
             self.assertEqual(os.listdir(annotated_dir), [])
 
-            db.execute.assert_called_once_with("DELETE FROM img_results")
+            self.assertEqual(db.execute.call_args_list[0].args, ("DELETE FROM img_results",))
+            self.assertEqual(db.execute.call_args_list[1].args, ("DELETE FROM model_results",))
             sftp_client.chdir.assert_any_call(controller.config.remote_hist_dir)
             sftp_client.chdir.assert_any_call(controller.config.remote_annotated_dir)
             sftp_client.remove.assert_any_call(

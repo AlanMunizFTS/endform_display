@@ -4595,6 +4595,79 @@ class DisplayWindow:
                 )
         return img
 
+    def _normalize_grid_item(self, item):
+        if isinstance(item, dict):
+            img_name = str(item.get("img_name") or "").strip()
+            img_path = item.get("path")
+            if not img_name and img_path:
+                img_name = self.file_manager.basename(img_path)
+            return {
+                "img_name": img_name,
+                "path": img_path,
+                "status": str(item.get("status") or "ready").strip().lower(),
+                "source": item.get("source"),
+                "prepared_image": item.get("prepared_image"),
+                "error": item.get("error"),
+            }
+
+        img_path = item
+        return {
+            "img_name": self.file_manager.basename(img_path),
+            "path": img_path,
+            "status": "ready",
+            "source": None,
+            "prepared_image": None,
+            "error": None,
+        }
+
+    def _draw_tile_placeholder(self, canvas, x, y, size, status):
+        status_text = str(status or "").upper()
+        if status_text == "LOADING":
+            label = "LOADING"
+            fill = (45, 45, 45)
+            border = (0, 180, 255)
+        elif status_text == "ERROR":
+            label = "ERROR"
+            fill = (35, 35, 55)
+            border = (49, 49, 255)
+        else:
+            label = "MISSING"
+            fill = (35, 35, 35)
+            border = (120, 120, 120)
+
+        cv2.rectangle(canvas, (x, y), (x + size, y + size), fill, -1)
+        cv2.rectangle(canvas, (x, y), (x + size, y + size), border, 3)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.8
+        thickness = 2
+        text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+        text_x = x + (size - text_size[0]) // 2
+        text_y = y + (size + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (235, 235, 235),
+            thickness,
+        )
+
+        if status_text == "LOADING":
+            dot_count = int(time.monotonic() * 4) % 4
+            dots = "." * dot_count
+            dot_size = cv2.getTextSize(dots, font, 0.9, thickness)[0]
+            cv2.putText(
+                canvas,
+                dots,
+                (x + (size - dot_size[0]) // 2, text_y + 36),
+                font,
+                0.9,
+                (0, 180, 255),
+                thickness,
+            )
+
     def show_image_grid(self, image_paths, cols=4, rows=2, img_size=None, padding=None):
         """Show images without scaling, with fixed padding"""
         if img_size is None:
@@ -4611,11 +4684,6 @@ class DisplayWindow:
         
         # Clear result buttons list at start
         self.result_buttons = []
-        overlays_by_image = (
-            self._get_cached_model_overlays(image_paths)
-            if self.historic_mode
-            else {}
-        )
 
         # Pre-blank the 7 active tile slots (skip last slot = bottom-right)
         for slot in range(cols * rows - 1):
@@ -4629,22 +4697,33 @@ class DisplayWindow:
             if idx >= cols * rows:
                 break
 
-            img = self._get_cached_image(img_path)
-            if img is None:
-                continue
-            source_h, source_w = img.shape[:2]
-            img = img.copy()
+            tile_item = self._normalize_grid_item(img_path)
+            img_filename = tile_item["img_name"]
+            status = tile_item["status"]
+            prepared_image = tile_item.get("prepared_image")
+            raw_path = tile_item.get("path")
 
-            # Normalize input image size for display tiles.
-            if img.shape[0] != img_size or img.shape[1] != img_size:
-                interpolation = cv2.INTER_AREA if (img.shape[0] > img_size or img.shape[1] > img_size) else cv2.INTER_LINEAR
-                img = cv2.resize(img, (img_size, img_size), interpolation=interpolation)
+            img = None
+            if status == "ready":
+                if prepared_image is not None:
+                    try:
+                        img = prepared_image.copy()
+                    except Exception:
+                        img = None
+                elif raw_path:
+                    img = self._get_cached_image(raw_path)
+                    if img is not None:
+                        img = img.copy()
 
             row = idx // cols
             col = idx % cols
 
             x = start_x + col * (img_size + padding)
             y = start_y + row * (img_size + padding)
+
+            if img is not None and (img.shape[0] != img_size or img.shape[1] != img_size):
+                interpolation = cv2.INTER_AREA if (img.shape[0] > img_size or img.shape[1] > img_size) else cv2.INTER_LINEAR
+                img = cv2.resize(img, (img_size, img_size), interpolation=interpolation)
             
             # Check if this image is being hovered or pressed
             x_draw, y_draw, size_draw = x, y, img_size
@@ -4661,20 +4740,17 @@ class DisplayWindow:
                     y_draw = y - (new_size - img_size) // 2
                     size_draw = new_size
                     # Resize image to scaled size
-                    img = cv2.resize(img, (size_draw, size_draw))
+                    if img is not None:
+                        img = cv2.resize(img, (size_draw, size_draw))
 
-            img_filename = self.file_manager.basename(img_path)
-            img = self._draw_model_overlays(
-                img,
-                overlays_by_image.get(img_filename),
-                source_w,
-                source_h,
-            )
-
-            canvas[y_draw:y_draw + size_draw, x_draw:x_draw + size_draw] = img
+            if img is None:
+                self._draw_tile_placeholder(canvas, x_draw, y_draw, size_draw, status)
+            else:
+                canvas[y_draw:y_draw + size_draw, x_draw:x_draw + size_draw] = img
 
             # Show camera label above each image (normal + historic)
-            label_text = self._extract_camera_label(img_path)
+            label_source = raw_path or img_filename
+            label_text = self._extract_camera_label(label_source)
             if label_text:
                 self._draw_camera_label(canvas, x, y, img_size, label_text)
             

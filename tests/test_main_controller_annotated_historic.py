@@ -3,6 +3,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import cv2
+import numpy as np
+
 from file_manager import FileManager
 from main_controller import ControllerConfig, MainController
 from paths_config import FINAL_CLASSIFICATION_DIRS, STATUS_SYNC_DIRS
@@ -97,7 +100,11 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             result = controller.download_historic_batch(tmp_dir)
 
-            self.assertEqual(result, [str(img_path)])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["img_name"], img_name)
+            self.assertEqual(result[0]["path"], str(img_path))
+            self.assertEqual(result[0]["status"], "ready")
+            self.assertEqual(result[0]["source"], "historic")
             controller._register_local_images_in_db.assert_called_once_with(
                 str(historic_dir),
                 image_names=[img_name],
@@ -129,9 +136,13 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             result = controller.download_historic_batch(tmp_dir)
 
-            self.assertEqual(result, [str(annotated_path)])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["img_name"], img_name)
+            self.assertEqual(result[0]["path"], str(annotated_path))
+            self.assertEqual(result[0]["status"], "ready")
+            self.assertEqual(result[0]["source"], "annotated_fallback")
             self.assertTrue(
-                any(f"{img_name}=annotated" in call.args[0] for call in logger.info.call_args_list)
+                any(f"{img_name}=annotated_fallback" in call.args[0] for call in logger.info.call_args_list)
             )
 
     def test_download_historic_batch_prefers_db_coordinates_over_annotated_fallback(self):
@@ -173,10 +184,195 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
 
             result = controller.download_historic_batch(tmp_dir)
 
-            self.assertEqual(result, [str(historic_path)])
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["img_name"], img_name)
+            self.assertEqual(result[0]["path"], str(historic_path))
+            self.assertEqual(result[0]["status"], "loading")
+            self.assertEqual(result[0]["source"], "db_coordinates+historic")
             self.assertTrue(
                 any(f"{img_name}=db_coordinates+historic" in call.args[0] for call in logger.info.call_args_list)
             )
+
+    def test_download_historic_batch_does_not_use_annotated_when_coordinates_need_historic(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            annotated_dir = tmp_path / "annotated"
+            historic_dir = tmp_path / "historic"
+            annotated_dir.mkdir()
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            (annotated_dir / img_name).write_bytes(b"annotated")
+
+            db = MagicMock()
+            db.fetch.return_value = [
+                {
+                    "img_name": img_name,
+                    "class_name": "scratch",
+                    "confidence": 0.91,
+                    "model_name": "model",
+                    "geometry_type": "bbox",
+                    "coordinates": {"x1": 10, "y1": 20, "x2": 100, "y2": 120},
+                    "image_width": 360,
+                    "image_height": 360,
+                }
+            ]
+            display = self._build_display(db=db)
+            display.historic_images = [[img_name]]
+            logger = MagicMock()
+            controller = MainController(
+                display=display,
+                logger=logger,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0]["img_name"], img_name)
+            self.assertEqual(result[0]["status"], "missing")
+            self.assertEqual(result[0]["source"], "missing_historic_with_coordinates")
+            self.assertTrue(
+                any("Coordinates exist but historic image is missing" in call.args[0] for call in logger.warn.call_args_list)
+            )
+
+    def test_download_historic_batch_ignores_classification_rows_for_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            annotated_dir = tmp_path / "annotated"
+            historic_dir = tmp_path / "historic"
+            annotated_dir.mkdir()
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            annotated_path = annotated_dir / img_name
+            annotated_path.write_bytes(b"annotated")
+            (historic_dir / img_name).write_bytes(b"historic")
+
+            db = MagicMock()
+            db.fetch.return_value = [
+                {
+                    "img_name": img_name,
+                    "class_name": "NOK",
+                    "confidence": 0.91,
+                    "model_name": "model",
+                    "geometry_type": "classification",
+                    "coordinates": None,
+                    "image_width": 360,
+                    "image_height": 360,
+                }
+            ]
+            display = self._build_display(db=db)
+            display.historic_images = [[img_name]]
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(result[0]["path"], str(annotated_path))
+            self.assertEqual(result[0]["status"], "ready")
+            self.assertEqual(result[0]["source"], "annotated_fallback")
+
+    def test_download_historic_batch_finishes_overlay_worker_and_reuses_cache(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            historic_path = historic_dir / img_name
+            cv2.imwrite(str(historic_path), np.zeros((40, 40, 3), dtype=np.uint8))
+
+            db = MagicMock()
+            db.fetch.return_value = [
+                {
+                    "img_name": img_name,
+                    "class_name": "scratch",
+                    "confidence": 0.91,
+                    "model_name": "model",
+                    "geometry_type": "bbox",
+                    "coordinates": {"x1": 1, "y1": 2, "x2": 20, "y2": 22},
+                    "image_width": 40,
+                    "image_height": 40,
+                }
+            ]
+            display = self._build_display(db=db)
+            display.DEFAULT_TILE_SIZE = 20
+            display.historic_images = [[img_name]]
+            display._draw_model_overlays = MagicMock(side_effect=lambda img, *_args: img + 1)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller._register_local_images_in_db = MagicMock()
+
+            first_result = controller.download_historic_batch(tmp_dir)
+            self.assertEqual(first_result[0]["status"], "loading")
+            controller.historic_render_worker_thread.join(timeout=2)
+
+            second_result = controller.download_historic_batch(tmp_dir)
+
+            self.assertEqual(second_result[0]["status"], "ready")
+            self.assertEqual(second_result[0]["source"], "db_coordinates+historic")
+            self.assertIn("prepared_image", second_result[0])
+            self.assertGreater(int(second_result[0]["prepared_image"].sum()), 0)
+            self.assertEqual(display._draw_model_overlays.call_count, 1)
+
+    def test_stale_historic_overlay_worker_result_is_ignored_after_navigation(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            historic_dir = tmp_path / "historic"
+            historic_dir.mkdir()
+            img_name = "118610000000000000001_Cam1_Side1_OK.png"
+            historic_path = historic_dir / img_name
+            cv2.imwrite(str(historic_path), np.zeros((40, 40, 3), dtype=np.uint8))
+
+            display = self._build_display()
+            display.DEFAULT_TILE_SIZE = 20
+            display._draw_model_overlays = MagicMock(side_effect=lambda img, *_args: img + 1)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller.historic_render_generation_id = 2
+            controller.historic_render_items = {
+                img_name: {
+                    "img_name": img_name,
+                    "status": "loading",
+                    "source": "db_coordinates+historic",
+                    "path": str(historic_path),
+                }
+            }
+
+            controller._prepare_historic_render_worker(
+                1,
+                [
+                    {
+                        "img_name": img_name,
+                        "path": str(historic_path),
+                        "overlays": [
+                            {
+                                "class_name": "scratch",
+                                "confidence": 0.91,
+                                "geometry_type": "bbox",
+                                "coordinates": {"x1": 1, "y1": 2, "x2": 20, "y2": 22},
+                                "image_width": 40,
+                                "image_height": 40,
+                            }
+                        ],
+                        "cache_key": ("stale",),
+                        "tile_size": 20,
+                    }
+                ],
+            )
+
+            self.assertEqual(controller.historic_render_items[img_name]["status"], "loading")
+            display._draw_model_overlays.assert_not_called()
 
     def test_save_classification_results_reports_missing_historic_source(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
