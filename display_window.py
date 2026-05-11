@@ -177,8 +177,9 @@ class DisplayWindow:
         self._background_cache = None
         self._background_cache_mtime = None
         self._background_cache_size = (self.width, self.height)
+        self._canvas_buffer = None
         self._image_cache = OrderedDict()
-        self._image_cache_max_items = 64
+        self._image_cache_max_items = 32
         self._db_result_cache = {}
         self._model_overlay_cache_key = None
         self._model_overlay_cache_value = {}
@@ -4348,30 +4349,81 @@ class DisplayWindow:
                     self._background_cache_size = target_size
 
             if self._background_cache is not None:
-                return self._background_cache.copy()
+                if (
+                    self._canvas_buffer is None
+                    or self._canvas_buffer.shape != self._background_cache.shape
+                    or self._canvas_buffer.dtype != self._background_cache.dtype
+                ):
+                    self._canvas_buffer = np.empty_like(self._background_cache)
+                np.copyto(self._canvas_buffer, self._background_cache)
+                return self._canvas_buffer
 
-        return np.ones((self.height, self.width, 3), dtype=np.uint8) * 255
+        expected_shape = (self.height, self.width, 3)
+        if (
+            self._canvas_buffer is None
+            or self._canvas_buffer.shape != expected_shape
+            or self._canvas_buffer.dtype != np.uint8
+        ):
+            self._canvas_buffer = np.empty(expected_shape, dtype=np.uint8)
+        self._canvas_buffer.fill(255)
+        return self._canvas_buffer
 
-    def _get_cached_image(self, img_path):
-        """Read an image with a tiny LRU cache keyed by path + mtime."""
+    def _image_cache_key(self, img_path, target_size=None):
+        if target_size is None:
+            size_key = None
+        elif isinstance(target_size, (tuple, list)):
+            size_key = tuple(int(value) for value in target_size[:2])
+        else:
+            size_key = (int(target_size), int(target_size))
+        return (os.fspath(img_path), size_key)
+
+    def clear_cached_image(self, img_path):
+        """Remove all cached sizes for one image path."""
+        path_key = os.fspath(img_path)
+        for cache_key in list(self._image_cache.keys()):
+            if isinstance(cache_key, tuple) and cache_key[0] == path_key:
+                self._image_cache.pop(cache_key, None)
+
+    def _resize_for_cache(self, img, target_size):
+        if img is None or target_size is None:
+            return img
+        if isinstance(target_size, (tuple, list)):
+            target_w, target_h = [int(value) for value in target_size[:2]]
+        else:
+            target_w = target_h = int(target_size)
+        if target_w <= 0 or target_h <= 0:
+            return img
+        if img.shape[1] == target_w and img.shape[0] == target_h:
+            return img
+        interpolation = (
+            cv2.INTER_AREA
+            if img.shape[0] > target_h or img.shape[1] > target_w
+            else cv2.INTER_LINEAR
+        )
+        return cv2.resize(img, (target_w, target_h), interpolation=interpolation)
+
+    def _get_cached_image(self, img_path, target_size=None):
+        """Read an image with a small LRU cache keyed by path, mtime, and rendered size."""
+        cache_key = self._image_cache_key(img_path, target_size)
         try:
             current_mtime = self.file_manager.getmtime(img_path)
         except Exception:
-            self._image_cache.pop(img_path, None)
+            self.clear_cached_image(img_path)
             return None
 
-        cached = self._image_cache.get(img_path)
+        cached = self._image_cache.get(cache_key)
         if cached and cached[0] == current_mtime:
-            self._image_cache.move_to_end(img_path)
+            self._image_cache.move_to_end(cache_key)
             return cached[1]
 
         img = self.file_manager.read_image(img_path)
         if img is None:
-            self._image_cache.pop(img_path, None)
+            self.clear_cached_image(img_path)
             return None
 
-        self._image_cache[img_path] = (current_mtime, img)
-        self._image_cache.move_to_end(img_path)
+        img = self._resize_for_cache(img, target_size)
+        self._image_cache[cache_key] = (current_mtime, img)
+        self._image_cache.move_to_end(cache_key)
         while len(self._image_cache) > self._image_cache_max_items:
             self._image_cache.popitem(last=False)
         return img
@@ -4751,7 +4803,7 @@ class DisplayWindow:
                     except Exception:
                         img = None
                 elif raw_path:
-                    img = self._get_cached_image(raw_path)
+                    img = self._get_cached_image(raw_path, target_size=img_size)
                     if img is not None:
                         img = img.copy()
 

@@ -643,7 +643,7 @@ class MainController:
         self.historic_render_lock = Lock()
         self.historic_render_worker_thread = None
         self.historic_render_cache = OrderedDict()
-        self.historic_render_cache_max_items = 64
+        self.historic_render_cache_max_items = 32
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -2674,7 +2674,10 @@ class MainController:
                 k: v for k, v in d._db_result_cache.items() if not k.startswith(jsn)
             }
         for path in local_candidates:
-            d._image_cache.pop(path, None)
+            if hasattr(d, "clear_cached_image"):
+                d.clear_cached_image(path)
+            else:
+                d._image_cache.pop(path, None)
 
         d.historic_db_registered = False
         d._historic_index_cache = None
