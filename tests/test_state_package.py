@@ -425,8 +425,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()
             controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
@@ -444,15 +442,15 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue((package_path / "manifest.json").is_file())
             self.assertTrue((package_path / "db" / "data.json").is_file())
             self.assertTrue((package_path / "db" / "database.sql").is_file())
-            self.assertTrue((package_path / "annotated" / "11861_A_side_OK.png").is_file())
+            self.assertFalse((package_path / "annotated").exists())
             self.assertTrue((package_path / "historic" / "11861_A_front_NOK.png").is_file())
 
             manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["package_kind"], "display_state")
             self.assertTrue(manifest["export_complete"])
-            self.assertEqual(manifest["annotated_count"], 2)
+            self.assertEqual(manifest["annotated_count"], 0)
             self.assertEqual(manifest["historic_count"], 2)
-            self.assertEqual(len(manifest["annotated_images"]), 2)
+            self.assertEqual(len(manifest["annotated_images"]), 0)
             self.assertEqual(len(manifest["historic_images"]), 2)
             self.assertEqual(manifest["table_counts"]["img_results"], 2)
             self.assertEqual(manifest["table_counts"]["model_results"], 2)
@@ -470,8 +468,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"source-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"source-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"source-historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"source-historic-front")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
@@ -510,10 +506,10 @@ class TestStatePackage(unittest.TestCase):
 
             self.assertTrue(result["ok"])
             self.assertEqual((target_annotated / "11861_A_side_OK.png").read_bytes(), b"existing-annotated")
-            self.assertTrue((target_annotated / "11861_A_front_NOK.png").exists())
+            self.assertFalse((target_annotated / "11861_A_front_NOK.png").exists())
             self.assertTrue((target_historic / "11861_A_front_NOK.png").exists())
-            self.assertEqual(result["annotated"]["copied"], 1)
-            self.assertEqual(result["annotated"]["skipped"], 1)
+            self.assertEqual(result["annotated"]["copied"], 0)
+            self.assertEqual(result["annotated"]["skipped"], 0)
             self.assertEqual(result["historic"]["copied"], 1)
             self.assertEqual(result["historic"]["skipped"], 1)
             self.assertEqual(result["db"]["inserted"]["img_results"], 1)
@@ -556,7 +552,6 @@ class TestStatePackage(unittest.TestCase):
                 ],
             )
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-annotated")
             (historic_dir / "11861_extra_diag_NOK.png").write_bytes(b"new-historic")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
 
@@ -582,7 +577,7 @@ class TestStatePackage(unittest.TestCase):
                     }
                 ],
             )
-            target_controller, target_annotated, _target_historic = build_controller(target_tmp, target_db)
+            target_controller, target_annotated, target_historic = build_controller(target_tmp, target_db)
 
             result = import_display_state(
                 target_controller,
@@ -591,7 +586,8 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertTrue((target_annotated / "11861_extra_diag_NOK.png").exists())
+            self.assertFalse((target_annotated / "11861_extra_diag_NOK.png").exists())
+            self.assertTrue((target_historic / "11861_extra_diag_NOK.png").exists())
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.img_results])
             self.assertIn("11861_extra_diag_NOK.png", [row["img_name"] for row in target_db.classified_images])
             target_controller._recalculate_piece_result.assert_called_with("11861", db_client=target_db)
@@ -620,8 +616,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
             package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
@@ -644,8 +638,6 @@ class TestStatePackage(unittest.TestCase):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
             source_controller, annotated_dir, historic_dir = build_controller(source_tmp, source_db)
-            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated-side")
-            (annotated_dir / "11861_A_front_NOK.png").write_bytes(b"annotated-front")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic-side")
             (historic_dir / "11861_A_front_NOK.png").write_bytes(b"historic-front")
 
@@ -660,10 +652,7 @@ class TestStatePackage(unittest.TestCase):
             )
 
             self.assertTrue(result["ok"])
-            self.assertEqual(sorted(p.name for p in target_annotated.iterdir()), [
-                "11861_A_front_NOK.png",
-                "11861_A_side_OK.png",
-            ])
+            self.assertEqual(sorted(p.name for p in target_annotated.iterdir()), [])
             self.assertEqual(sorted(p.name for p in target_historic.iterdir()), [
                 "11861_A_front_NOK.png",
                 "11861_A_side_OK.png",

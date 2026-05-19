@@ -103,7 +103,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
             import_mock.return_value = {
                 "ok": True,
-                "annotated": {"copied": 2, "skipped": 1},
+                "annotated": {"copied": 0, "skipped": 0},
                 "historic": {"copied": 2, "skipped": 1},
                 "db": {
                     "inserted": {
@@ -144,7 +144,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertEqual(display.sync_progress_title, "Importing Dataset")
             self.assertEqual(
                 display.sync_message,
-                "Import completed: 4 files, 8 DB rows added, 4 duplicates skipped",
+                "Import completed: 2 files, 8 DB rows added, 3 duplicates skipped",
             )
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
