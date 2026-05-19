@@ -3316,6 +3316,7 @@ class MainController:
 
     def _build_historic_render_plan(self, local_path, batch_images, overlays_by_image):
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
+        annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
 
         items = {}
@@ -3323,12 +3324,16 @@ class MainController:
         render_sources = []
         for img_name in batch_images:
             historic_file = self.file_manager.join(historic_temp_dir, img_name)
+            annotated_file = self.file_manager.join(annotated_temp_dir, img_name)
             overlays = overlays_by_image.get(img_name) or []
             has_db_coordinates = bool(overlays)
             historic_exists = self.file_manager.exists(historic_file)
+            annotated_exists = self.file_manager.exists(annotated_file)
 
             if has_db_coordinates:
                 if historic_exists:
+                    fallback_source = "annotated_fallback" if annotated_exists else "historic"
+                    fallback_path = annotated_file if annotated_exists else historic_file
                     cache_key = self._get_historic_render_cache_key(
                         img_name,
                         historic_file,
@@ -3341,6 +3346,8 @@ class MainController:
                             "status": "ready",
                             "source": "db_coordinates+historic",
                             "path": historic_file,
+                            "fallback_source": fallback_source,
+                            "fallback_path": fallback_path,
                             "prepared_image": cached_image,
                         }
                     else:
@@ -3349,6 +3356,8 @@ class MainController:
                             "status": "loading",
                             "source": "db_coordinates+historic",
                             "path": historic_file,
+                            "fallback_source": fallback_source,
+                            "fallback_path": fallback_path,
                         }
                         work_items.append(
                             {
@@ -3357,6 +3366,8 @@ class MainController:
                                 "overlays": overlays,
                                 "cache_key": cache_key,
                                 "tile_size": tile_size,
+                                "fallback_source": fallback_source,
+                                "fallback_path": fallback_path,
                             }
                         )
                 else:
@@ -3370,6 +3381,13 @@ class MainController:
                         f"[HIST_RENDER] Coordinates exist but historic image is missing: {img_name}",
                         allow_repeat=True,
                     )
+            elif annotated_exists:
+                item = {
+                    "img_name": img_name,
+                    "status": "ready",
+                    "source": "annotated_fallback",
+                    "path": annotated_file,
+                }
             elif historic_exists:
                 item = {
                     "img_name": img_name,
@@ -3452,6 +3470,18 @@ class MainController:
                         return
                     current = self.historic_render_items.get(img_name)
                     if not current:
+                        continue
+                    fallback_path = current.get("fallback_path") or work_item.get("fallback_path")
+                    fallback_source = current.get("fallback_source") or work_item.get("fallback_source")
+                    if fallback_path and fallback_source:
+                        self.historic_render_items[img_name] = {
+                            **current,
+                            "status": "ready",
+                            "source": fallback_source,
+                            "path": fallback_path,
+                            "prepared_image": None,
+                            "error": str(exc),
+                        }
                         continue
                     self.historic_render_items[img_name] = {
                         **current,
