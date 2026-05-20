@@ -34,6 +34,9 @@ Optional SFTP keys (only required when enabled):
 - `SFTP_USERNAME`
 - `SFTP_PASSWORD`
 
+Optional app controls:
+- `APP_DAILY_EXPORT_RESET_ENABLED` (`0`, `false`, `no`, `off` to disable the scheduled 05:40 export/reset; default enabled)
+
 ## SFTP Mode (Hybrid Fallback)
 
 - `APP_SFTP_ENABLED` disabled or missing:
@@ -77,6 +80,12 @@ Expected logs include:
   - Success: `Dataset completed and verified`
   - Verification issues: `Dataset completed but verification failed (N issues)`
   - Runtime failure: `Dataset sync failed: ...`
+
+## Daily Export/Reset
+
+- The automatic export/reset job is scheduled for 05:40.
+- Set `APP_DAILY_EXPORT_RESET_ENABLED=0` in `.env` to disable the scheduled job.
+- The reset phase starts only after the state export completes successfully; export failures stop the workflow before dataset or DB reset.
 
 ## Historic Keyboard Navigation
 

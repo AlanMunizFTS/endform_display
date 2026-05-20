@@ -35,6 +35,7 @@ from paths_config import (
 )
 from sftp_app import SFTPApp
 from settings import (
+    is_daily_export_reset_enabled,
     is_historic_download_remote_jsn_validation_enabled,
     is_remote_db_enabled,
 )
@@ -569,7 +570,7 @@ class ControllerConfig:
     remote_db_success_interval_sec: float = 1.0
     remote_db_idle_backoff_sec: float = 2.0
     remote_db_error_backoff_sec: float = 5.0
-    daily_maintenance_enabled: bool = True
+    daily_maintenance_enabled: bool = field(default_factory=is_daily_export_reset_enabled)
     daily_maintenance_hour: int = 5
     daily_maintenance_minute: int = 40
     daily_maintenance_min_free_bytes: int = 512 * 1024 * 1024
