@@ -787,6 +787,54 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     }
 
 
+def estimate_display_state_export_size(controller, db_client=None):
+    file_manager = controller.file_manager
+    db = db_client or getattr(controller.display, "db", None)
+    if db is None:
+        return {"ok": False, "error": "No database connection available"}
+
+    annotated_dir = controller._get_visible_historic_dir()
+    historic_dir = controller._get_export_historic_dir()
+    image_extensions = tuple(getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS))
+
+    annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
+    historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
+    data_payload = _build_data_payload(db)
+    manifest = _build_manifest(
+        annotated_names=annotated_names,
+        historic_names=historic_names,
+        data_payload=data_payload,
+        image_extensions=image_extensions,
+    )
+
+    files_size = 0
+    for directory, names in (
+        (annotated_dir, annotated_names),
+        (historic_dir, historic_names),
+    ):
+        for name in names:
+            files_size += int(file_manager.getsize(file_manager.join(directory, name)))
+
+    metadata_size = sum(
+        len(content.encode("utf-8"))
+        for content in (
+            json.dumps(data_payload, indent=2, sort_keys=True),
+            _build_database_sql(data_payload),
+            json.dumps(manifest, indent=2, sort_keys=True),
+        )
+    )
+
+    return {
+        "ok": True,
+        "required_bytes": files_size + metadata_size,
+        "files_bytes": files_size,
+        "metadata_bytes": metadata_size,
+        "annotated_count": len(annotated_names),
+        "historic_count": len(historic_names),
+        "table_counts": manifest["table_counts"],
+    }
+
+
 def import_display_state(controller, package_path, progress_callback=None, db_client=None):
     db = db_client or getattr(controller.display, "db", None)
     if db is None:

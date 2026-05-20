@@ -41,6 +41,9 @@ class FileManager:
     def getmtime(self, path: str) -> float:
         return os.path.getmtime(path)
 
+    def getsize(self, path: str) -> int:
+        return os.path.getsize(path)
+
     def read_image(self, path: str, flags: int = cv2.IMREAD_COLOR):
         return cv2.imread(path, flags)
 

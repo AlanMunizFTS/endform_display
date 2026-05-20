@@ -7,7 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from file_manager import FileManager
-from state_package import export_display_state, import_display_state
+from state_package import (
+    estimate_display_state_export_size,
+    export_display_state,
+    import_display_state,
+)
 
 
 def _unwrap_json_param(value):
@@ -463,6 +467,21 @@ class TestStatePackage(unittest.TestCase):
                 data_payload["classified_image_defects"][0]["coordinates"],
                 {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
             )
+
+    def test_estimate_display_state_export_size_includes_files_and_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_source_db()
+            controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated")
+            (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic")
+
+            result = estimate_display_state_export_size(controller, db_client=source_db)
+
+            self.assertTrue(result["ok"])
+            self.assertGreaterEqual(result["required_bytes"], len(b"annotated") + len(b"historic"))
+            self.assertEqual(result["annotated_count"], 1)
+            self.assertEqual(result["historic_count"], 1)
+            self.assertEqual(result["table_counts"]["img_results"], 2)
 
     def test_import_display_state_merges_missing_data_and_skips_duplicates(self):
         with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:

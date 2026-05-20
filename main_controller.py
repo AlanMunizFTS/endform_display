@@ -16,10 +16,12 @@ from dataset_exporter import (
     DEFAULT_RESULT_OPTIONS,
     export_piece_stats_dataset,
 )
+from daily_export_maintenance import DailyExportMaintenance
 from file_manager import FileManager
 from paths_config import (
     ANNOTATED_LOCAL_DIR,
     ANNOTATED_SUBDIR_NAME,
+    EXPORTS_DIR,
     FINAL_CLASSIFICATION_DIR,
     FINAL_CLASSIFICATION_DIRS,
     HISTORIC_LOCAL_DIR,
@@ -567,6 +569,12 @@ class ControllerConfig:
     remote_db_success_interval_sec: float = 1.0
     remote_db_idle_backoff_sec: float = 2.0
     remote_db_error_backoff_sec: float = 5.0
+    daily_maintenance_enabled: bool = True
+    daily_maintenance_hour: int = 5
+    daily_maintenance_minute: int = 40
+    daily_maintenance_min_free_bytes: int = 512 * 1024 * 1024
+    daily_maintenance_retry_interval_sec: float = 30 * 60
+    daily_maintenance_exports_dir: str = field(default_factory=lambda: str(EXPORTS_DIR))
     max_images: int = 7
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
@@ -644,6 +652,7 @@ class MainController:
         self.historic_render_worker_thread = None
         self.historic_render_cache = OrderedDict()
         self.historic_render_cache_max_items = 32
+        self.daily_export_maintenance = DailyExportMaintenance(self)
 
         if hasattr(self.display, "set_controller"):
             self.display.set_controller(self)
@@ -5270,6 +5279,8 @@ class MainController:
 
                 if not self.historic_bootstrap_loading and not self.historic_bootstrap_complete:
                     self._register_historic_local_dir_on_startup()
+
+                self.daily_export_maintenance.tick()
 
                 # Periodic check for new historic images
                 if time.monotonic() - self.last_historic_check > 1.0:
