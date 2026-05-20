@@ -2294,25 +2294,30 @@ class MainController:
                 if not new_index:
                     self._historic_index_refresh_running = False
                     return
+                visible_index = self._apply_active_historic_filter(new_index)
                 # Preserve current JSN position
                 current_jsn = None
                 if d.historic_images:
                     try:
                         batch = d.historic_images[d.historic_offset]
                         if batch:
-                            current_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+                            current_jsn = self._get_historic_batch_jsn(batch)
                     except Exception:
                         pass
-                d.historic_images = new_index
+                if not visible_index:
+                    d.historic_images = []
+                    d.historic_offset = 0
+                    return
+                d.historic_images = visible_index
                 if current_jsn:
-                    for idx, batch in enumerate(new_index):
-                        if batch and (batch[0].split("_")[0] if "_" in batch[0] else batch[0]) == current_jsn:
+                    for idx, batch in enumerate(visible_index):
+                        if batch and self._get_historic_batch_jsn(batch) == current_jsn:
                             d.historic_offset = idx
                             break
                     else:
-                        d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+                        d.historic_offset = min(d.historic_offset, len(visible_index) - 1)
                 else:
-                    d.historic_offset = min(d.historic_offset, len(new_index) - 1)
+                    d.historic_offset = min(d.historic_offset, len(visible_index) - 1)
             except Exception as exc:
                 print(f"Error refreshing historic index: {exc}")
             finally:
@@ -2343,15 +2348,16 @@ class MainController:
         try:
             # Use cached index immediately (never blocks); trigger async rescan if stale
             cached = self._load_historic_index(force_rescan=False)
+            visible_index = self._apply_active_historic_filter(cached)
 
-            if not cached:
+            if not visible_index:
                 if not d.historic_mode:
                     self._show_no_images_dialog("No images available")
                 # Kick off a background rescan so next call has fresh data
                 self._refresh_historic_index_async()
                 return
 
-            d.historic_images = cached
+            d.historic_images = visible_index
 
             if not d.historic_mode:
                 d.historic_mode = True
@@ -2362,7 +2368,7 @@ class MainController:
                     for idx, batch in enumerate(d.historic_images):
                         if not batch:
                             continue
-                        batch_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+                        batch_jsn = self._get_historic_batch_jsn(batch)
                         if batch_jsn == current_jsn:
                             found_idx = idx
                             break
@@ -2396,6 +2402,7 @@ class MainController:
         d.show_piece_number_dialog = False
         d.piece_number_dialog_input = ""
         d.piece_number_dialog_replace_on_input = False
+        self._clear_historic_filter_state()
         if hasattr(d, "historic_jsn_rect"):
             d.historic_jsn_rect = None
         if hasattr(d, "toast_message"):
@@ -2452,10 +2459,89 @@ class MainController:
         for idx, batch in enumerate(historic_images or []):
             if not batch:
                 continue
-            batch_jsn = batch[0].split("_")[0] if "_" in batch[0] else batch[0]
+            batch_jsn = self._get_historic_batch_jsn(batch)
             if batch_jsn == target_jsn:
                 return idx
         return None
+
+    def _get_historic_batch_jsn(self, batch):
+        if not batch:
+            return ""
+        first = str(batch[0] or "")
+        return first.split("_")[0] if "_" in first else first
+
+    def _normalize_historic_filter_jsns(self, rows_or_jsns):
+        """Return sanitized, de-duplicated JSNs from stats detail rows."""
+        normalized = []
+        seen = set()
+        for item in rows_or_jsns or []:
+            if isinstance(item, dict):
+                raw_jsn = item.get("jsn")
+            else:
+                raw_jsn = item
+            jsn = self._sanitize_search_jsn(raw_jsn)
+            if not jsn or jsn in seen:
+                continue
+            normalized.append(jsn)
+            seen.add(jsn)
+        return normalized
+
+    def _get_active_historic_filter_jsns(self):
+        try:
+            display_state = vars(self.display)
+        except TypeError:
+            display_state = {}
+        jsns = display_state.get("historic_filter_jsns") or []
+        return self._normalize_historic_filter_jsns(jsns)
+
+    def _historic_filter_is_active(self):
+        try:
+            display_state = vars(self.display)
+        except TypeError:
+            display_state = {}
+        return bool(
+            str(display_state.get("historic_filter_kind") or "").strip()
+            and str(display_state.get("historic_filter_label") or "").strip()
+            and self._get_active_historic_filter_jsns()
+        )
+
+    def _filter_historic_index_by_jsns(self, historic_index, allowed_jsns):
+        allowed = set(self._normalize_historic_filter_jsns(allowed_jsns))
+        if not allowed:
+            return []
+        return [
+            batch
+            for batch in historic_index or []
+            if self._get_historic_batch_jsn(batch) in allowed
+        ]
+
+    def _apply_active_historic_filter(self, historic_index):
+        if not self._historic_filter_is_active():
+            return list(historic_index or [])
+        return self._filter_historic_index_by_jsns(
+            historic_index,
+            self._get_active_historic_filter_jsns(),
+        )
+
+    def _set_historic_filter_state(self, filter_kind, filter_label, jsns):
+        d = self.display
+        d.historic_filter_kind = str(filter_kind or "").strip()
+        d.historic_filter_label = str(filter_label or "").strip()
+        d.historic_filter_jsns = self._normalize_historic_filter_jsns(jsns)
+        d.historic_filter_total_count = len(d.historic_filter_jsns)
+
+    def _clear_historic_filter_state(self):
+        d = self.display
+        d.historic_filter_kind = ""
+        d.historic_filter_label = ""
+        d.historic_filter_jsns = []
+        d.historic_filter_total_count = 0
+        resetter = getattr(d, "_reset_historic_filter_state", None)
+        if callable(resetter):
+            try:
+                resetter()
+            except Exception:
+                pass
 
     def _get_current_historic_piece_number(self):
         """Return the current visible historic piece number using UI numbering."""
@@ -2506,6 +2592,8 @@ class MainController:
         if not target_jsn:
             return False
 
+        self._clear_historic_filter_state()
+
         if close_stats_modal:
             d.show_stats_class_modal = False
             if hasattr(d, "_reset_stats_class_modal_state"):
@@ -2532,6 +2620,64 @@ class MainController:
         self._refresh_historic_index_async()
         return True
 
+    def go_to_historic_jsn_filtered(
+        self,
+        jsn,
+        filter_kind,
+        filter_label,
+        filter_rows,
+        show_missing_dialog=False,
+    ):
+        """Navigate to a stats-selected JSN within its filtered historic subset."""
+        d = self.display
+        target_jsn = self._sanitize_search_jsn(jsn)
+        filter_kind = str(filter_kind or "").strip()
+        filter_label = str(filter_label or "").strip()
+        allowed_jsns = self._normalize_historic_filter_jsns(filter_rows)
+        if target_jsn and target_jsn not in allowed_jsns:
+            allowed_jsns.append(target_jsn)
+
+        if not target_jsn:
+            return False
+        if not filter_kind or not filter_label or not allowed_jsns:
+            return self.go_to_historic_jsn(
+                target_jsn,
+                show_missing_dialog=show_missing_dialog,
+                close_stats_modal=True,
+            )
+
+        historic_index = self._load_historic_index(force_rescan=False) or []
+        filtered_index = self._filter_historic_index_by_jsns(historic_index, allowed_jsns)
+        target_idx = self._find_historic_batch_index(filtered_index, target_jsn)
+
+        if target_idx is None:
+            historic_index = self._load_historic_index(force_rescan=True) or []
+            filtered_index = self._filter_historic_index_by_jsns(historic_index, allowed_jsns)
+            target_idx = self._find_historic_batch_index(filtered_index, target_jsn)
+
+        if target_idx is None:
+            if show_missing_dialog:
+                message = (
+                    f"JSN {target_jsn} not in historic folder"
+                    if filtered_index
+                    else "No images available"
+                )
+                self._show_no_images_dialog(message)
+            return False
+
+        self._set_historic_filter_state(filter_kind, filter_label, allowed_jsns)
+        d.historic_images = filtered_index
+        d.historic_mode = True
+        d.historic_offset = target_idx
+        d.search_active = False
+        d.filtered_suggestions = []
+        d.selected_suggestion_idx = -1
+        d.show_stats_class_modal = False
+        if hasattr(d, "_reset_stats_class_modal_state"):
+            d._reset_stats_class_modal_state()
+        self._refresh_historic_index_async()
+        return True
+
     def go_to_historic_piece_number(self, piece_number, show_missing_dialog=False):
         """Navigate to a historic piece number using the displayed numbering."""
         d = self.display
@@ -2552,6 +2698,7 @@ class MainController:
                 self._show_no_images_dialog(f"Piece {target_piece} not available")
             return False
 
+        self._clear_historic_filter_state()
         d.historic_images = historic_index
         d.historic_mode = True
         d.historic_offset = total_pieces - target_piece
@@ -4900,6 +5047,7 @@ class MainController:
             return
 
         if action == "enter_historic_mode":
+            self._clear_historic_filter_state()
             self.enter_historic_mode()
         elif action == "exit_historic_mode":
             self.exit_historic_mode()
@@ -4983,10 +5131,12 @@ class MainController:
             d.stats_class_modal_detail_offset = 0
             d.stats_class_modal_detail_visible_rows = 1
         elif action == "open_historic_jsn_from_stats":
-            self.go_to_historic_jsn(
+            self.go_to_historic_jsn_filtered(
                 payload.get("jsn"),
+                payload.get("filter_kind"),
+                payload.get("filter_label"),
+                payload.get("filter_rows"),
                 show_missing_dialog=True,
-                close_stats_modal=True,
             )
         elif action == "copy_stats_jsn":
             d._copy_stats_modal_jsn(payload.get("jsn"))

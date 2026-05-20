@@ -21,6 +21,10 @@ class _DisplayStatsStub:
         self._historic_index_mtime = None
         self._historic_index_last_scan = 0.0
         self._historic_jsn_cache = []
+        self.historic_filter_kind = ""
+        self.historic_filter_label = ""
+        self.historic_filter_jsns = []
+        self.historic_filter_total_count = 0
         self._image_cache = {}
         self.stats_class_modal_rows = []
         self.stats_class_modal_status_rows = []
@@ -297,6 +301,46 @@ class TestDisplayWindowStatsClassModal(unittest.TestCase):
         self.assertIsNotNone(rendered)
         self.assertIsNotNone(display.stats_class_modal_list_rect)
         self.assertIsNotNone(display.stats_class_modal_back_rect)
+
+    @patch("display_window.get_db_connection")
+    def test_stats_detail_jsn_click_emits_filter_context(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.show_stats_class_modal = True
+        display.stats_class_modal_view = "detail"
+        display.stats_class_modal_selected_kind = "status"
+        display.stats_class_modal_selected_label = "FNOK"
+        detail_rows = [
+            {
+                "jsn": "118610007",
+                "historic_index": 2,
+                "piece_date_display": "2026-03-25-09-15",
+                "class_name": "wrinkle",
+            }
+        ]
+        display.stats_class_modal_detail_rows = detail_rows
+
+        canvas = np.zeros((display.height, display.width, 3), dtype=np.uint8)
+        display.draw_stats_class_modal(canvas)
+        rect, jsn_value = display.stats_class_modal_jsn_row_rects[0]
+        x, y, width, height = rect
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            x + width // 2,
+            y + height // 2,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with(
+            "open_historic_jsn_from_stats",
+            jsn=jsn_value,
+            filter_kind="status",
+            filter_label="FNOK",
+            filter_rows=detail_rows,
+        )
 
 
 class TestMainControllerStatsClassModal(unittest.TestCase):

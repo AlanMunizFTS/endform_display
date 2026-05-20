@@ -17,6 +17,10 @@ class _DisplayPieceStub:
             ["1001_side_cam1.png"],
         ]
         self.historic_offset = 1
+        self.historic_filter_kind = ""
+        self.historic_filter_label = ""
+        self.historic_filter_jsns = []
+        self.historic_filter_total_count = 0
         self.search_active = False
         self.filtered_suggestions = []
         self.selected_suggestion_idx = -1
@@ -79,6 +83,24 @@ class TestMainControllerHistoricPieceNavigation(unittest.TestCase):
         self.assertEqual(display.historic_offset, 0)
         self.assertFalse(display.show_piece_number_dialog)
         self.assertEqual(display.piece_number_dialog_input, "")
+
+    def test_go_to_historic_piece_number_clears_active_filter(self):
+        display = _DisplayPieceStub()
+        display.historic_filter_kind = "status"
+        display.historic_filter_label = "FNOK"
+        display.historic_filter_jsns = ["1003", "1002"]
+        display.historic_filter_total_count = 2
+        controller = MainController(display=display)
+        controller._load_historic_index = MagicMock(return_value=list(display.historic_images))
+        controller._refresh_historic_index_async = MagicMock()
+
+        moved = controller.go_to_historic_piece_number(2, show_missing_dialog=True)
+
+        self.assertTrue(moved)
+        self.assertEqual(display.historic_filter_kind, "")
+        self.assertEqual(display.historic_filter_label, "")
+        self.assertEqual(display.historic_filter_jsns, [])
+        self.assertEqual(display.historic_filter_total_count, 0)
 
     def test_invalid_piece_number_shows_dialog_and_keeps_position(self):
         display = _DisplayPieceStub()

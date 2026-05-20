@@ -55,6 +55,10 @@ class DisplayWindow:
         self.historic_mode = False  # Indicates if we are in historic mode
         self.historic_offset = 0  # Offset to navigate through historic batches
         self.historic_images = []  # Complete list of historic images
+        self.historic_filter_kind = ""
+        self.historic_filter_label = ""
+        self.historic_filter_jsns = []
+        self.historic_filter_total_count = 0
         self.result_buttons = []  # List of result buttons [(rect, img_name, result_value), ...]
         self.temp_results = {}  # Dictionary for temporary changes {img_name: new_value}
         self.db = None
@@ -412,6 +416,13 @@ class DisplayWindow:
         else:
             self._set_toast_message("Unable to copy JSN to clipboard", is_error=True)
         return copied
+
+    def _reset_historic_filter_state(self):
+        """Clear the in-memory historic subset selected from stats."""
+        self.historic_filter_kind = ""
+        self.historic_filter_label = ""
+        self.historic_filter_jsns = []
+        self.historic_filter_total_count = 0
 
     def _reset_stats_class_modal_state(self):
         """Reset the stats modal drill-down state."""
@@ -2028,7 +2039,13 @@ class DisplayWindow:
                 for rect, jsn_value in self.stats_class_modal_jsn_row_rects:
                     bx, by, bw, bh = rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self._emit_action("open_historic_jsn_from_stats", jsn=jsn_value)
+                        self._emit_action(
+                            "open_historic_jsn_from_stats",
+                            jsn=jsn_value,
+                            filter_kind=self.stats_class_modal_selected_kind,
+                            filter_label=self.stats_class_modal_selected_label,
+                            filter_rows=list(self.stats_class_modal_detail_rows or []),
+                        )
                         return
 
                 for rect, class_name in self.stats_class_modal_class_row_rects:
@@ -2629,15 +2646,38 @@ class DisplayWindow:
         total_pieces = len(self.historic_images)
         current_piece = self._get_current_historic_piece_number()
         counter_text = f"Pieces: {current_piece} of {total_pieces}"
+        filter_label = str(getattr(self, "historic_filter_label", "") or "").strip()
+        has_filter_label = bool(filter_label)
         counter_font_scale = 0.9
         counter_thickness = 2
         counter_color = (0, 0, 0)  # Black text
         
         counter_size = cv2.getTextSize(counter_text, font, counter_font_scale, counter_thickness)[0]
+        filter_font_scale = 0.58
+        filter_thickness = 2
+        filter_text = ""
+        filter_size = (0, 0)
+        if has_filter_label:
+            filter_total = int(getattr(self, "historic_filter_total_count", 0) or 0)
+            if filter_total > total_pieces:
+                filter_label_text = f"Filter: {filter_label} ({total_pieces}/{filter_total} local)"
+            else:
+                filter_label_text = f"Filter: {filter_label}"
+            filter_text = self._truncate_text_to_width(
+                filter_label_text,
+                font,
+                filter_font_scale,
+                filter_thickness,
+                260,
+            )
+            filter_size = cv2.getTextSize(filter_text, font, filter_font_scale, filter_thickness)[0]
         counter_padding_x = 18
         counter_padding_y = 12
-        counter_width = counter_size[0] + (counter_padding_x * 2)
-        counter_height = max(40, counter_size[1] + (counter_padding_y * 2))
+        counter_width = max(counter_size[0], filter_size[0]) + (counter_padding_x * 2)
+        counter_height = max(
+            40,
+            counter_size[1] + (counter_padding_y * 2) + (filter_size[1] + 8 if has_filter_label else 0),
+        )
         counter_x = x_draw + (w_draw - counter_width) // 2 - self.right_info_shift
         counter_y = y_draw - counter_height - 16
         self.piece_counter_rect = (counter_x, counter_y, counter_width, counter_height)
@@ -2667,9 +2707,21 @@ class DisplayWindow:
 
 
         text_x = counter_x + (counter_width - counter_size[0]) // 2
-        text_y = counter_y + counter_height - 12
+        text_y = counter_y + 28 if has_filter_label else counter_y + counter_height - 12
         cv2.putText(canvas, counter_text, (text_x, text_y), font, counter_font_scale,
                    counter_color, counter_thickness)
+        if has_filter_label:
+            filter_x = counter_x + (counter_width - filter_size[0]) // 2
+            filter_y = counter_y + counter_height - 12
+            cv2.putText(
+                canvas,
+                filter_text,
+                (filter_x, filter_y),
+                font,
+                filter_font_scale,
+                (70, 70, 70),
+                filter_thickness,
+            )
         
         return canvas
 
@@ -4605,14 +4657,16 @@ class DisplayWindow:
 
             color = self._overlay_color(overlay.get("class_name"))
             pts = np.array(scaled_points, dtype=np.int32).reshape((-1, 1, 2))
+            line_thickness = 1
+            xs = [point[0] for point in scaled_points]
+            ys = [point[1] for point in scaled_points]
+
             if geometry_type == "bbox" and len(scaled_points) >= 4:
-                xs = [point[0] for point in scaled_points]
-                ys = [point[1] for point in scaled_points]
-                cv2.rectangle(img, (min(xs), min(ys)), (max(xs), max(ys)), color, 3)
-                label_x, label_y = min(xs), min(ys)
+                cv2.rectangle(img, (min(xs), min(ys)), (max(xs), max(ys)), color, line_thickness)
+                label_x, label_y = min(xs), max(ys)
             else:
-                cv2.polylines(img, [pts], isClosed=True, color=color, thickness=3)
-                label_x, label_y = scaled_points[0]
+                cv2.polylines(img, [pts], isClosed=True, color=color, thickness=line_thickness)
+                label_x, label_y = min(xs), max(ys)
 
             class_name = str(overlay.get("class_name") or "").strip()
             confidence = overlay.get("confidence")
@@ -4628,7 +4682,10 @@ class DisplayWindow:
                 thickness = 1
                 text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
                 text_x = max(0, min(target_w - text_size[0] - 4, int(label_x)))
-                text_y = max(text_size[1] + 6, min(target_h - 4, int(label_y) - 6))
+                text_y = max(
+                    text_size[1] + 6,
+                    min(target_h - 4, int(label_y) + text_size[1] + 8),
+                )
                 cv2.rectangle(
                     img,
                     (text_x, text_y - text_size[1] - 6),
