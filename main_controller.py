@@ -1878,9 +1878,9 @@ class MainController:
         self.dataset_transfer_active = True
         d.sync_in_progress = True
         d.sync_progress = 0
-        d.sync_stage = "Preparing stats report..."
-        d.sync_progress_title = "Exporting Stats Report"
-        d.sync_progress_helper_text = "Building the piece stats Excel report from the current database state."
+        d.sync_stage = "Preparing Excel reports..."
+        d.sync_progress_title = "Exporting Excel Reports"
+        d.sync_progress_helper_text = "Building the stats matrix and model OK/NOK Excel reports."
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -1892,16 +1892,16 @@ class MainController:
                 worker_state = self._pause_dataset_background_workers()
 
                 from db import get_db_connection
-                from report_exporter import export_stats_report
+                from report_exporter import export_combined_traceability_report
 
                 worker_db = get_db_connection()
                 self._set_sync_progress(
                     "Collecting piece stats...",
                     25,
-                    title="Exporting Stats Report",
-                    helper_text="Building the piece stats Excel report from the current database state.",
+                    title="Exporting Excel Reports",
+                    helper_text="Building the stats matrix and model OK/NOK Excel reports.",
                 )
-                report_path = export_stats_report(
+                report_path = export_combined_traceability_report(
                     self,
                     db_client=worker_db,
                     output_dir=output_dir,
@@ -1910,23 +1910,23 @@ class MainController:
                 self._set_sync_progress(
                     "Writing workbook...",
                     90,
-                    title="Exporting Stats Report",
-                    helper_text="Building the piece stats Excel report from the current database state.",
+                    title="Exporting Excel Reports",
+                    helper_text="Building the stats matrix and model OK/NOK Excel reports.",
                 )
                 self._set_sync_progress(
                     "Completed",
                     100,
-                    title="Exporting Stats Report",
-                    helper_text="Building the piece stats Excel report from the current database state.",
+                    title="Exporting Excel Reports",
+                    helper_text="Building the stats matrix and model OK/NOK Excel reports.",
                 )
-                d.sync_message = f"Stats report exported: {report_name}"
+                d.sync_message = f"Excel report exported: {report_name}"
                 d.sync_message_is_error = False
                 self.logger.info(
                     f"[STATS_REPORT] Export completed: {report_path}",
                     allow_repeat=True,
                 )
             except Exception as exc:
-                d.sync_message = f"Stats report export failed: {exc}"
+                d.sync_message = f"Excel report export failed: {exc}"
                 d.sync_message_is_error = True
                 self.logger.error(
                     f"[STATS_REPORT] Export failed: {exc}",

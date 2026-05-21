@@ -361,13 +361,109 @@ def _package_relative_path(package_path, child_path):
 
 
 def _write_traceability_report(package_path, db_client):
-    from report_exporter import TRACEABILITY_REPORT_KIND, export_ok_nok_traceability_report
+    from types import SimpleNamespace
+
+    from report_exporter import TRACEABILITY_REPORT_KIND, export_combined_traceability_report
 
     reports_dir = os.path.join(package_path, "reports")
-    report_path = export_ok_nok_traceability_report(db_client, reports_dir)
+    controller = SimpleNamespace(
+        display=SimpleNamespace(db=db_client),
+        build_piece_stats_report=lambda db_client=None: _build_piece_stats_report_for_export(
+            db_client=db_client
+        ),
+    )
+    report_path = export_combined_traceability_report(
+        controller,
+        db_client=db_client,
+        output_dir=reports_dir,
+    )
     return {
         "kind": TRACEABILITY_REPORT_KIND,
         "path": _package_relative_path(package_path, report_path),
+    }
+
+
+def _build_piece_stats_report_for_export(db_client):
+    statuses = ("OK", "NOK", "FOK", "FNOK")
+    aggregate_rows = db_client.fetch(
+        "SELECT COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name, "
+        "pr.final_result, COUNT(*) AS piece_count "
+        "FROM piece_result pr "
+        "LEFT JOIN piece_result_defects prd ON prd.piece_result_id = pr.id "
+        "WHERE pr.final_result IN ('OK', 'NOK', 'FOK', 'FNOK') "
+        "GROUP BY COALESCE(prd.class_name, 'UNCLASSIFIED'), pr.final_result"
+    )
+    date_range_rows = db_client.fetch(
+        "SELECT MIN(created_at) AS start_at, MAX(created_at) AS end_at "
+        "FROM piece_result"
+    )
+
+    row_map = {}
+    for row in aggregate_rows or []:
+        status = str(row.get("final_result") or "").strip().upper()
+        if status not in statuses:
+            continue
+        class_name = str(row.get("class_name") or "").strip() or "UNCLASSIFIED"
+        normalized_name = class_name.upper()
+        if normalized_name == "OK":
+            class_name = "OK"
+        elif normalized_name == "UNCLASSIFIED":
+            class_name = "UNCLASSIFIED"
+        row_entry = row_map.setdefault(
+            class_name,
+            {
+                "class_name": class_name,
+                "OK": 0,
+                "NOK": 0,
+                "FOK": 0,
+                "FNOK": 0,
+                "Total": 0,
+                "is_total": False,
+            },
+        )
+        try:
+            piece_count = int(row.get("piece_count", 0) or 0)
+        except (TypeError, ValueError):
+            piece_count = 0
+        row_entry[status] += piece_count
+        row_entry["Total"] += piece_count
+
+    ordered_labels = []
+    if "OK" in row_map:
+        ordered_labels.append("OK")
+    ordered_labels.extend(
+        sorted(
+            [
+                label
+                for label in row_map
+                if label not in {"OK", "UNCLASSIFIED"}
+            ],
+            key=lambda label: (-row_map[label]["Total"], str(label).lower()),
+        )
+    )
+    if "UNCLASSIFIED" in row_map:
+        ordered_labels.append("UNCLASSIFIED")
+
+    rows = [row_map[label] for label in ordered_labels]
+    if rows:
+        rows.append(
+            {
+                "class_name": "Total",
+                "OK": sum(row["OK"] for row in rows),
+                "NOK": sum(row["NOK"] for row in rows),
+                "FOK": sum(row["FOK"] for row in rows),
+                "FNOK": sum(row["FNOK"] for row in rows),
+                "Total": sum(row["Total"] for row in rows),
+                "is_total": True,
+            }
+        )
+
+    range_row = (date_range_rows or [{}])[0]
+    return {
+        "columns": list(statuses) + ["Total"],
+        "rows": rows,
+        "start_at": range_row.get("start_at"),
+        "end_at": range_row.get("end_at"),
     }
 
 

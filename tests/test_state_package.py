@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -245,6 +246,36 @@ class FakePackageDB:
                     "model_result": row.get("model_result"),
                 }
                 for row in sorted(self.piece_result, key=lambda row: row["jsn"])
+            ]
+        if normalized.startswith(
+            "SELECT COALESCE(prd.class_name, 'UNCLASSIFIED') AS class_name, pr.final_result, COUNT(*) AS piece_count FROM piece_result pr"
+        ):
+            counts = Counter()
+            defects_by_piece = {}
+            for defect in self.piece_result_defects:
+                defects_by_piece.setdefault(defect["piece_result_id"], []).append(defect)
+            for piece in self.piece_result:
+                final_result = piece.get("final_result")
+                if final_result not in {"OK", "NOK", "FOK", "FNOK"}:
+                    continue
+                defects = defects_by_piece.get(piece["id"]) or [{"class_name": "UNCLASSIFIED"}]
+                for defect in defects:
+                    counts[(defect.get("class_name") or "UNCLASSIFIED", final_result)] += 1
+            return [
+                {
+                    "class_name": class_name,
+                    "final_result": final_result,
+                    "piece_count": count,
+                }
+                for (class_name, final_result), count in sorted(counts.items())
+            ]
+        if normalized == "SELECT MIN(created_at) AS start_at, MAX(created_at) AS end_at FROM piece_result":
+            values = [row.get("created_at") for row in self.piece_result if row.get("created_at")]
+            return [
+                {
+                    "start_at": min(values) if values else None,
+                    "end_at": max(values) if values else None,
+                }
             ]
         if normalized.startswith(
             "SELECT ci.img_name, pr.jsn, ci.operator_result, ci.model_result, ci.created_at FROM classified_images"
@@ -517,6 +548,7 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue(report_path.is_file())
 
             workbook = load_workbook(report_path)
+            self.assertIn("Stats", workbook.sheetnames)
             self.assertEqual(workbook["Resumen OK-NOK"]["C2"].value, 2)
             self.assertEqual(workbook["Resumen OK-NOK"]["D2"].value, 0)
             self.assertEqual(workbook["Por hora"]["B3"].value, "07")

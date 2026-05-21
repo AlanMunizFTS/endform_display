@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 from openpyxl import load_workbook
 
 from report_exporter import (
+    export_combined_traceability_report,
     export_ok_nok_traceability_report,
     export_stats_report,
     parse_jsn_datetime,
@@ -108,6 +109,44 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(sheet["B2"].value, 15)
             self.assertEqual(sheet["A4"].value, "Total")
             self.assertEqual(sheet["F4"].value, 23)
+
+    def test_export_combined_traceability_report_includes_stats_matrix_sheet(self):
+        db = FakeTraceabilityDB(
+            [
+                {"jsn": "218620514260607413863", "model_result": "OK"},
+                {"jsn": "218620514260645413864", "model_result": "OK"},
+                {"jsn": "218620514260807413865", "model_result": "NOK"},
+            ]
+        )
+        controller = MagicMock()
+        controller.display.db = db
+        controller.build_piece_stats_report.return_value = {
+            "rows": [
+                {"class_name": "OK", "OK": 2, "NOK": 0, "FOK": 0, "FNOK": 0, "Total": 2},
+                {"class_name": "scratch", "OK": 0, "NOK": 1, "FOK": 0, "FNOK": 0, "Total": 1},
+                {"class_name": "Total", "OK": 2, "NOK": 1, "FOK": 0, "FNOK": 0, "Total": 3, "is_total": True},
+            ],
+            "start_at": datetime.datetime(2026, 5, 14, 6, 0),
+            "end_at": datetime.datetime(2026, 5, 14, 8, 0),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = export_combined_traceability_report(
+                controller,
+                db_client=db,
+                output_dir=tmp_dir,
+                created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+            )
+
+            path = Path(output_path)
+            self.assertEqual(path.name, "desglose_ok_nok_20260514_093000.xlsx")
+            workbook = load_workbook(path)
+            self.assertEqual(
+                workbook.sheetnames,
+                ["Resumen OK-NOK", "Por dia", "Por hora", "Advertencias", "Stats"],
+            )
+            self.assertEqual(workbook["Resumen OK-NOK"]["E2"].value, 3)
+            self.assertEqual(workbook["Stats"]["F4"].value, 3)
 
     def test_export_stats_report_requires_valid_db_date_range(self):
         controller = MagicMock()

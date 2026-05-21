@@ -204,7 +204,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             fake_db.close.assert_called_once_with()
 
     @patch("main_controller.Thread", _ImmediateThread)
-    def test_start_export_piece_stats_report_async_reports_workbook_name(self):
+    def test_start_export_piece_stats_report_async_exports_combined_workbook(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             fake_db = MagicMock()
             display = self._build_display(db=fake_db)
@@ -223,8 +223,8 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
             with patch("db.get_db_connection", return_value=fake_db):
                 with patch(
-                    "report_exporter.export_stats_report",
-                    return_value=f"{tmp_dir}\\reports\\reporte_20260424_1015_20260424_1115.xlsx",
+                    "report_exporter.export_combined_traceability_report",
+                    return_value=f"{tmp_dir}\\reports\\desglose_ok_nok_20260424_101500.xlsx",
                 ) as export_mock:
                     controller.start_export_piece_stats_report_async()
 
@@ -237,10 +237,10 @@ class TestMainControllerStatePackage(unittest.TestCase):
             )
             controller.start_remote_db_polling.assert_called_once_with()
             self.assertFalse(display.sync_in_progress)
-            self.assertEqual(display.sync_progress_title, "Exporting Stats Report")
+            self.assertEqual(display.sync_progress_title, "Exporting Excel Reports")
             self.assertEqual(
                 display.sync_message,
-                "Stats report exported: reporte_20260424_1015_20260424_1115.xlsx",
+                "Excel report exported: desglose_ok_nok_20260424_101500.xlsx",
             )
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()

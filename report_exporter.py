@@ -200,11 +200,8 @@ def _write_count_row(
             cell.number_format = "0.00%"
 
 
-def export_ok_nok_traceability_report(db_client, output_dir, created_at=None):
+def _build_traceability_workbook(db_client):
     report_data = build_ok_nok_traceability_report(db_client)
-    report_dir = Path(output_dir)
-    report_dir.mkdir(parents=True, exist_ok=True)
-
     workbook = Workbook()
     header_fill = PatternFill(fill_type="solid", fgColor="404040")
     total_fill = PatternFill(fill_type="solid", fgColor="6E6E6E")
@@ -310,25 +307,12 @@ def export_ok_nok_traceability_report(db_client, output_dir, created_at=None):
             )
             sheet.column_dimensions[column_letter].width = min(max(max_width + 2, 12), 42)
 
-    filename = _format_traceability_filename(created_at=created_at)
-    output_path = report_dir / filename
-    workbook.save(output_path)
-    return str(output_path)
+    return workbook
 
 
-def export_stats_report(controller, db_client=None, output_dir=None):
-    report_data = controller.build_piece_stats_report(db_client=db_client)
-    matrix_rows = list(report_data.get("rows") or [])
-    if not matrix_rows:
-        raise ValueError("No piece stats available to export")
-
-    report_dir = Path(output_dir or REPORTS_DIR)
-    report_dir.mkdir(parents=True, exist_ok=True)
-
-    workbook = Workbook()
-    sheet = workbook.active
+def _add_stats_matrix_sheet(workbook, matrix_rows, sheet=None):
+    sheet = sheet or workbook.create_sheet("Stats")
     sheet.title = "Stats"
-
     header_fill = PatternFill(fill_type="solid", fgColor="404040")
     total_fill = PatternFill(fill_type="solid", fgColor="6E6E6E")
     header_font = Font(color="FFFFFF", bold=True)
@@ -337,11 +321,7 @@ def export_stats_report(controller, db_client=None, output_dir=None):
     left = Alignment(horizontal="left", vertical="center")
 
     headers = ["Class Name", *STATUS_COLUMNS]
-    for col_idx, header in enumerate(headers, start=1):
-        cell = sheet.cell(row=1, column=col_idx, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
+    _apply_headers(sheet, headers, header_fill, header_font, center)
 
     for row_idx, row in enumerate(matrix_rows, start=2):
         values = [
@@ -364,6 +344,50 @@ def export_stats_report(controller, db_client=None, output_dir=None):
     sheet.column_dimensions["A"].width = 28
     for column_letter in ("B", "C", "D", "E", "F"):
         sheet.column_dimensions[column_letter].width = 12
+    return sheet
+
+
+def export_ok_nok_traceability_report(db_client, output_dir=None, created_at=None):
+    report_dir = Path(output_dir or REPORTS_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    workbook = _build_traceability_workbook(db_client)
+    filename = _format_traceability_filename(created_at=created_at)
+    output_path = report_dir / filename
+    workbook.save(output_path)
+    return str(output_path)
+
+
+def export_combined_traceability_report(controller, db_client=None, output_dir=None, created_at=None):
+    db = db_client or getattr(controller.display, "db", None)
+    if db is None:
+        raise ValueError("No database connection available")
+
+    matrix_data = controller.build_piece_stats_report(db_client=db)
+    matrix_rows = list(matrix_data.get("rows") or [])
+    if not matrix_rows:
+        raise ValueError("No piece stats available to export")
+
+    report_dir = Path(output_dir or REPORTS_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    workbook = _build_traceability_workbook(db)
+    _add_stats_matrix_sheet(workbook, matrix_rows)
+    filename = _format_traceability_filename(created_at=created_at)
+    output_path = report_dir / filename
+    workbook.save(output_path)
+    return str(output_path)
+
+
+def export_stats_report(controller, db_client=None, output_dir=None):
+    report_data = controller.build_piece_stats_report(db_client=db_client)
+    matrix_rows = list(report_data.get("rows") or [])
+    if not matrix_rows:
+        raise ValueError("No piece stats available to export")
+
+    report_dir = Path(output_dir or REPORTS_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    workbook = Workbook()
+    _add_stats_matrix_sheet(workbook, matrix_rows, sheet=workbook.active)
 
     filename = _format_report_filename(
         report_data.get("start_at"),
