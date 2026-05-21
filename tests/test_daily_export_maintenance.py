@@ -122,40 +122,20 @@ class TestDailyExportMaintenance(unittest.TestCase):
             self.assertFalse(runner.start_async())
             export_mock.assert_not_called()
 
-    def test_cleanup_deletes_oldest_exports_only_until_space_is_enough(self):
+    def test_storage_check_passes_when_space_is_enough(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             runner, _controller, _db = self._build_runner(tmp_dir)
-            exports_dir = runner.exports_dir
-            exports_dir.mkdir(parents=True)
-            old_export = exports_dir / "display_state_20260517_054000"
-            new_export = exports_dir / "display_state_20260518_054000"
-            old_export.mkdir()
-            new_export.mkdir()
-            (old_export / "payload.bin").write_bytes(b"a" * 500)
-            (new_export / "payload.bin").write_bytes(b"b" * 500)
-            old_time = 1000
-            new_time = 2000
-            for path in (old_export, old_export / "payload.bin"):
-                path.touch()
-            for path in (new_export, new_export / "payload.bin"):
-                path.touch()
-            import os
-
-            os.utime(old_export, (old_time, old_time))
-            os.utime(new_export, (new_time, new_time))
 
             with patch(
                 "daily_export_maintenance.shutil.disk_usage",
-                return_value=SimpleNamespace(free=100),
+                return_value=SimpleNamespace(free=10_000),
             ):
-                result = runner._cleanup_exports_for_required_space(450)
+                result = runner._check_export_storage(450)
 
             self.assertTrue(result["ok"])
-            self.assertFalse(old_export.exists())
-            self.assertTrue(new_export.exists())
-            self.assertEqual(len(result["deleted"]), 1)
+            self.assertEqual(result["available_free_bytes"], 10_000)
 
-    def test_cleanup_aborts_when_exports_cannot_free_enough_space(self):
+    def test_storage_check_aborts_without_deleting_exports_when_space_is_low(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             runner, _controller, _db = self._build_runner(tmp_dir)
             exports_dir = runner.exports_dir
@@ -168,10 +148,35 @@ class TestDailyExportMaintenance(unittest.TestCase):
                 "daily_export_maintenance.shutil.disk_usage",
                 return_value=SimpleNamespace(free=0),
             ):
-                result = runner._cleanup_exports_for_required_space(500)
+                result = runner._check_export_storage(500)
 
             self.assertFalse(result["ok"])
-            self.assertFalse(old_export.exists())
+            self.assertTrue(old_export.exists())
+
+    @patch("daily_export_maintenance.Thread", _ImmediateThread)
+    @patch("daily_export_maintenance.estimate_display_state_export_size")
+    @patch("daily_export_maintenance.export_display_state")
+    def test_low_storage_does_not_export_reset_truncate_or_delete(self, export_mock, estimate_mock):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner, controller, db = self._build_runner(tmp_dir)
+            exports_dir = runner.exports_dir
+            exports_dir.mkdir(parents=True)
+            old_export = exports_dir / "display_state_20260517_054000"
+            old_export.mkdir()
+            (old_export / "payload.bin").write_bytes(b"a" * 100)
+            estimate_mock.return_value = {"ok": True, "required_bytes": 500}
+
+            with patch("db.get_db_connection", return_value=db), patch(
+                "daily_export_maintenance.shutil.disk_usage",
+                return_value=SimpleNamespace(free=0),
+            ):
+                self.assertTrue(runner.tick())
+
+            self.assertTrue(old_export.exists())
+            export_mock.assert_not_called()
+            controller.perform_reset.assert_not_called()
+            db.truncate_app_tables.assert_not_called()
+            self.assertTrue(controller.display.sync_message_is_error)
 
     @patch("daily_export_maintenance.Thread", _ImmediateThread)
     @patch("daily_export_maintenance.estimate_display_state_export_size")

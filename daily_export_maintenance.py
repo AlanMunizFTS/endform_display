@@ -131,9 +131,11 @@ class DailyExportMaintenance:
                 raise RuntimeError(estimate.get("error", "Unable to estimate export size"))
 
             required_bytes = int(estimate.get("required_bytes", 0) or 0)
-            cleanup = self._cleanup_exports_for_required_space(required_bytes)
-            if not cleanup.get("ok", False):
-                raise RuntimeError(cleanup.get("error", "Not enough storage for export"))
+            storage_check = self._check_export_storage(required_bytes)
+            if not storage_check.get("ok", False):
+                raise RuntimeError(
+                    storage_check.get("error", "Not enough storage for export")
+                )
 
             self._set_progress("Creating export...", 15)
 
@@ -238,7 +240,7 @@ class DailyExportMaintenance:
         fraction = max(0.0, min(1.0, float(done) / float(total)))
         return int(start + ((end - start) * fraction))
 
-    def _cleanup_exports_for_required_space(self, required_bytes):
+    def _check_export_storage(self, required_bytes):
         self.file_manager.makedirs(str(self.exports_dir), exist_ok=True)
         disk_root = str(self.exports_dir.resolve())
         usage = shutil.disk_usage(disk_root)
@@ -247,91 +249,21 @@ class DailyExportMaintenance:
         if initial_free >= target_free:
             return {
                 "ok": True,
-                "deleted": [],
-                "freed_bytes": 0,
                 "required_bytes": required_bytes,
                 "target_free_bytes": target_free,
-                "initial_free_bytes": initial_free,
-            }
-
-        deleted = []
-        freed_bytes = 0
-        for candidate in self._list_export_cleanup_candidates():
-            if initial_free + freed_bytes >= target_free:
-                break
-            size = self._entry_size(candidate)
-            self._remove_export_candidate(candidate)
-            deleted.append(str(candidate))
-            freed_bytes += size
-
-        if initial_free + freed_bytes < target_free:
-            return {
-                "ok": False,
-                "deleted": deleted,
-                "freed_bytes": freed_bytes,
-                "required_bytes": required_bytes,
-                "target_free_bytes": target_free,
-                "initial_free_bytes": initial_free,
-                "error": (
-                    "Not enough storage for daily export after cleaning old exports "
-                    f"(need {target_free} free bytes, available {initial_free + freed_bytes})"
-                ),
+                "available_free_bytes": initial_free,
             }
 
         return {
-            "ok": True,
-            "deleted": deleted,
-            "freed_bytes": freed_bytes,
+            "ok": False,
             "required_bytes": required_bytes,
             "target_free_bytes": target_free,
-            "initial_free_bytes": initial_free,
+            "available_free_bytes": initial_free,
+            "error": (
+                "Not enough storage for daily export/reset; export and reset were skipped "
+                f"(need {target_free} free bytes, available {initial_free})"
+            ),
         }
-
-    def _list_export_cleanup_candidates(self):
-        exports_root = self.exports_dir.resolve()
-        candidates = []
-        for entry in self.exports_dir.iterdir():
-            if entry.name == self.state_path.name:
-                continue
-            if not self._is_cleanup_candidate(entry):
-                continue
-            try:
-                resolved = entry.resolve()
-                if os.path.commonpath([str(exports_root), str(resolved)]) != str(exports_root):
-                    continue
-                candidates.append(entry)
-            except Exception:
-                continue
-        return sorted(candidates, key=lambda path: (path.stat().st_mtime, path.name))
-
-    def _is_cleanup_candidate(self, path):
-        name = path.name
-        return name.startswith("display_state_") or name.endswith(".partial")
-
-    def _entry_size(self, path):
-        if path.is_file():
-            return int(path.stat().st_size)
-        total = 0
-        for root, _dirs, files in os.walk(path):
-            for file_name in files:
-                file_path = Path(root) / file_name
-                try:
-                    total += int(file_path.stat().st_size)
-                except OSError:
-                    pass
-        return total
-
-    def _remove_export_candidate(self, path):
-        exports_root = self.exports_dir.resolve()
-        resolved = path.resolve()
-        if os.path.commonpath([str(exports_root), str(resolved)]) != str(exports_root):
-            raise ValueError(f"Refusing to delete outside exports directory: {path}")
-        if resolved == exports_root:
-            raise ValueError("Refusing to delete exports directory")
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
 
     def _load_state(self):
         try:
