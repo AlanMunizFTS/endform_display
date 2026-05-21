@@ -19,7 +19,7 @@ class FakeTraceabilityDB:
 
     def fetch(self, query, data=None):
         normalized = " ".join(query.split())
-        if normalized == "SELECT jsn, final_result FROM piece_result ORDER BY jsn":
+        if normalized == "SELECT jsn, model_result FROM piece_result ORDER BY jsn":
             return sorted(self.rows, key=lambda row: row["jsn"])
         raise AssertionError(f"Unhandled query: {normalized}")
 
@@ -33,10 +33,10 @@ class TestReportExporter(unittest.TestCase):
     def test_export_ok_nok_traceability_report_groups_by_day_and_hour(self):
         db = FakeTraceabilityDB(
             [
-                {"jsn": "218620514260607413863", "final_result": "OK"},
-                {"jsn": "218620514260645413864", "final_result": "FOK"},
-                {"jsn": "218620514260807413865", "final_result": "FNOK"},
-                {"jsn": "bad-jsn", "final_result": "NOK"},
+                {"jsn": "218620514260607413863", "model_result": "OK"},
+                {"jsn": "218620514260645413864", "model_result": "OK"},
+                {"jsn": "218620514260807413865", "model_result": "NOK"},
+                {"jsn": "bad-jsn", "model_result": "NOK"},
             ]
         )
 

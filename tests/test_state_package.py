@@ -238,11 +238,11 @@ class FakePackageDB:
                 }
                 for row in sorted(self.piece_result, key=lambda row: row["jsn"])
             ]
-        if normalized == "SELECT jsn, final_result FROM piece_result ORDER BY jsn":
+        if normalized == "SELECT jsn, model_result FROM piece_result ORDER BY jsn":
             return [
                 {
                     "jsn": row["jsn"],
-                    "final_result": row.get("final_result"),
+                    "model_result": row.get("model_result"),
                 }
                 for row in sorted(self.piece_result, key=lambda row: row["jsn"])
             ]
@@ -494,7 +494,7 @@ class TestStatePackage(unittest.TestCase):
                         "id": 2,
                         "jsn": "218620514260807413864",
                         "operator_result": "NOK",
-                        "model_result": "NOK",
+                        "model_result": "OK",
                         "final_result": "FNOK",
                         "created_at": "2026-03-26 10:05:00",
                     },
@@ -517,8 +517,8 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue(report_path.is_file())
 
             workbook = load_workbook(report_path)
-            self.assertEqual(workbook["Resumen OK-NOK"]["C2"].value, 1)
-            self.assertEqual(workbook["Resumen OK-NOK"]["D2"].value, 1)
+            self.assertEqual(workbook["Resumen OK-NOK"]["C2"].value, 2)
+            self.assertEqual(workbook["Resumen OK-NOK"]["D2"].value, 0)
             self.assertEqual(workbook["Por hora"]["B3"].value, "07")
             self.assertEqual(workbook["Por hora"]["F3"].value, 0)
 

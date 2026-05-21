@@ -40,7 +40,7 @@ def _normalize_traceability_result(value):
 def _fetch_traceability_piece_rows(db_client):
     return list(
         db_client.fetch(
-            "SELECT jsn, final_result FROM piece_result ORDER BY jsn"
+            "SELECT jsn, model_result FROM piece_result ORDER BY jsn"
         )
         or []
     )
@@ -53,13 +53,13 @@ def build_ok_nok_traceability_report(db_client):
 
     for row in rows:
         jsn = row.get("jsn") if hasattr(row, "get") else row[0]
-        final_result = row.get("final_result") if hasattr(row, "get") else row[1]
-        normalized_result = _normalize_traceability_result(final_result)
+        model_result = row.get("model_result") if hasattr(row, "get") else row[1]
+        normalized_result = _normalize_traceability_result(model_result)
         if normalized_result is None:
             warnings.append(
                 {
                     "jsn": jsn,
-                    "reason": f"Unsupported final_result: {final_result}",
+                    "reason": f"Unsupported model_result: {model_result}",
                 }
             )
             continue
