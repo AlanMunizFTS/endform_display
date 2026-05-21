@@ -6,6 +6,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from openpyxl import load_workbook
+
 from file_manager import FileManager
 from state_package import (
     estimate_display_state_export_size,
@@ -233,6 +235,14 @@ class FakePackageDB:
                     "operator_result": row["operator_result"],
                     "model_result": row["model_result"],
                     "created_at": row["created_at"],
+                }
+                for row in sorted(self.piece_result, key=lambda row: row["jsn"])
+            ]
+        if normalized == "SELECT jsn, final_result FROM piece_result ORDER BY jsn":
+            return [
+                {
+                    "jsn": row["jsn"],
+                    "final_result": row.get("final_result"),
                 }
                 for row in sorted(self.piece_result, key=lambda row: row["jsn"])
             ]
@@ -467,6 +477,50 @@ class TestStatePackage(unittest.TestCase):
                 data_payload["classified_image_defects"][0]["coordinates"],
                 {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
             )
+
+    def test_export_display_state_includes_traceability_report(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = FakePackageDB(
+                piece_result=[
+                    {
+                        "id": 1,
+                        "jsn": "218620514260607413863",
+                        "operator_result": "OK",
+                        "model_result": "OK",
+                        "final_result": "FOK",
+                        "created_at": "2026-03-26 10:00:00",
+                    },
+                    {
+                        "id": 2,
+                        "jsn": "218620514260807413864",
+                        "operator_result": "NOK",
+                        "model_result": "NOK",
+                        "final_result": "FNOK",
+                        "created_at": "2026-03-26 10:05:00",
+                    },
+                ],
+            )
+            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (historic_dir / "218620514260607413863_A_side_OK.png").write_bytes(b"historic")
+
+            result = export_display_state(
+                controller,
+                output_dir=str(Path(tmp_dir) / "exports"),
+                db_client=source_db,
+            )
+
+            package_path = Path(result["package_path"])
+            manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
+            reports = manifest["traceability_reports"]
+            self.assertEqual(len(reports), 1)
+            report_path = package_path / reports[0]["path"]
+            self.assertTrue(report_path.is_file())
+
+            workbook = load_workbook(report_path)
+            self.assertEqual(workbook["Resumen OK-NOK"]["C2"].value, 1)
+            self.assertEqual(workbook["Resumen OK-NOK"]["D2"].value, 1)
+            self.assertEqual(workbook["Por hora"]["B3"].value, "07")
+            self.assertEqual(workbook["Por hora"]["F3"].value, 0)
 
     def test_estimate_display_state_export_size_includes_files_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

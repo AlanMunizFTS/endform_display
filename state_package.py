@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import tempfile
 from datetime import datetime
 from decimal import Decimal
 
@@ -153,22 +154,33 @@ def _build_data_payload(db_client):
     return payload
 
 
-def _build_manifest(historic_names, data_payload, image_extensions):
+def _build_manifest(
+    historic_names,
+    data_payload,
+    image_extensions,
+    annotated_names=None,
+    traceability_reports=None,
+    traceability_report_error=None,
+):
+    annotated_names = list(annotated_names or [])
+    traceability_reports = list(traceability_reports or [])
     return {
         "package_version": STATE_PACKAGE_VERSION,
         "package_kind": PACKAGE_KIND,
         "export_complete": True,
         "created_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "source_host": socket.gethostname(),
-        "annotated_count": 0,
+        "annotated_count": len(annotated_names),
         "historic_count": len(historic_names),
-        "annotated_images": [],
+        "annotated_images": annotated_names,
         "historic_images": list(historic_names),
         "table_counts": {
             table_name: len(rows)
             for table_name, rows in data_payload.items()
         },
         "image_extensions": list(image_extensions),
+        "traceability_reports": traceability_reports,
+        "traceability_report_error": traceability_report_error,
     }
 
 
@@ -341,6 +353,32 @@ def _write_text_file(path, content):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(content)
+
+
+def _package_relative_path(package_path, child_path):
+    relative_path = os.path.relpath(str(child_path), str(package_path))
+    return relative_path.replace(os.sep, "/")
+
+
+def _write_traceability_report(package_path, db_client):
+    from report_exporter import TRACEABILITY_REPORT_KIND, export_ok_nok_traceability_report
+
+    reports_dir = os.path.join(package_path, "reports")
+    report_path = export_ok_nok_traceability_report(db_client, reports_dir)
+    return {
+        "kind": TRACEABILITY_REPORT_KIND,
+        "path": _package_relative_path(package_path, report_path),
+    }
+
+
+def _estimate_traceability_report_size(db_client):
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            report = _write_traceability_report(tmp_dir, db_client)
+            report_path = os.path.join(tmp_dir, *report["path"].split("/"))
+            return int(os.path.getsize(report_path))
+    except Exception:
+        return 0
 
 
 def _build_unique_export_dir(file_manager, output_root):
@@ -734,7 +772,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     file_manager.makedirs(output_root, exist_ok=True)
     package_name, package_path = _build_unique_export_dir(file_manager, output_root)
     partial_package_path = f"{package_path}.partial"
-    total_steps = len(historic_names) + 3
+    total_steps = len(historic_names) + 4
     done = 0
 
     if callable(progress_callback):
@@ -752,6 +790,24 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     }
     for relative_path, content in metadata_files.items():
         _write_text_file(_package_file_path(partial_package_path, relative_path), content)
+
+    traceability_reports = []
+    traceability_report_error = None
+    try:
+        traceability_reports.append(_write_traceability_report(partial_package_path, db))
+    except Exception as exc:
+        traceability_report_error = str(exc)
+    manifest = _build_manifest(
+        historic_names=historic_names,
+        data_payload=data_payload,
+        image_extensions=image_extensions,
+        traceability_reports=traceability_reports,
+        traceability_report_error=traceability_report_error,
+    )
+
+    done += 1
+    if callable(progress_callback):
+        progress_callback(done, total_steps, "Writing traceability report")
 
     historic_package_dir = file_manager.join(partial_package_path, "historic")
     file_manager.makedirs(historic_package_dir, exist_ok=True)
@@ -801,11 +857,12 @@ def estimate_display_state_export_size(controller, db_client=None):
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
     manifest = _build_manifest(
-        annotated_names=annotated_names,
         historic_names=historic_names,
         data_payload=data_payload,
         image_extensions=image_extensions,
+        annotated_names=annotated_names,
     )
+    traceability_report_bytes = _estimate_traceability_report_size(db)
 
     files_size = 0
     for directory, names in (
@@ -822,13 +879,14 @@ def estimate_display_state_export_size(controller, db_client=None):
             _build_database_sql(data_payload),
             json.dumps(manifest, indent=2, sort_keys=True),
         )
-    )
+    ) + traceability_report_bytes
 
     return {
         "ok": True,
         "required_bytes": files_size + metadata_size,
         "files_bytes": files_size,
         "metadata_bytes": metadata_size,
+        "traceability_report_bytes": traceability_report_bytes,
         "annotated_count": len(annotated_names),
         "historic_count": len(historic_names),
         "table_counts": manifest["table_counts"],
