@@ -108,9 +108,9 @@ class TestSettings(unittest.TestCase):
         ):
             self.assertTrue(settings.is_historic_download_remote_jsn_validation_enabled())
 
-    def test_daily_export_reset_enabled_by_default(self):
+    def test_daily_export_reset_disabled_by_default(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertTrue(settings.is_daily_export_reset_enabled())
+            self.assertFalse(settings.is_daily_export_reset_enabled())
 
     def test_daily_export_reset_disabled_for_falsey_values(self):
         falsey_values = ("", "0", "false", "off", "no")

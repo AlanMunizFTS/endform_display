@@ -103,7 +103,7 @@ def is_historic_download_remote_jsn_validation_enabled():
 
 def is_daily_export_reset_enabled():
     """Return whether the scheduled daily export/reset workflow is enabled."""
-    return _get_bool_env("APP_DAILY_EXPORT_RESET_ENABLED", default=True)
+    return _get_bool_env("APP_DAILY_EXPORT_RESET_ENABLED", default=False)
 
 
 def get_optional_sftp_settings():
