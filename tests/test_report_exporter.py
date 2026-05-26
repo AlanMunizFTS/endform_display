@@ -26,6 +26,25 @@ class FakeTraceabilityDB:
 
 
 class TestReportExporter(unittest.TestCase):
+    def assert_stats_matrix_chart(self, sheet, expected_last_data_row):
+        self.assertEqual(len(sheet._charts), 1)
+        chart = sheet._charts[0]
+        self.assertEqual(chart.type, "col")
+        self.assertEqual(chart.grouping, "stacked")
+        self.assertEqual(chart.overlap, 100.0)
+        self.assertEqual(chart.anchor._from.col, 7)
+        self.assertEqual(chart.anchor._from.row, 1)
+
+        expected_category_range = f"'Stats'!$A$2:$A${expected_last_data_row}"
+        expected_value_ranges = [
+            f"'Stats'!${column}$2:${column}${expected_last_data_row}"
+            for column in ("B", "C", "D", "E")
+        ]
+        self.assertEqual(len(chart.series), len(expected_value_ranges))
+        for series, expected_value_range in zip(chart.series, expected_value_ranges):
+            self.assertEqual(series.val.numRef.f, expected_value_range)
+            self.assertEqual(series.cat.numRef.f, expected_category_range)
+
     def test_parse_jsn_datetime_reads_date_and_time_tokens(self):
         parsed = parse_jsn_datetime("218620514260607413863")
 
@@ -109,6 +128,7 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(sheet["B2"].value, 15)
             self.assertEqual(sheet["A4"].value, "Total")
             self.assertEqual(sheet["F4"].value, 23)
+            self.assert_stats_matrix_chart(sheet, expected_last_data_row=3)
 
     def test_export_combined_traceability_report_includes_stats_matrix_sheet(self):
         db = FakeTraceabilityDB(
@@ -146,7 +166,36 @@ class TestReportExporter(unittest.TestCase):
                 ["Resumen OK-NOK", "Por dia", "Por hora", "Advertencias", "Stats"],
             )
             self.assertEqual(workbook["Resumen OK-NOK"]["E2"].value, 3)
-            self.assertEqual(workbook["Stats"]["F4"].value, 3)
+            stats_sheet = workbook["Stats"]
+            self.assertEqual(stats_sheet["F4"].value, 3)
+            self.assert_stats_matrix_chart(stats_sheet, expected_last_data_row=3)
+
+    def test_export_stats_report_skips_chart_when_matrix_has_only_total_row(self):
+        controller = MagicMock()
+        controller.build_piece_stats_report.return_value = {
+            "rows": [
+                {
+                    "class_name": "Total",
+                    "OK": 0,
+                    "NOK": 0,
+                    "FOK": 0,
+                    "FNOK": 0,
+                    "Total": 0,
+                    "is_total": True,
+                },
+            ],
+            "start_at": datetime.datetime(2026, 3, 25, 9, 0),
+            "end_at": datetime.datetime(2026, 3, 25, 12, 0),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_path = export_stats_report(controller, output_dir=tmp_dir)
+
+            workbook = load_workbook(output_path)
+            sheet = workbook["Stats"]
+            self.assertEqual(sheet["A2"].value, "Total")
+            self.assertEqual(sheet["F2"].value, 0)
+            self.assertEqual(sheet._charts, [])
 
     def test_export_stats_report_requires_valid_db_date_range(self):
         controller = MagicMock()

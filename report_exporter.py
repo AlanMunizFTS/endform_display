@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from paths_config import REPORTS_DIR
@@ -310,6 +311,34 @@ def _build_traceability_workbook(db_client):
     return workbook
 
 
+def _add_stats_matrix_chart(sheet, matrix_rows):
+    data_row_count = 0
+    for row in matrix_rows:
+        if row.get("is_total"):
+            break
+        data_row_count += 1
+
+    if data_row_count < 1:
+        return
+
+    max_row = data_row_count + 1
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "stacked"
+    chart.overlap = 100
+    chart.title = "Stats Matrix"
+    chart.y_axis.title = "Pieces"
+    chart.x_axis.title = "Class Name"
+    chart.height = 7.5
+    chart.width = 16
+
+    data = Reference(sheet, min_col=2, max_col=5, min_row=1, max_row=max_row)
+    categories = Reference(sheet, min_col=1, min_row=2, max_row=max_row)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(categories)
+    sheet.add_chart(chart, "H2")
+
+
 def _add_stats_matrix_sheet(workbook, matrix_rows, sheet=None):
     sheet = sheet or workbook.create_sheet("Stats")
     sheet.title = "Stats"
@@ -344,6 +373,7 @@ def _add_stats_matrix_sheet(workbook, matrix_rows, sheet=None):
     sheet.column_dimensions["A"].width = 28
     for column_letter in ("B", "C", "D", "E", "F"):
         sheet.column_dimensions[column_letter].width = 12
+    _add_stats_matrix_chart(sheet, matrix_rows)
     return sheet
 
 
