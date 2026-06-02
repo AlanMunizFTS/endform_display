@@ -107,6 +107,7 @@ class DisplayWindow:
         self.sync_message = ""
         self.sync_message_is_error = False
         self.sync_message_time = 0
+        self.sync_message_close_button_rect = None
         self.sync_in_progress = False
         self.sync_progress = 0
         self.sync_stage = ""
@@ -1985,6 +1986,17 @@ class DisplayWindow:
             if self.db_blocking:
                 return
 
+            # Dataset completion/error message is modal until the operator closes it.
+            if self.sync_message:
+                if self.sync_message_close_button_rect:
+                    bx, by, bw, bh = self.sync_message_close_button_rect
+                    if bx <= x <= bx + bw and by <= y <= by + bh:
+                        self.sync_message = ""
+                        self.sync_message_is_error = False
+                        self.sync_message_time = 0
+                        self.sync_message_close_button_rect = None
+                return
+
             # Piece date dialog close button (highest priority)
             if self.show_piece_date_dialog and self.piece_date_dialog_close_rect:
                 bx, by, bw, bh = self.piece_date_dialog_close_rect
@@ -3306,10 +3318,7 @@ class DisplayWindow:
             or self.show_delete_confirm
             or self.show_rebuild_confirm
         ):
-            return canvas
-
-        if time.time() - self.sync_message_time > 3:
-            self.sync_message = ""
+            self.sync_message_close_button_rect = None
             return canvas
 
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -3321,7 +3330,10 @@ class DisplayWindow:
         right_pad = 45
         text_gap = 30
         top_pad = 34
-        bottom_pad = 34
+        button_gap = 28
+        button_width = 150
+        button_height = 52
+        bottom_pad = 28
 
         message_block = self._prepare_wrapped_text_block(
             self.sync_message.strip(),
@@ -3337,7 +3349,10 @@ class DisplayWindow:
             int(self.width * 0.82),
         )
         body_height = max(icon_diameter, message_block["text_height"])
-        dialog_height = max(180, top_pad + body_height + bottom_pad)
+        dialog_height = max(
+            250,
+            top_pad + body_height + button_gap + button_height + bottom_pad,
+        )
 
         canvas, dialog_x, dialog_y = self._draw_modal_frame(
             canvas,
@@ -3381,6 +3396,24 @@ class DisplayWindow:
             (0, 0, 0),
             thickness,
             line_spacing=line_spacing,
+        )
+
+        button_x = dialog_x + (dialog_width - button_width) // 2
+        button_y = dialog_y + dialog_height - button_height - bottom_pad
+        self.sync_message_close_button_rect = (
+            button_x,
+            button_y,
+            button_width,
+            button_height,
+        )
+        button_color = (0, 0, 200) if self.sync_message_is_error else (0, 130, 0)
+        self._draw_modal_button(
+            canvas,
+            self.sync_message_close_button_rect,
+            "Cerrar",
+            button_color,
+            font_scale=0.75,
+            thickness=2,
         )
 
         return canvas
