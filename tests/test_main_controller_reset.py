@@ -85,6 +85,14 @@ class TestMainControllerReset(unittest.TestCase):
 
             self.assertEqual(db.execute.call_args_list[0].args, ("DELETE FROM img_results",))
             self.assertEqual(db.execute.call_args_list[1].args, ("DELETE FROM model_results",))
+            self.assertEqual(
+                db.execute.call_args_list[2].args,
+                ("DELETE FROM remote_model_results_pending",),
+            )
+            self.assertEqual(
+                db.execute.call_args_list[3].args,
+                ("DELETE FROM remote_sync_state",),
+            )
             sftp_client.chdir.assert_any_call(controller.config.remote_hist_dir)
             sftp_client.chdir.assert_any_call(controller.config.remote_annotated_dir)
             sftp_client.remove.assert_any_call(

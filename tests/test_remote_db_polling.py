@@ -23,6 +23,21 @@ class TestRemoteDbPolling(unittest.TestCase):
         '"model_name", "geometry_type", "coordinates", "image_width", "image_height" '
         'FROM "model_results" WHERE "id" > %s ORDER BY "id" ASC LIMIT %s'
     )
+    REMOTE_SYNC_STATE_QUERY = (
+        "SELECT last_seen_id FROM remote_sync_state WHERE source_name = %s"
+    )
+    LOCAL_MAX_REMOTE_ID_QUERY = (
+        "SELECT COALESCE(MAX(remote_model_result_id), 0) AS max_id FROM classified_image_defects"
+    )
+    PENDING_READY_QUERY = (
+        "SELECT p.remote_id, p.img_name, p.class_name, p.confidence, p.created_at, "
+        "p.model_name, p.geometry_type, p.coordinates, p.image_width, p.image_height, "
+        "ci.id AS classified_image_id "
+        "FROM remote_model_results_pending p "
+        "JOIN classified_images ci ON ci.img_name = p.img_name "
+        "ORDER BY p.remote_id ASC LIMIT %s"
+    )
+    PENDING_COUNT_QUERY = "SELECT COUNT(*) AS cnt FROM remote_model_results_pending"
 
     def _build_display(self):
         display = MagicMock()
@@ -60,6 +75,31 @@ class TestRemoteDbPolling(unittest.TestCase):
         db.execute = MagicMock()
         db.close = MagicMock()
         return db
+
+    def _configure_local_db_fetch(
+        self,
+        local_db,
+        *,
+        persisted_checkpoint=None,
+        local_max_remote_id=0,
+        pending_ready_rows=None,
+        pending_count=0,
+    ):
+        def _fetch(query, params=None):
+            normalized = " ".join(str(query).split())
+            if normalized == self.REMOTE_SYNC_STATE_QUERY:
+                if persisted_checkpoint is None:
+                    return []
+                return [{"last_seen_id": persisted_checkpoint}]
+            if normalized == self.LOCAL_MAX_REMOTE_ID_QUERY:
+                return [{"max_id": local_max_remote_id}]
+            if normalized == self.PENDING_READY_QUERY:
+                return list(pending_ready_rows or [])
+            if normalized == self.PENDING_COUNT_QUERY:
+                return [{"cnt": pending_count}]
+            raise AssertionError(f"Unexpected fetch query: {normalized}")
+
+        local_db.fetch.side_effect = _fetch
 
     def test_initialize_starts_remote_db_polling(self):
         display = self._build_display()
@@ -120,8 +160,27 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_syncs_existing_local_rows_without_mutating_remote(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
-        local_db.fetch.return_value = [{"id": 77, "img_name": "img_001.png"}]
         local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[
+                {
+                    "remote_id": 101,
+                    "img_name": "img_001.png",
+                    "class_name": "dent",
+                    "confidence": 0.9321,
+                    "created_at": None,
+                    "model_name": None,
+                    "geometry_type": None,
+                    "coordinates": None,
+                    "image_width": None,
+                    "image_height": None,
+                    "classified_image_id": 77,
+                }
+            ],
+            pending_count=0,
+        )
         display.db = local_db
         logger = self._build_logger()
         config = ControllerConfig(
@@ -165,13 +224,38 @@ class TestRemoteDbPolling(unittest.TestCase):
             self.REMOTE_MODEL_RESULTS_QUERY,
             (0, 25),
         )
-        local_db.fetch.assert_called_once_with(
-            "SELECT id, img_name FROM classified_images WHERE img_name = ANY(%s)",
-            (["img_001.png"],),
-        )
-        self.assertEqual(local_db.execute.call_count, 2)
+        self.assertEqual(local_db.execute.call_count, 5)
         self.assertEqual(
             local_db.execute.call_args_list[0].args[0],
+            "INSERT INTO remote_model_results_pending "
+            "(remote_id, img_name, class_name, confidence, created_at, model_name, "
+            "geometry_type, coordinates, image_width, image_height) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (remote_id) DO UPDATE SET "
+            "img_name = EXCLUDED.img_name, "
+            "class_name = EXCLUDED.class_name, "
+            "confidence = EXCLUDED.confidence, "
+            "created_at = EXCLUDED.created_at, "
+            "model_name = EXCLUDED.model_name, "
+            "geometry_type = EXCLUDED.geometry_type, "
+            "coordinates = EXCLUDED.coordinates, "
+            "image_width = EXCLUDED.image_width, "
+            "image_height = EXCLUDED.image_height, "
+            "updated_at = CURRENT_TIMESTAMP",
+        )
+        self.assertEqual(
+            local_db.execute.call_args_list[1].args,
+            (
+                "INSERT INTO remote_sync_state (source_name, last_seen_id) "
+                "VALUES (%s, %s) "
+                "ON CONFLICT (source_name) DO UPDATE SET "
+                "last_seen_id = EXCLUDED.last_seen_id, "
+                "updated_at = CURRENT_TIMESTAMP",
+                ("remote_db:model_results", 101),
+            ),
+        )
+        self.assertEqual(
+            local_db.execute.call_args_list[2].args[0],
             "INSERT INTO model_results "
             "(img_name, class_name, confidence, created_at, model_name, geometry_type, "
             "coordinates, image_width, image_height) "
@@ -179,7 +263,7 @@ class TestRemoteDbPolling(unittest.TestCase):
             "ON CONFLICT DO NOTHING",
         )
         self.assertEqual(
-            local_db.execute.call_args_list[1].args,
+            local_db.execute.call_args_list[3].args,
             (
                 "INSERT INTO classified_image_defects "
                 "(classified_image_id, class_name, confidence, remote_model_result_id, "
@@ -187,6 +271,13 @@ class TestRemoteDbPolling(unittest.TestCase):
                 "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING",
                 (77, "dent", 0.9321, 101, None, None, None, None, None),
+            ),
+        )
+        self.assertEqual(
+            local_db.execute.call_args_list[4].args,
+            (
+                "DELETE FROM remote_model_results_pending WHERE remote_id = ANY(%s)",
+                ([101],),
             ),
         )
         remote_db.execute.assert_not_called()
@@ -198,7 +289,11 @@ class TestRemoteDbPolling(unittest.TestCase):
             )
         )
         self.assertTrue(
-            any("scanned=1, pages=1, candidates=1, matched=1, synced=1" in call.args[0] for call in logger.info.call_args_list)
+            any(
+                "scanned=1, pages=1, queued=1, candidates=1, matched=1, "
+                "synced=1, retained_remote=1, pending_local=0" in call.args[0]
+                for call in logger.info.call_args_list
+            )
         )
         self.assertFalse(any("deleted_remote" in call.args[0] for call in logger.info.call_args_list))
         self.assertFalse(any('"class_name": "dent"' in call.args[0] for call in logger.info.call_args_list))
@@ -207,8 +302,27 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_maps_remote_nok_class_name_to_streaked(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
-        local_db.fetch.return_value = [{"id": 77, "img_name": "img_001.png"}]
         local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[
+                {
+                    "remote_id": 101,
+                    "img_name": "img_001.png",
+                    "class_name": "NOK",
+                    "confidence": 0.9321,
+                    "created_at": None,
+                    "model_name": None,
+                    "geometry_type": None,
+                    "coordinates": None,
+                    "image_width": None,
+                    "image_height": None,
+                    "classified_image_id": 77,
+                }
+            ],
+            pending_count=0,
+        )
         display.db = local_db
         logger = self._build_logger()
         controller = MainController(
@@ -241,9 +355,9 @@ class TestRemoteDbPolling(unittest.TestCase):
         delay = controller._run_remote_db_poll_iteration()
 
         self.assertEqual(delay, 1.0)
-        self.assertEqual(local_db.execute.call_count, 2)
+        self.assertEqual(local_db.execute.call_count, 5)
         self.assertEqual(
-            local_db.execute.call_args_list[1].args,
+            local_db.execute.call_args_list[3].args,
             (
                 "INSERT INTO classified_image_defects "
                 "(classified_image_id, class_name, confidence, remote_model_result_id, "
@@ -277,7 +391,13 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_keeps_remote_rows_without_local_match(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
-        local_db.fetch.return_value = []
+        local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[],
+            pending_count=1,
+        )
         display.db = local_db
         logger = self._build_logger()
         controller = MainController(
@@ -306,27 +426,181 @@ class TestRemoteDbPolling(unittest.TestCase):
         delay = controller._run_remote_db_poll_iteration()
 
         self.assertEqual(delay, 2.0)
-        local_db.execute.assert_not_called()
+        self.assertEqual(local_db.execute.call_count, 2)
         remote_db.execute.assert_not_called()
         self.assertTrue(
             any(
-                "Missing local classified_images rows during poll: count=1 (examples: img_missing.png)" in call.args[0]
+                "Pending remote metadata waiting for local classified_images match: count=1" in call.args[0]
                 for call in logger.info.call_args_list
             )
         )
         self.assertTrue(
             any(
-                "scanned=1, pages=1" in call.args[0]
-                and "matched=0, synced=0" in call.args[0]
+                "scanned=1, pages=1, queued=1" in call.args[0]
+                and "matched=0, synced=0, retained_remote=0, pending_local=1" in call.args[0]
                 for call in logger.info.call_args_list
             )
         )
         self.assertFalse(any("deleted_remote" in call.args[0] for call in logger.info.call_args_list))
 
     @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_bootstraps_from_persisted_checkpoint(self, remote_db_factory):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=123,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = []
+        remote_db_factory.return_value = remote_db
+
+        delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(delay, 2.0)
+        remote_db.fetch.assert_called_once_with(
+            self.REMOTE_MODEL_RESULTS_QUERY,
+            (123, 25),
+        )
+        self.assertEqual(controller.remote_db_forward_cursor_id, 123)
+        local_db.execute.assert_not_called()
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_bootstraps_from_local_max_remote_id(self, remote_db_factory):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=None,
+            local_max_remote_id=88,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = []
+        remote_db_factory.return_value = remote_db
+
+        delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(delay, 2.0)
+        remote_db.fetch.assert_called_once_with(
+            self.REMOTE_MODEL_RESULTS_QUERY,
+            (88, 25),
+        )
+        self.assertEqual(controller.remote_db_forward_cursor_id, 88)
+        local_db.execute.assert_called_once_with(
+            "INSERT INTO remote_sync_state (source_name, last_seen_id) "
+            "VALUES (%s, %s) "
+            "ON CONFLICT (source_name) DO UPDATE SET "
+            "last_seen_id = EXCLUDED.last_seen_id, "
+            "updated_at = CURRENT_TIMESTAMP",
+            ("remote_db:model_results", 88),
+        )
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_bootstraps_from_zero_when_no_local_history(self, remote_db_factory):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=None,
+            local_max_remote_id=0,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        remote_db = MagicMock()
+        remote_db.fetch.return_value = []
+        remote_db_factory.return_value = remote_db
+
+        delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(delay, 2.0)
+        remote_db.fetch.assert_called_once_with(
+            self.REMOTE_MODEL_RESULTS_QUERY,
+            (0, 25),
+        )
+        self.assertEqual(controller.remote_db_forward_cursor_id, 0)
+        local_db.execute.assert_called_once_with(
+            "INSERT INTO remote_sync_state (source_name, last_seen_id) "
+            "VALUES (%s, %s) "
+            "ON CONFLICT (source_name) DO UPDATE SET "
+            "last_seen_id = EXCLUDED.last_seen_id, "
+            "updated_at = CURRENT_TIMESTAMP",
+            ("remote_db:model_results", 0),
+        )
+
+    @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_uses_idle_backoff_and_logs_idle_once_when_empty(self, remote_db_factory):
         display = self._build_display()
         display.db = self._build_db_client()
+        self._configure_local_db_fetch(
+            display.db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
         logger = self._build_logger()
         controller = MainController(
             display=display,
@@ -369,6 +643,12 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_reuses_persistent_ssh_tunnel_across_iterations(self, remote_db_factory):
         display = self._build_display()
         display.db = self._build_db_client()
+        self._configure_local_db_fetch(
+            display.db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
         logger = self._build_logger()
         controller = MainController(
             display=display,
@@ -439,7 +719,12 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_does_not_delete_remote_rows_when_local_update_fails(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
-        local_db.fetch.return_value = [{"id": 77, "img_name": "img_001.png"}]
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
         local_db.execute.side_effect = RuntimeError("local insert failed")
         display.db = local_db
         logger = self._build_logger()
@@ -479,6 +764,12 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_recreates_tunnel_after_remote_fetch_failure(self, remote_db_factory):
         display = self._build_display()
         display.db = self._build_db_client()
+        self._configure_local_db_fetch(
+            display.db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[],
+            pending_count=0,
+        )
         logger = self._build_logger()
         controller = MainController(
             display=display,
@@ -515,11 +806,27 @@ class TestRemoteDbPolling(unittest.TestCase):
     def test_remote_db_poll_iteration_uses_forward_cursor_to_reach_later_matches(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
-        local_db.fetch.side_effect = [
-            [],
-            [{"id": 77, "img_name": "img_match.png"}],
-        ]
         local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=0,
+            pending_ready_rows=[
+                {
+                    "remote_id": 50,
+                    "img_name": "img_match.png",
+                    "class_name": "dent",
+                    "confidence": 0.91,
+                    "created_at": None,
+                    "model_name": None,
+                    "geometry_type": None,
+                    "coordinates": None,
+                    "image_width": None,
+                    "image_height": None,
+                    "classified_image_id": 77,
+                }
+            ],
+            pending_count=1,
+        )
         display.db = local_db
         logger = self._build_logger()
         controller = MainController(
