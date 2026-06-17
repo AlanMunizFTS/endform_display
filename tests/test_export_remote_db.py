@@ -111,7 +111,21 @@ class TestExportRemoteDb(unittest.TestCase):
 
         self.assertEqual(
             command,
-            "sudo -S -p '' docker exec -i postgres-vision pg_dump -U postgres -d postgres --format=plain --no-owner --no-privileges",
+            "sudo -S -p '' docker exec -i postgres-vision pg_dump -U postgres -d postgres --format=plain --no-owner --no-privileges --data-only",
+        )
+
+    def test_build_remote_dump_command_can_export_schema_and_data(self):
+        command = export_remote_db.build_remote_dump_command(
+            container="postgres-vision",
+            database="postgres",
+            db_user="postgres",
+            use_sudo=False,
+            export_mode="schema-and-data",
+        )
+
+        self.assertEqual(
+            command,
+            "docker exec -i postgres-vision pg_dump -U postgres -d postgres --format=plain --no-owner --no-privileges",
         )
 
     def test_resolve_config_uses_env_defaults_and_sftp_settings(self):
@@ -138,6 +152,7 @@ class TestExportRemoteDb(unittest.TestCase):
         self.assertEqual(config["ssh_password"], "secret")
         self.assertEqual(config["database"], "postgres")
         self.assertEqual(config["db_user"], "postgres")
+        self.assertEqual(config["export_mode"], "data-only")
         self.assertTrue(config["use_sudo"])
 
     def test_export_remote_db_streams_chunks_to_stdout_and_stderr(self):
@@ -158,6 +173,7 @@ class TestExportRemoteDb(unittest.TestCase):
             "container": "postgres-vision",
             "database": "postgres",
             "db_user": "postgres",
+            "export_mode": "data-only",
             "output": None,
             "timeout": 30,
             "use_sudo": True,
@@ -181,7 +197,7 @@ class TestExportRemoteDb(unittest.TestCase):
         self.assertTrue(fake_client.closed)
         self.assertEqual(
             fake_client.exec_calls[0]["command"],
-            "sudo -S -p '' docker exec -i postgres-vision pg_dump -U postgres -d postgres --format=plain --no-owner --no-privileges",
+            "sudo -S -p '' docker exec -i postgres-vision pg_dump -U postgres -d postgres --format=plain --no-owner --no-privileges --data-only",
         )
 
     def test_export_remote_db_writes_to_output_file(self):
@@ -200,6 +216,7 @@ class TestExportRemoteDb(unittest.TestCase):
                 "container": "postgres-vision",
                 "database": "postgres",
                 "db_user": "postgres",
+                "export_mode": "data-only",
                 "output": output_path,
                 "timeout": 30,
                 "use_sudo": False,
@@ -238,6 +255,7 @@ class TestExportRemoteDb(unittest.TestCase):
             "container": "postgres-vision",
             "database": "postgres",
             "db_user": "postgres",
+            "export_mode": "data-only",
             "output": None,
             "timeout": 30,
             "use_sudo": True,

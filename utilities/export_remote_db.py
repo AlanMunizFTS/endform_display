@@ -17,6 +17,7 @@ from settings import get_sftp_settings, load_env_file
 DEFAULT_CONTAINER_NAME = "postgres-vision"
 DEFAULT_DB_NAME = "postgres"
 DEFAULT_DB_USER = "postgres"
+DEFAULT_EXPORT_MODE = "data-only"
 STREAM_CHUNK_SIZE = 64 * 1024
 DEFAULT_TIMEOUT = 30
 POLL_INTERVAL_SECONDS = 0.05
@@ -56,6 +57,22 @@ def parse_args(argv=None):
         "--db-user",
         help="Usuario de Postgres para pg_dump. Default: DB_USER del .env o postgres",
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--data-only",
+        dest="export_mode",
+        action="store_const",
+        const="data-only",
+        help="Exporta solo datos. Este es el modo default.",
+    )
+    mode_group.add_argument(
+        "--schema-and-data",
+        dest="export_mode",
+        action="store_const",
+        const="schema-and-data",
+        help="Exporta estructura y datos completos.",
+    )
+    parser.set_defaults(export_mode=DEFAULT_EXPORT_MODE)
     parser.add_argument(
         "--output",
         type=Path,
@@ -94,13 +111,20 @@ def resolve_config(args):
         "container": args.container or DEFAULT_CONTAINER_NAME,
         "database": args.database or _get_env_default("DB_NAME", DEFAULT_DB_NAME),
         "db_user": args.db_user or _get_env_default("DB_USER", DEFAULT_DB_USER),
+        "export_mode": args.export_mode or DEFAULT_EXPORT_MODE,
         "output": args.output,
         "timeout": args.timeout,
         "use_sudo": not args.no_sudo,
     }
 
 
-def build_remote_dump_command(container, database, db_user, use_sudo=True):
+def build_remote_dump_command(
+    container,
+    database,
+    db_user,
+    use_sudo=True,
+    export_mode=DEFAULT_EXPORT_MODE,
+):
     command_parts = [
         "docker",
         "exec",
@@ -115,6 +139,8 @@ def build_remote_dump_command(container, database, db_user, use_sudo=True):
         "--no-owner",
         "--no-privileges",
     ]
+    if export_mode == "data-only":
+        command_parts.append("--data-only")
     quoted = " ".join(shlex.quote(part) for part in command_parts)
     if use_sudo:
         return f"sudo -S -p '' {quoted}"
@@ -188,9 +214,11 @@ def export_remote_db(config, ssh_client_factory=None):
             database=config["database"],
             db_user=config["db_user"],
             use_sudo=config["use_sudo"],
+            export_mode=config["export_mode"],
         )
         _write_status(
-            f"Starting pg_dump for database {config['database']} from container {config['container']}"
+            f"Starting {config['export_mode']} pg_dump for database {config['database']} "
+            f"from container {config['container']}"
         )
         stdin, stdout, _stderr = client.exec_command(
             command,
