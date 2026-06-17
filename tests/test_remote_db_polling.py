@@ -117,7 +117,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         self.assertFalse(first_thread.is_alive())
 
     @patch("db.get_remote_db_connection_via_ssh")
-    def test_remote_db_poll_iteration_syncs_existing_local_rows_and_deletes_remote(self, remote_db_factory):
+    def test_remote_db_poll_iteration_syncs_existing_local_rows_without_mutating_remote(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
         local_db.fetch.return_value = [{"id": 77, "img_name": "img_001.png"}]
@@ -150,7 +150,6 @@ class TestRemoteDbPolling(unittest.TestCase):
         remote_db.fetch.return_value = [
             {"id": 101, "img_name": "img_001.png", "class_name": "dent", "confidence": 0.9321}
         ]
-        remote_db.execute.return_value = 1
         remote_db_factory.return_value = remote_db
 
         delay = controller._run_remote_db_poll_iteration()
@@ -190,10 +189,7 @@ class TestRemoteDbPolling(unittest.TestCase):
                 (77, "dent", 0.9321, 101, None, None, None, None, None),
             ),
         )
-        remote_db.execute.assert_called_once_with(
-            'DELETE FROM "model_results" WHERE id = ANY(%s)',
-            ([101],),
-        )
+        remote_db.execute.assert_not_called()
         remote_db.close.assert_not_called()
         self.assertTrue(
             any(
@@ -202,8 +198,9 @@ class TestRemoteDbPolling(unittest.TestCase):
             )
         )
         self.assertTrue(
-            any("scanned=1, pages=1, candidates=1, matched=1, synced=1, deleted_remote=1" in call.args[0] for call in logger.info.call_args_list)
+            any("scanned=1, pages=1, candidates=1, matched=1, synced=1" in call.args[0] for call in logger.info.call_args_list)
         )
+        self.assertFalse(any("deleted_remote" in call.args[0] for call in logger.info.call_args_list))
         self.assertFalse(any('"class_name": "dent"' in call.args[0] for call in logger.info.call_args_list))
 
     @patch("db.get_remote_db_connection_via_ssh")
@@ -239,7 +236,6 @@ class TestRemoteDbPolling(unittest.TestCase):
         remote_db.fetch.return_value = [
             {"id": 101, "img_name": "img_001.png", "class_name": "NOK", "confidence": 0.9321}
         ]
-        remote_db.execute.return_value = 1
         remote_db_factory.return_value = remote_db
 
         delay = controller._run_remote_db_poll_iteration()
@@ -257,6 +253,7 @@ class TestRemoteDbPolling(unittest.TestCase):
                 (77, "STREAKED", 0.9321, 101, None, None, None, None, None),
             ),
         )
+        remote_db.execute.assert_not_called()
 
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_skips_when_table_is_missing(self, remote_db_factory):
@@ -320,10 +317,11 @@ class TestRemoteDbPolling(unittest.TestCase):
         self.assertTrue(
             any(
                 "scanned=1, pages=1" in call.args[0]
-                and "matched=0, synced=0, deleted_remote=0" in call.args[0]
+                and "matched=0, synced=0" in call.args[0]
                 for call in logger.info.call_args_list
             )
         )
+        self.assertFalse(any("deleted_remote" in call.args[0] for call in logger.info.call_args_list))
 
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_uses_idle_backoff_and_logs_idle_once_when_empty(self, remote_db_factory):
@@ -547,7 +545,6 @@ class TestRemoteDbPolling(unittest.TestCase):
             [{"id": 25, "img_name": "img_missing.png", "class_name": "scratch", "confidence": 0.51}],
             [{"id": 50, "img_name": "img_match.png", "class_name": "dent", "confidence": 0.91}],
         ]
-        remote_db.execute.return_value = 1
         remote_db_factory.return_value = remote_db
 
         delay = controller._run_remote_db_poll_iteration()
@@ -567,10 +564,7 @@ class TestRemoteDbPolling(unittest.TestCase):
                 (25, 1),
             ),
         )
-        remote_db.execute.assert_called_once_with(
-            'DELETE FROM "model_results" WHERE id = ANY(%s)',
-            ([50],),
-        )
+        remote_db.execute.assert_not_called()
         self.assertEqual(controller.remote_db_forward_cursor_id, 50)
 
     def test_upsert_classification_keeps_created_at_as_db_default(self):

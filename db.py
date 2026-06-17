@@ -1,3 +1,4 @@
+import re
 import select
 import socketserver
 import threading
@@ -17,6 +18,41 @@ logger = get_logger()
 SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
 SCHEMA_MIGRATIONS_LOCK_KEY = 420731145922714061
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+READ_ONLY_SQL_PREFIXES = ("select", "show", "explain")
+MUTATING_SQL_PATTERN = re.compile(
+    r"\b(insert|update|delete|truncate|alter|drop|create|merge|grant|revoke|call)\b",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_sql_comments(query):
+    sql = str(query or "").lstrip()
+    while True:
+        if sql.startswith("--"):
+            newline_idx = sql.find("\n")
+            if newline_idx < 0:
+                return ""
+            sql = sql[newline_idx + 1 :].lstrip()
+            continue
+        if sql.startswith("/*"):
+            end_idx = sql.find("*/")
+            if end_idx < 0:
+                return ""
+            sql = sql[end_idx + 2 :].lstrip()
+            continue
+        return sql
+
+
+def _is_read_only_sql(query):
+    sql = _strip_leading_sql_comments(query).lower()
+    if not sql:
+        return False
+    if ";" in sql.rstrip("; \t\r\n"):
+        return False
+    if MUTATING_SQL_PATTERN.search(sql):
+        return False
+    first_token = re.split(r"\s+", sql, maxsplit=1)[0]
+    return first_token in READ_ONLY_SQL_PREFIXES
 
 
 class _SSHTunnelRequestHandler(socketserver.BaseRequestHandler):
@@ -154,25 +190,32 @@ class SSHTunnelForwarder:
 
 
 class PostgresDB:
-    def __init__(self, host, port, database, user, password):
+    def __init__(self, host, port, database, user, password, options=None):
         """Initialize PostgreSQL connection with connection pool"""
         self.host = host
         self.port = port
         self.database = database
         self.user = user
         self.password = password
+        self.options = options
         
         try:
             logger.info(
                 f"[DB] Connecting to PostgreSQL at {host}:{port}, database={database}, user={user}",
             )
+            connection_kwargs = {
+                "host": host,
+                "port": port,
+                "database": database,
+                "user": user,
+                "password": password,
+            }
+            if options:
+                connection_kwargs["options"] = options
             self.connection_pool = psycopg2.pool.SimpleConnectionPool(
-                1, 10,
-                host=host,
-                port=port,
-                database=database,
-                user=user,
-                password=password
+                1,
+                10,
+                **connection_kwargs,
             )
             # Validate a live connection early so startup errors are explicit.
             connection = self.connection_pool.getconn()
@@ -375,8 +418,9 @@ class PostgresDB:
 
 
 class SSHTunneledPostgresDB(PostgresDB):
-    def __init__(self, tunnel, database, user, password):
+    def __init__(self, tunnel, database, user, password, read_only=True):
         self.tunnel = tunnel
+        self.read_only = bool(read_only)
         try:
             super().__init__(
                 host="127.0.0.1",
@@ -384,10 +428,45 @@ class SSHTunneledPostgresDB(PostgresDB):
                 database=database,
                 user=user,
                 password=password,
+                options=(
+                    "-c default_transaction_read_only=on"
+                    if self.read_only
+                    else None
+                ),
             )
         except Exception:
             self.tunnel.close()
             raise
+
+        if self.read_only:
+            self._enable_read_only_transactions()
+
+    def _enable_read_only_transactions(self):
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("SET default_transaction_read_only = on")
+        except Exception as exc:
+            self.tunnel.close()
+            logger.error(f"[REMOTE_DB] Failed to enable read-only mode: {exc}")
+            raise
+
+    def _validate_read_only_query(self, query):
+        if self.read_only and not _is_read_only_sql(query):
+            raise RuntimeError(
+                "Remote PostgreSQL connections are read-only; refusing non-read query"
+            )
+
+    def execute(self, query, data=None):
+        self._validate_read_only_query(query)
+        return super().execute(query, data)
+
+    def fetch(self, query, data=None):
+        self._validate_read_only_query(query)
+        return super().fetch(query, data)
+
+    def truncate_app_tables(self):
+        self._validate_read_only_query("TRUNCATE TABLE app_tables")
+        return super().truncate_app_tables()
 
     def close(self):
         try:
@@ -445,6 +524,7 @@ def get_remote_db_connection_via_ssh(
             database=resolved_db_settings["database"],
             user=resolved_db_settings["user"],
             password=resolved_db_settings["password"],
+            read_only=True,
         )
     except Exception:
         tunnel.close()

@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import db
 
@@ -10,6 +10,7 @@ class _FakeCursor:
     def __init__(self, connection):
         self.connection = connection
         self._results = []
+        self.rowcount = 0
 
     def execute(self, query, params=None):
         normalized = " ".join(str(query).split())
@@ -191,6 +192,109 @@ class TestDbMigrations(unittest.TestCase):
         self.assertEqual(connection.applied_migrations, {"001_first.sql"})
         self.assertGreaterEqual(connection.rollback_count, 1)
         self.assertTrue(pool.closeall_called)
+
+    def test_remote_tunneled_db_allows_read_queries(self):
+        connection = _FakeConnection()
+        pool = _FakePool(connection)
+        tunnel = MagicMock()
+        tunnel.local_port = 15432
+
+        with patch("db.psycopg2.pool.SimpleConnectionPool", return_value=pool):
+            client = db.SSHTunneledPostgresDB(
+                tunnel=tunnel,
+                database="endform",
+                user="readonly",
+                password="secret",
+            )
+
+        client.fetch("SELECT * FROM model_results WHERE id > %s", (10,))
+        client.fetch("-- comment\nSHOW transaction_read_only")
+        client.fetch("/* comment */ EXPLAIN SELECT * FROM model_results")
+
+        executed_sql = [entry[0] for entry in connection.executed]
+        self.assertIn("SET default_transaction_read_only = on", executed_sql)
+        self.assertIn("SELECT * FROM model_results WHERE id > %s", executed_sql)
+        self.assertIn("-- comment SHOW transaction_read_only", executed_sql)
+        self.assertIn("/* comment */ EXPLAIN SELECT * FROM model_results", executed_sql)
+        client.close()
+
+    def test_remote_tunneled_db_rejects_mutating_queries(self):
+        connection = _FakeConnection()
+        pool = _FakePool(connection)
+        tunnel = MagicMock()
+        tunnel.local_port = 15432
+
+        with patch("db.psycopg2.pool.SimpleConnectionPool", return_value=pool):
+            client = db.SSHTunneledPostgresDB(
+                tunnel=tunnel,
+                database="endform",
+                user="readonly",
+                password="secret",
+            )
+
+        blocked_queries = [
+            "DELETE FROM model_results WHERE id = %s",
+            "INSERT INTO model_results (img_name) VALUES (%s)",
+            "UPDATE model_results SET class_name = %s",
+            "TRUNCATE TABLE model_results",
+            "ALTER TABLE model_results ADD COLUMN unsafe TEXT",
+            "DROP TABLE model_results",
+            "CREATE TABLE unsafe (id INT)",
+            "WITH removed AS (DELETE FROM model_results RETURNING id) SELECT * FROM removed",
+        ]
+        for query in blocked_queries:
+            with self.subTest(query=query):
+                with self.assertRaises(RuntimeError):
+                    client.execute(query, (1,))
+
+        executed_sql = [entry[0] for entry in connection.executed]
+        self.assertEqual(
+            executed_sql,
+            ["SET default_transaction_read_only = on"],
+        )
+        client.close()
+
+    def test_remote_db_factory_returns_read_only_client(self):
+        connection = _FakeConnection()
+        pool = _FakePool(connection)
+        tunnel = MagicMock()
+        tunnel.local_port = 15432
+        tunnel.start = MagicMock()
+
+        with (
+            patch("db.SSHTunnelForwarder", return_value=tunnel) as tunnel_factory,
+            patch("db.psycopg2.pool.SimpleConnectionPool", return_value=pool) as pool_factory,
+        ):
+            client = db.get_remote_db_connection_via_ssh(
+                ssh_host="192.168.1.179",
+                ssh_port=22,
+                ssh_username="vision",
+                ssh_password="secret",
+                db_settings={
+                    "host": "10.0.0.5",
+                    "port": 5432,
+                    "database": "endform",
+                    "user": "readonly",
+                    "password": "secret",
+                },
+            )
+
+        self.assertTrue(client.read_only)
+        tunnel_factory.assert_called_once_with(
+            ssh_host="192.168.1.179",
+            ssh_port=22,
+            ssh_username="vision",
+            ssh_password="secret",
+            remote_host="10.0.0.5",
+            remote_port=5432,
+        )
+        tunnel.start.assert_called_once_with()
+        pool_factory.assert_called_once()
+        self.assertEqual(
+            pool_factory.call_args.kwargs["options"],
+            "-c default_transaction_read_only=on",
+        )
+        client.close()
 
 
 if __name__ == "__main__":

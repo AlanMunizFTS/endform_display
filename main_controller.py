@@ -874,7 +874,6 @@ class MainController:
 
     def _insert_local_classification_defects(self, local_db, matched_rows):
         synced_img_names = []
-        synced_remote_ids = []
         recalculated_jsns = set()
         for row in matched_rows:
             img_name = row["img_name"]
@@ -919,28 +918,12 @@ class MainController:
                 ),
             )
             synced_img_names.append(img_name)
-            synced_remote_ids.append(row["remote_id"])
             recalculated_jsns.add(img_name.split("_")[0] if "_" in img_name else img_name)
 
         for jsn in sorted(recalculated_jsns):
             self._recalculate_piece_result(jsn, db_client=local_db)
 
-        return synced_img_names, synced_remote_ids
-
-    def _delete_remote_model_results(self, remote_db, remote_ids):
-        if not remote_ids:
-            return 0
-
-        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
-        try:
-            return remote_db.execute(
-                f"DELETE FROM {table_name} WHERE id = ANY(%s)",
-                (remote_ids,),
-            )
-        except Exception:
-            if remote_db is self.remote_db_client:
-                self._close_remote_db_client("remote-delete-failure")
-            raise
+        return synced_img_names
 
     def _scan_remote_rows_for_sync(
         self,
@@ -1068,19 +1051,16 @@ class MainController:
                 "candidate_count": 0,
                 "matched_count": 0,
                 "synced_count": 0,
-                "deleted_count": 0,
                 "missing_local": list(missing_local or []),
                 "synced_img_names": [],
             }
 
-        synced_img_names, synced_remote_ids = self._insert_local_classification_defects(local_db, candidate_rows)
-        deleted_count = self._delete_remote_model_results(remote_db, synced_remote_ids)
+        synced_img_names = self._insert_local_classification_defects(local_db, candidate_rows)
 
         return {
             "candidate_count": len(candidate_rows),
             "matched_count": len(candidate_rows),
             "synced_count": len(synced_img_names),
-            "deleted_count": deleted_count,
             "missing_local": list(missing_local or []),
             "synced_img_names": synced_img_names,
         }
@@ -1161,7 +1141,6 @@ class MainController:
                 scanned_count > 0
                 or sync_summary["candidate_count"] > 0
                 or sync_summary["synced_count"] > 0
-                or sync_summary["deleted_count"] > 0
                 or bool(sync_summary["missing_local"])
             )
             if has_activity:
@@ -1172,8 +1151,7 @@ class MainController:
                     f"pages={pages_scanned}, "
                     f"candidates={sync_summary['candidate_count']}, "
                     f"matched={sync_summary['matched_count']}, "
-                    f"synced={sync_summary['synced_count']}, "
-                    f"deleted_remote={sync_summary['deleted_count']}",
+                    f"synced={sync_summary['synced_count']}",
                 )
             if sync_summary["missing_local"]:
                 missing_count = len(sync_summary["missing_local"])
@@ -1197,7 +1175,7 @@ class MainController:
                 self._remote_db_idle_logged = True
 
             success_interval_sec = max(1.0, float(self.config.remote_db_success_interval_sec))
-            if sync_summary["synced_count"] > 0 or sync_summary["deleted_count"] > 0:
+            if sync_summary["synced_count"] > 0:
                 return success_interval_sec
             return max(
                 success_interval_sec,
