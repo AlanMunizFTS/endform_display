@@ -23,7 +23,7 @@ class DailyExportMaintenance:
 
         self.enabled = bool(getattr(self.config, "daily_maintenance_enabled", True))
         self.hour = int(getattr(self.config, "daily_maintenance_hour", 5))
-        self.minute = int(getattr(self.config, "daily_maintenance_minute", 40))
+        self.minute = int(getattr(self.config, "daily_maintenance_minute", 45))
         self.min_free_bytes = int(
             getattr(self.config, "daily_maintenance_min_free_bytes", 512 * 1024 * 1024)
             or 0
@@ -244,7 +244,8 @@ class DailyExportMaintenance:
         self.file_manager.makedirs(str(self.exports_dir), exist_ok=True)
         disk_root = str(self.exports_dir.resolve())
         usage = shutil.disk_usage(disk_root)
-        target_free = max(0, int(required_bytes)) + self.min_free_bytes
+        required_bytes = max(0, int(required_bytes))
+        target_free = max(required_bytes * 2, required_bytes + self.min_free_bytes)
         initial_free = int(usage.free)
         if initial_free >= target_free:
             return {
@@ -252,18 +253,79 @@ class DailyExportMaintenance:
                 "required_bytes": required_bytes,
                 "target_free_bytes": target_free,
                 "available_free_bytes": initial_free,
+                "deleted_exports": [],
             }
+
+        deleted_exports = []
+        current_free = initial_free
+        for export_dir in self._list_deletable_export_dirs():
+            export_name = export_dir.name
+            try:
+                self.file_manager.rmtree(str(export_dir))
+                deleted_exports.append(export_name)
+                usage = shutil.disk_usage(disk_root)
+                current_free = int(usage.free)
+                self.logger.info(
+                    "[DAILY_MAINTENANCE] Deleted old export "
+                    f"{export_name}; free bytes now {current_free}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                self.logger.error(
+                    f"[DAILY_MAINTENANCE] Unable to delete old export {export_name}: {exc}",
+                    allow_repeat=True,
+                )
+                continue
+
+            if current_free >= target_free:
+                return {
+                    "ok": True,
+                    "required_bytes": required_bytes,
+                    "target_free_bytes": target_free,
+                    "available_free_bytes": current_free,
+                    "deleted_exports": deleted_exports,
+                }
 
         return {
             "ok": False,
             "required_bytes": required_bytes,
             "target_free_bytes": target_free,
-            "available_free_bytes": initial_free,
+            "available_free_bytes": current_free,
+            "deleted_exports": deleted_exports,
             "error": (
                 "Not enough storage for daily export/reset; export and reset were skipped "
-                f"(need {target_free} free bytes, available {initial_free})"
+                f"(need {target_free} free bytes, available {current_free}, "
+                f"deleted {len(deleted_exports)} old exports)"
             ),
         }
+
+    def _list_deletable_export_dirs(self):
+        if not self.exports_dir.exists():
+            return []
+
+        candidates = []
+        for item in self.exports_dir.iterdir():
+            try:
+                if not item.is_dir():
+                    continue
+                if not item.name.startswith("display_state"):
+                    continue
+                if not (item / "manifest.json").is_file():
+                    continue
+                candidates.append(item)
+            except Exception as exc:
+                self.logger.error(
+                    f"[DAILY_MAINTENANCE] Unable to inspect export {item}: {exc}",
+                    allow_repeat=True,
+                )
+
+        return sorted(
+            candidates,
+            key=lambda path: (
+                path.stat().st_mtime if path.exists() else 0,
+                path.name,
+            ),
+        )
 
     def _load_state(self):
         try:

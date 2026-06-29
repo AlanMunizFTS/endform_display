@@ -572,7 +572,7 @@ class ControllerConfig:
     remote_db_error_backoff_sec: float = 5.0
     daily_maintenance_enabled: bool = field(default_factory=is_daily_export_reset_enabled)
     daily_maintenance_hour: int = 5
-    daily_maintenance_minute: int = 40
+    daily_maintenance_minute: int = 45
     daily_maintenance_min_free_bytes: int = 512 * 1024 * 1024
     daily_maintenance_retry_interval_sec: float = 30 * 60
     daily_maintenance_exports_dir: str = field(default_factory=lambda: str(EXPORTS_DIR))
