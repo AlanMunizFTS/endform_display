@@ -576,6 +576,7 @@ class ControllerConfig:
     daily_maintenance_min_free_bytes: int = 512 * 1024 * 1024
     daily_maintenance_retry_interval_sec: float = 30 * 60
     daily_maintenance_exports_dir: str = field(default_factory=lambda: str(EXPORTS_DIR))
+    reset_sftp_operation_timeout_sec: float = 30.0
     max_images: int = 7
     temp_dir: str = field(default_factory=lambda: str(TMP_DISPLAY_DIR))
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
@@ -681,6 +682,25 @@ class MainController:
 
     def _get_annotated_historic_dir(self):
         return self._resolve_temp_subdir(ANNOTATED_SUBDIR_NAME, ANNOTATED_LOCAL_DIR)
+
+    def _configure_reset_sftp_timeout(self, sftp_client):
+        timeout = float(getattr(self.config, "reset_sftp_operation_timeout_sec", 30.0) or 0)
+        if timeout <= 0 or not sftp_client:
+            return
+
+        try:
+            get_channel = getattr(sftp_client, "get_channel", None)
+            if not callable(get_channel):
+                return
+            channel = get_channel()
+            settimeout = getattr(channel, "settimeout", None)
+            if callable(settimeout):
+                settimeout(timeout)
+        except Exception as exc:
+            self.logger.warn(
+                f"[RESET] Unable to set SFTP timeout: {exc}",
+                allow_repeat=True,
+            )
 
     def _dedupe_local_sources(self, sources):
         deduped = []
@@ -3206,9 +3226,12 @@ class MainController:
         ]
 
         self.stop_historic_download_worker()
+        self._configure_reset_sftp_timeout(d.sftp_client)
 
         try:
             def _scan_local_entries(folder_label, folder_path):
+                if callable(progress_callback):
+                    progress_callback(0, 1, f"Scanning local {folder_label} folder")
                 if not self.file_manager.exists(folder_path):
                     return []
                 try:
@@ -3224,6 +3247,9 @@ class MainController:
                 if not d.sftp_client:
                     return []
                 try:
+                    if callable(progress_callback):
+                        progress_callback(0, 1, f"Scanning remote {folder_label} folder")
+                    self._configure_reset_sftp_timeout(d.sftp_client)
                     self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
                     return list(self.file_manager.sftp_listdir(d.sftp_client))
                 except FileNotFoundError:
@@ -3324,6 +3350,7 @@ class MainController:
                     deleted_count = 0
                     for idx, remote_file in enumerate(entry_names, start=1):
                         try:
+                            self._configure_reset_sftp_timeout(d.sftp_client)
                             file_path = f"{remote_dir}/{remote_file}"
                             self.file_manager.sftp_remove(d.sftp_client, file_path)
                             deleted_count += 1

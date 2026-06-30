@@ -107,6 +107,35 @@ class TestMainControllerReset(unittest.TestCase):
                 check_interval=17,
             )
 
+    def test_perform_reset_sets_sftp_timeout_before_remote_scan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, HISTORIC_SUBDIR_NAME), exist_ok=True)
+            os.makedirs(os.path.join(tmpdir, ANNOTATED_SUBDIR_NAME), exist_ok=True)
+
+            db = MagicMock()
+            db.execute.return_value = 0
+
+            sftp_channel = MagicMock()
+            sftp_client = MagicMock()
+            sftp_client.get_channel.return_value = sftp_channel
+            sftp_client.listdir.side_effect = [[], []]
+
+            display = _DisplayStub(db=db, sftp_client=sftp_client)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(
+                    temp_dir=tmpdir,
+                    reset_sftp_operation_timeout_sec=12.5,
+                ),
+            )
+            controller.stop_historic_download_worker = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+
+            result = controller.perform_reset()
+
+            self.assertEqual(result, {"ok": True})
+            sftp_channel.settimeout.assert_any_call(12.5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
