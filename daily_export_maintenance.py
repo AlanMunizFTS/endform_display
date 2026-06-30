@@ -76,6 +76,7 @@ class DailyExportMaintenance:
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
             return False
 
+        self.controller.dataset_transfer_active = True
         self.worker_thread = Thread(
             target=self._run,
             args=(reason,),

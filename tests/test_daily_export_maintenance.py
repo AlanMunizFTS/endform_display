@@ -122,6 +122,25 @@ class TestDailyExportMaintenance(unittest.TestCase):
             self.assertFalse(runner.start_async())
             export_mock.assert_not_called()
 
+    def test_start_async_marks_dataset_transfer_active_before_worker_runs(self):
+        class DeferredThread:
+            def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None):
+                self._alive = False
+
+            def start(self):
+                self._alive = True
+
+            def is_alive(self):
+                return self._alive
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner, controller, _db = self._build_runner(tmp_dir)
+
+            with patch("daily_export_maintenance.Thread", DeferredThread):
+                self.assertTrue(runner.start_async())
+
+            self.assertTrue(controller.dataset_transfer_active)
+
     def test_storage_check_passes_when_space_is_enough(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             runner, _controller, _db = self._build_runner(tmp_dir)

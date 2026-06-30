@@ -3255,10 +3255,11 @@ class MainController:
                 except FileNotFoundError:
                     return []
                 except Exception as exc:
+                    error_text = str(exc) or exc.__class__.__name__
                     errors.append(
-                        f"Unable to access remote {folder_label} folder: {exc}"
+                        f"Unable to access remote {folder_label} folder: {error_text}"
                     )
-                    print(f"Error accessing remote {folder_label} folder: {exc}")
+                    print(f"Error accessing remote {folder_label} folder: {error_text}")
                     return []
 
             local_entries_by_label = {
@@ -3355,13 +3356,14 @@ class MainController:
                             self.file_manager.sftp_remove(d.sftp_client, file_path)
                             deleted_count += 1
                         except Exception as exc:
+                            error_text = str(exc) or exc.__class__.__name__
                             errors.append(
                                 f"Error deleting remote {folder_label} file "
-                                f"'{remote_file}': {exc}"
+                                f"'{remote_file}': {error_text}"
                             )
                             print(
                                 f"Error deleting remote {folder_label} file "
-                                f"{remote_file}: {exc}"
+                                f"{remote_file}: {error_text}"
                             )
                         _advance(
                             f"Clearing remote {folder_label} folder "
@@ -5434,6 +5436,19 @@ class MainController:
                     self._register_historic_local_dir_on_startup()
 
                 self.daily_export_maintenance.tick()
+
+                if (
+                    self.dataset_transfer_active
+                    or getattr(self.display, "reset_in_progress", False)
+                    or getattr(self.display, "sync_in_progress", False)
+                ):
+                    images = self.display.image_paths or []
+                    self.display.show_image_grid(
+                        images,
+                        cols=self.config.display_cols,
+                        rows=self.config.display_rows,
+                    )
+                    continue
 
                 # Periodic check for new historic images
                 if time.monotonic() - self.last_historic_check > 1.0:

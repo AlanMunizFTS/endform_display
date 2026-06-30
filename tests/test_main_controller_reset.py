@@ -136,6 +136,30 @@ class TestMainControllerReset(unittest.TestCase):
             self.assertEqual(result, {"ok": True})
             sftp_channel.settimeout.assert_any_call(12.5)
 
+    def test_perform_reset_reports_exception_type_when_remote_error_message_is_blank(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.makedirs(os.path.join(tmpdir, HISTORIC_SUBDIR_NAME), exist_ok=True)
+            os.makedirs(os.path.join(tmpdir, ANNOTATED_SUBDIR_NAME), exist_ok=True)
+
+            db = MagicMock()
+            db.execute.return_value = 0
+
+            sftp_client = MagicMock()
+            sftp_client.listdir.side_effect = TimeoutError()
+
+            display = _DisplayStub(db=db, sftp_client=sftp_client)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmpdir),
+            )
+            controller.stop_historic_download_worker = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+
+            result = controller.perform_reset()
+
+            self.assertFalse(result["ok"])
+            self.assertIn("TimeoutError", result["error"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
