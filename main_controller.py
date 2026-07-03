@@ -2089,6 +2089,84 @@ class MainController:
         )
         self.export_worker_thread.start()
 
+    def start_export_historic_image_report_async(
+        self,
+        output_dir=None,
+        endform_type="",
+        class_name="",
+    ):
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+
+        self.dataset_transfer_active = True
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing historic image report..."
+        d.sync_progress_title = "Exporting Image Report"
+        d.sync_progress_helper_text = "Building one Excel cell per piece with its historic views."
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _image_report_worker():
+            worker_state = None
+            try:
+                worker_state = self._pause_dataset_background_workers()
+
+                from report_exporter import export_historic_image_table_report
+
+                def _report_progress_cb(done, total, stage):
+                    percent = int((done / total) * 100) if total > 0 else 0
+                    stage_text = f"{stage} ({done}/{total})" if total > 0 else stage
+                    self._set_sync_progress(
+                        stage_text,
+                        percent,
+                        title="Exporting Image Report",
+                        helper_text="Building one Excel cell per piece with its historic views.",
+                    )
+
+                report_path = export_historic_image_table_report(
+                    self,
+                    output_dir=output_dir,
+                    endform_type=endform_type,
+                    class_name=class_name,
+                    progress_callback=_report_progress_cb,
+                )
+                report_name = os.path.basename(str(report_path))
+                self._set_sync_progress(
+                    "Completed",
+                    100,
+                    title="Exporting Image Report",
+                    helper_text="Building one Excel cell per piece with its historic views.",
+                )
+                d.sync_message = f"Image report exported: {report_name}"
+                d.sync_message_is_error = False
+                self.logger.info(
+                    f"[IMAGE_REPORT] Export completed: {report_path}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Image report export failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(
+                    f"[IMAGE_REPORT] Export failed: {exc}",
+                    allow_repeat=True,
+                )
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+
+        self.export_worker_thread = Thread(
+            target=_image_report_worker,
+            name="historic-image-report-export-worker",
+            daemon=True,
+        )
+        self.export_worker_thread.start()
+
     def start_import_display_state_async(self, package_path):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
@@ -5336,6 +5414,11 @@ class MainController:
                     d._clamp_stats_class_modal_dataset_class_offset()
         elif action == "export_stats_dataset":
             self.start_export_piece_stats_dataset_async()
+        elif action == "export_historic_image_report":
+            self.start_export_historic_image_report_async(
+                endform_type=payload.get("endform_type"),
+                class_name=payload.get("class_name"),
+            )
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False

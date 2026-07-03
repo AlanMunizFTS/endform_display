@@ -2,12 +2,14 @@ import datetime
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from openpyxl import load_workbook
+from PIL import Image as PilImage
 
 from report_exporter import (
     export_combined_traceability_report,
+    export_historic_image_table_report,
     export_ok_nok_traceability_report,
     export_stats_report,
     parse_jsn_datetime,
@@ -211,6 +213,117 @@ class TestReportExporter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             with self.assertRaisesRegex(ValueError, "valid DB date range"):
                 export_stats_report(controller, output_dir=tmp_dir)
+
+    def test_export_historic_image_table_report_places_four_pieces_per_row(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            report_dir = Path(tmp_dir) / "reports"
+            historic_dir.mkdir()
+
+            historic_index = []
+            for piece_idx in range(5):
+                jsn = f"11861022070165{piece_idx:03d}"
+                batch = []
+                for cam_idx in range(7):
+                    image_name = f"{jsn}_Cam{cam_idx + 1}_Side_OK.png"
+                    image_path = historic_dir / image_name
+                    PilImage.new(
+                        "RGB",
+                        (32, 32),
+                        (piece_idx * 30, cam_idx * 30, 120),
+                    ).save(image_path)
+                    batch.append(image_name)
+                historic_index.append(batch)
+
+            controller = MagicMock()
+            controller._load_historic_index.return_value = historic_index
+            controller._get_export_historic_dir.return_value = str(historic_dir)
+
+            output_path = export_historic_image_table_report(
+                controller,
+                output_dir=report_dir,
+                created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                endform_type="mush",
+                class_name="split",
+            )
+
+            path = Path(output_path)
+            self.assertEqual(
+                path.name,
+                "reporte_imagenes_historico_20260514_093000.xlsx",
+            )
+            workbook = load_workbook(path)
+            sheet = workbook["Piezas"]
+            self.assertEqual(sheet["A1"].value, "PART-BY-PART RESULT SPLIT")
+            self.assertEqual(sheet["A2"].value, "Part #")
+            self.assertEqual(sheet["B2"].value, "Original Condition")
+            self.assertEqual(sheet["C2"].value, "mush-split-0")
+            self.assertEqual(sheet["D2"].value, "mush-split-90")
+            self.assertEqual(sheet["E2"].value, "mush-split-180")
+            self.assertEqual(sheet["F2"].value, "mush-split-270")
+            self.assertEqual(sheet["A3"].value, 1)
+            self.assertIsNone(sheet["B3"].value)
+            self.assertEqual(sheet["A4"].value, 2)
+            self.assertIsNone(sheet["B4"].value)
+            self.assertEqual(len(sheet._images), 5)
+            anchors = [
+                (image.anchor._from.row, image.anchor._from.col)
+                for image in sheet._images
+            ]
+            self.assertEqual(
+                anchors,
+                [
+                    (2, 2),
+                    (2, 3),
+                    (2, 4),
+                    (2, 5),
+                    (3, 2),
+                ],
+            )
+
+    def test_export_historic_image_table_report_uses_display_piece_order(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            report_dir = Path(tmp_dir) / "reports"
+            historic_dir.mkdir()
+
+            internal_index = []
+            for jsn in (
+                "118610220701658060005",
+                "118610220701657170004",
+                "118610220701656250003",
+            ):
+                image_name = f"{jsn}_Cam1_Side_OK.png"
+                PilImage.new("RGB", (32, 32), (120, 120, 120)).save(
+                    historic_dir / image_name
+                )
+                internal_index.append([image_name])
+
+            controller = MagicMock()
+            controller._load_historic_index.return_value = internal_index
+            controller._get_export_historic_dir.return_value = str(historic_dir)
+            captured_first_images = []
+
+            def fake_make_contact_sheet(image_paths, output_path, **_kwargs):
+                captured_first_images.append(Path(image_paths[0]).name)
+                PilImage.new("RGB", (32, 32), (120, 120, 120)).save(output_path)
+
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                    endform_type="mush",
+                    class_name="split",
+                )
+
+            self.assertEqual(
+                captured_first_images[0],
+                "118610220701656250003_Cam1_Side_OK.png",
+            )
 
 
 if __name__ == "__main__":

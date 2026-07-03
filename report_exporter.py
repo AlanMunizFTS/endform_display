@@ -1,9 +1,16 @@
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.drawing.image import Image as WorkbookImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.units import pixels_to_EMU
+from PIL import Image as PilImage, ImageDraw
 
 from paths_config import REPORTS_DIR
 
@@ -172,6 +179,25 @@ def _format_report_filename(start_at, end_at):
 def _format_traceability_filename(created_at=None):
     timestamp = created_at or datetime.now()
     return f"desglose_ok_nok_{timestamp:%Y%m%d_%H%M%S}.xlsx"
+
+
+def _format_historic_image_report_filename(created_at=None):
+    timestamp = created_at or datetime.now()
+    return f"reporte_imagenes_historico_{timestamp:%Y%m%d_%H%M%S}.xlsx"
+
+
+def _build_historic_image_report_headers(endform_type, class_name, pieces_per_row):
+    base_parts = [
+        str(endform_type or "").strip(),
+        str(class_name or "").strip(),
+    ]
+    base_label = "-".join(part for part in base_parts if part)
+    angles = (0, 90, 180, 270)
+    headers = []
+    for idx in range(pieces_per_row):
+        angle = angles[idx] if idx < len(angles) else idx
+        headers.append(f"{base_label}-{angle}" if base_label else str(angle))
+    return headers
 
 
 def _apply_headers(sheet, headers, header_fill, header_font, center):
@@ -425,4 +451,220 @@ def export_stats_report(controller, db_client=None, output_dir=None):
     )
     output_path = report_dir / filename
     workbook.save(output_path)
+    return str(output_path)
+
+
+def _make_piece_contact_sheet(
+    image_paths,
+    output_path,
+    tile_size=110,
+    padding=6,
+    label_text="",
+):
+    cols = 4
+    rows = 2
+    label_height = 30 if label_text else 0
+    width = cols * tile_size + (cols - 1) * padding
+    height = label_height + rows * tile_size + (rows - 1) * padding
+    canvas = PilImage.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(canvas)
+
+    if label_text:
+        draw.rectangle((0, 0, width, label_height), fill=(31, 78, 121))
+        draw.text((8, 8), label_text, fill="white")
+
+    for idx in range(cols * rows):
+        col = idx % cols
+        row = idx // cols
+        x = col * (tile_size + padding)
+        y = label_height + row * (tile_size + padding)
+        box = (x, y, x + tile_size, y + tile_size)
+
+        if idx >= len(image_paths):
+            continue
+
+        try:
+            with PilImage.open(image_paths[idx]) as source:
+                image = source.convert("RGB")
+                image.thumbnail((tile_size, tile_size), PilImage.LANCZOS)
+                paste_x = x + (tile_size - image.width) // 2
+                paste_y = y + (tile_size - image.height) // 2
+                canvas.paste(image, (paste_x, paste_y))
+        except Exception:
+            draw.rectangle(box, fill=(245, 245, 245), outline=(190, 190, 190))
+            draw.line((x + 12, y + 12, x + tile_size - 12, y + tile_size - 12), fill=(170, 170, 170), width=3)
+            draw.line((x + tile_size - 12, y + 12, x + 12, y + tile_size - 12), fill=(170, 170, 170), width=3)
+
+        draw.rectangle(box, outline=(210, 210, 210), width=1)
+
+    canvas.save(output_path)
+
+
+def _historic_piece_result(batch):
+    statuses = []
+    for img_name in batch or []:
+        name = str(img_name or "").upper()
+        if (
+            name.endswith("_NOK.PNG")
+            or name.endswith("_NOK.JPG")
+            or name.endswith("_NOK.JPEG")
+            or name.endswith("_NOK.BMP")
+        ):
+            statuses.append("NOK")
+        elif (
+            name.endswith("_OK.PNG")
+            or name.endswith("_OK.JPG")
+            or name.endswith("_OK.JPEG")
+            or name.endswith("_OK.BMP")
+        ):
+            statuses.append("OK")
+    if any(status == "NOK" for status in statuses):
+        return "NOK"
+    if statuses:
+        return "OK"
+    return ""
+
+
+def _set_image_anchor(workbook_image, row_idx, col_idx, width, height, margin_px=6):
+    marker = AnchorMarker(
+        col=col_idx - 1,
+        row=row_idx - 1,
+        colOff=pixels_to_EMU(margin_px),
+        rowOff=pixels_to_EMU(margin_px),
+    )
+    workbook_image.anchor = OneCellAnchor(
+        _from=marker,
+        ext=XDRPositiveSize2D(pixels_to_EMU(width), pixels_to_EMU(height)),
+    )
+
+
+def export_historic_image_table_report(
+    controller,
+    output_dir=None,
+    historic_dir=None,
+    created_at=None,
+    endform_type="",
+    class_name="",
+    pieces_per_row=4,
+    images_per_piece=7,
+    progress_callback=None,
+):
+    historic_index = list(reversed(controller._load_historic_index(force_rescan=True) or []))
+    if not historic_index:
+        raise ValueError("No historic images available to export")
+
+    source_dir = Path(historic_dir or controller._get_export_historic_dir())
+    report_dir = Path(output_dir or REPORTS_DIR)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Piezas"
+    sheet.sheet_view.showGridLines = False
+
+    pieces_per_row = max(1, int(pieces_per_row or 4))
+    images_per_piece = max(1, int(images_per_piece or 7))
+    tile_size = 110
+    padding = 6
+    image_margin_px = 6
+    composite_width = 4 * tile_size + 3 * padding
+    composite_height = 30 + 2 * tile_size + padding
+
+    title_fill = PatternFill(fill_type="solid", fgColor="1F4E79")
+    header_fill = PatternFill(fill_type="solid", fgColor="D9E2F3")
+    title_font = Font(color="FFFFFF", bold=True, size=14)
+    header_font = Font(bold=True)
+    center = Alignment(horizontal="center", vertical="center")
+    thin_side = Side(style="thin", color="000000")
+    table_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+
+    total_cols = pieces_per_row + 2
+    sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
+    title_cell = sheet.cell(row=1, column=1, value="PART-BY-PART RESULT SPLIT")
+    title_cell.fill = title_fill
+    title_cell.font = title_font
+    title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    for col_idx in range(1, total_cols + 1):
+        title_range_cell = sheet.cell(row=1, column=col_idx)
+        title_range_cell.fill = title_fill
+        title_range_cell.border = table_border
+    sheet.row_dimensions[1].height = 24
+
+    headers = [
+        "Part #",
+        "Original Condition",
+        *_build_historic_image_report_headers(
+            endform_type,
+            class_name,
+            pieces_per_row,
+        ),
+    ]
+    for col_idx, header in enumerate(headers, start=1):
+        cell = sheet.cell(row=2, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
+
+    sheet.column_dimensions["A"].width = 18
+    sheet.column_dimensions["B"].width = 22
+    for col_idx in range(3, total_cols + 1):
+        sheet.column_dimensions[get_column_letter(col_idx)].width = (composite_width + image_margin_px * 2) / 7.0
+    sheet.freeze_panes = "C3"
+
+    total_pieces = len(historic_index)
+    if progress_callback:
+        progress_callback(0, total_pieces, "Preparing image report")
+
+    with TemporaryDirectory() as temp_dir:
+        for piece_idx, batch in enumerate(historic_index):
+            piece_result = _historic_piece_result(batch)
+            data_row = (piece_idx // pieces_per_row) + 3
+            piece_col = (piece_idx % pieces_per_row) + 3
+
+            if (piece_idx % pieces_per_row) == 0:
+                sheet.cell(row=data_row, column=1, value=(piece_idx // pieces_per_row) + 1)
+                sheet.cell(row=data_row, column=2, value=None)
+                sheet.row_dimensions[data_row].height = (composite_height + image_margin_px * 2) * 0.75
+                for col_idx in range(1, total_cols + 1):
+                    cell = sheet.cell(row=data_row, column=col_idx)
+                    cell.alignment = center
+                    cell.border = table_border
+
+            selected_images = list(batch or [])[:images_per_piece]
+            image_paths = [source_dir / img_name for img_name in selected_images]
+            composite_path = Path(temp_dir) / f"piece_{piece_idx + 1:06d}.png"
+            run_number = (piece_idx % pieces_per_row) + 1
+            label_text = f"Run #{run_number}"
+            if piece_result:
+                result_label = "Ok" if piece_result == "OK" else piece_result
+                label_text = f"{label_text} - {result_label}"
+            _make_piece_contact_sheet(
+                image_paths,
+                composite_path,
+                tile_size=tile_size,
+                padding=padding,
+                label_text=label_text,
+            )
+
+            workbook_image = WorkbookImage(str(composite_path))
+            workbook_image.width = composite_width
+            workbook_image.height = composite_height
+            _set_image_anchor(
+                workbook_image,
+                data_row,
+                piece_col,
+                composite_width,
+                composite_height,
+                margin_px=image_margin_px,
+            )
+            sheet.add_image(workbook_image)
+
+            if progress_callback:
+                progress_callback(piece_idx + 1, total_pieces, "Adding pieces to workbook")
+
+        filename = _format_historic_image_report_filename(created_at=created_at)
+        output_path = report_dir / filename
+        workbook.save(output_path)
+
     return str(output_path)

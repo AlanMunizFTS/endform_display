@@ -245,6 +245,50 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertFalse(display.sync_message_is_error)
             fake_db.close.assert_called_once_with()
 
+    @patch("main_controller.Thread", _ImmediateThread)
+    def test_start_export_historic_image_report_async_exports_workbook(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            display = self._build_display(db=MagicMock())
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(
+                    temp_dir=tmp_dir,
+                    historic_download_check_interval=15,
+                ),
+            )
+            controller.remote_db_poll_thread = _AliveThread()
+            controller.stop_historic_download_worker = MagicMock()
+            controller.stop_remote_db_polling = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+            controller.start_remote_db_polling = MagicMock()
+
+            with patch(
+                "report_exporter.export_historic_image_table_report",
+                return_value=f"{tmp_dir}\\reports\\reporte_imagenes_historico_20260514_093000.xlsx",
+            ) as export_mock:
+                controller.start_export_historic_image_report_async(
+                    endform_type="mush",
+                    class_name="split",
+                )
+
+            export_mock.assert_called_once()
+            self.assertEqual(export_mock.call_args.kwargs["endform_type"], "mush")
+            self.assertEqual(export_mock.call_args.kwargs["class_name"], "split")
+            controller.stop_historic_download_worker.assert_called_once_with()
+            controller.stop_remote_db_polling.assert_called_once_with()
+            controller.start_historic_download_on_startup.assert_called_once_with(
+                tmp_dir,
+                check_interval=15,
+            )
+            controller.start_remote_db_polling.assert_called_once_with()
+            self.assertFalse(display.sync_in_progress)
+            self.assertEqual(display.sync_progress_title, "Exporting Image Report")
+            self.assertEqual(
+                display.sync_message,
+                "Image report exported: reporte_imagenes_historico_20260514_093000.xlsx",
+            )
+            self.assertFalse(display.sync_message_is_error)
+
     def test_check_and_register_new_historic_images_skips_during_dataset_transfer(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             annotated_dir = Path(tmp_dir) / "annotated"

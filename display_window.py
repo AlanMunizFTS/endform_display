@@ -89,6 +89,7 @@ class DisplayWindow:
         self.reset_button_rect = None  # Reset button rect
         self.trash_button_rect = None  # Trash button rect
         self.sync_button_rect = None  # Sync button rect
+        self.image_report_button_rect = None  # Historic image report button rect
         self.import_button_rect = None  # Import button rect
         self.export_button_rect = None  # Export button rect
         self.exit_button_rect = None  # Exit button rect
@@ -402,6 +403,46 @@ class DisplayWindow:
             return package_path or None
         except Exception as exc:
             self._set_toast_message(f"Unable to open import dialog: {exc}", is_error=True)
+            return None
+
+    def _prompt_historic_image_report_labels(self):
+        """Ask the operator for report header labels before exporting."""
+        try:
+            import tkinter as tk
+            from tkinter import simpledialog
+
+            root = tk.Tk()
+            root.withdraw()
+            root.update_idletasks()
+            endform_type = simpledialog.askstring(
+                "Image Report",
+                "Endform type:",
+                parent=root,
+            )
+            if endform_type is None:
+                root.destroy()
+                return None
+            class_name = simpledialog.askstring(
+                "Image Report",
+                "Classname:",
+                parent=root,
+            )
+            root.destroy()
+
+            endform_type = str(endform_type or "").strip()
+            class_name = str(class_name or "").strip()
+            if not endform_type or not class_name:
+                self._set_toast_message(
+                    "Endform type and classname are required",
+                    is_error=True,
+                )
+                return None
+            return {
+                "endform_type": endform_type,
+                "class_name": class_name,
+            }
+        except Exception as exc:
+            self._set_toast_message(f"Unable to open report dialog: {exc}", is_error=True)
             return None
 
     def _copy_stats_modal_jsn(self, jsn):
@@ -2202,6 +2243,14 @@ class DisplayWindow:
                     self._emit_action("export_display_state")
                     return
 
+            if self.image_report_button_rect and self.historic_mode and not self.show_no_images_dialog:
+                bx, by, bw, bh = self.image_report_button_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    labels = self._prompt_historic_image_report_labels()
+                    if labels:
+                        self._emit_action("export_historic_image_report", **labels)
+                    return
+
             if self.import_button_rect and not self.show_no_images_dialog:
                 bx, by, bw, bh = self.import_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -2565,6 +2614,64 @@ class DisplayWindow:
         )
 
         return canvas
+
+    def draw_image_report_button(self, canvas):
+        """Draw historic image REPORT button on canvas."""
+        button_width = 180
+        button_height = 60
+        margin_right = 30
+        margin_bottom = 10
+        spacing = 20
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.0
+        thickness = 2
+
+        x_reset = self.width - button_width - margin_right
+        x_sync = x_reset - spacing - button_width
+        x_export = x_sync - spacing - button_width
+        x_import = x_export - spacing - button_width
+        x_report = x_import - spacing - button_width
+        y_button = self.height - button_height - margin_bottom
+
+        self.image_report_button_rect = (x_report, y_button, button_width, button_height)
+
+        is_hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.image_report_button_rect)
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        scaled_rect = self._scale_rect(self.image_report_button_rect, scale_factor)
+        x_draw, y_draw, w_draw, h_draw = scaled_rect
+
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (125, 90, 180),
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (0, 0, 0),
+            2,
+        )
+
+        text_label = "REPORT"
+        text_size = cv2.getTextSize(text_label, font, font_scale, thickness)[0]
+        text_x = x_draw + (w_draw - text_size[0]) // 2
+        text_y = y_draw + (h_draw + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            text_label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
+
+        return canvas
     
     def draw_back_button(self, canvas):
         """Draw back button on canvas"""
@@ -2754,11 +2861,13 @@ class DisplayWindow:
         sync_width = 180
         export_width = 180
         import_width = 180
+        report_width = 180
         x_reset = self.width - reset_width - margin_right
         x_sync = x_reset - spacing - sync_width
         x_export = x_sync - spacing - export_width
         x_import = x_export - spacing - import_width
-        x_trash = x_import - spacing - button_width
+        x_report = x_import - spacing - report_width
+        x_trash = x_report - spacing - button_width
         y_trash = self.height - button_height - margin_top
 
         self.trash_button_rect = (x_trash, y_trash, button_width, button_height)
@@ -5073,6 +5182,7 @@ class DisplayWindow:
             canvas = self.draw_back_button(canvas)
             canvas = self.draw_info_icon(canvas)
             canvas = self.draw_trash_button(canvas)
+            canvas = self.draw_image_report_button(canvas)
             canvas = self.draw_import_button(canvas)
             canvas = self.draw_export_button(canvas)
             canvas = self.draw_sync_button(canvas)
