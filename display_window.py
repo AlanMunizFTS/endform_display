@@ -107,6 +107,7 @@ class DisplayWindow:
         self.sync_message = ""
         self.sync_message_is_error = False
         self.sync_message_time = 0
+        self.sync_message_auto_dismiss_sec = None
         self.sync_message_close_button_rect = None
         self.sync_in_progress = False
         self.sync_progress = 0
@@ -239,6 +240,13 @@ class DisplayWindow:
             self.action_handler(action, **payload)
         except Exception as exc:
             print(f"Error dispatching UI action '{action}': {exc}")
+
+    def _clear_sync_message(self):
+        self.sync_message = ""
+        self.sync_message_is_error = False
+        self.sync_message_time = 0
+        self.sync_message_auto_dismiss_sec = None
+        self.sync_message_close_button_rect = None
 
     def _require_controller(self):
         if self.controller is not None:
@@ -1991,10 +1999,7 @@ class DisplayWindow:
                 if self.sync_message_close_button_rect:
                     bx, by, bw, bh = self.sync_message_close_button_rect
                     if bx <= x <= bx + bw and by <= y <= by + bh:
-                        self.sync_message = ""
-                        self.sync_message_is_error = False
-                        self.sync_message_time = 0
-                        self.sync_message_close_button_rect = None
+                        self._clear_sync_message()
                 return
 
             # Piece date dialog close button (highest priority)
@@ -3312,6 +3317,12 @@ class DisplayWindow:
 
     def draw_sync_message(self, canvas):
         """Draw completion/error message after syncing dataset."""
+        if self.sync_message and self.sync_message_auto_dismiss_sec is not None:
+            elapsed = time.time() - float(self.sync_message_time or 0)
+            if elapsed >= float(self.sync_message_auto_dismiss_sec):
+                self._clear_sync_message()
+                return canvas
+
         if (
             not self.sync_message
             or self.show_reset_confirm

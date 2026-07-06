@@ -115,6 +115,7 @@ class DailyExportMaintenance:
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
+        d.sync_message_auto_dismiss_sec = None
 
         try:
             worker_state = self.controller._pause_dataset_background_workers()
@@ -185,6 +186,7 @@ class DailyExportMaintenance:
                 status = "success"
                 d.sync_message = f"Daily export/reset completed: {package_name}"
                 d.sync_message_is_error = False
+                d.sync_message_auto_dismiss_sec = 5.0
             self.logger.info(
                 f"[DAILY_MAINTENANCE] Completed daily export/reset ({reason}): "
                 f"{export_result.get('package_path')}",
@@ -194,6 +196,7 @@ class DailyExportMaintenance:
             error_text = str(exc)
             d.sync_message = f"Daily export/reset failed: {error_text}"
             d.sync_message_is_error = True
+            d.sync_message_auto_dismiss_sec = None
             self.logger.error(
                 f"[DAILY_MAINTENANCE] Daily export/reset failed: {exc}",
                 allow_repeat=True,
