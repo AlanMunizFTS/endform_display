@@ -619,7 +619,7 @@ def export_historic_image_table_report(
             cell.alignment = center
             cell.border = table_border
 
-        for offset, header in enumerate(("Part #", "Original Condition", image_header)):
+        for offset, header in enumerate(("Part #", "Inferenced Condition", image_header)):
             cell = sheet.cell(row=3, column=base_col + offset, value=header)
             cell.fill = header_fill
             cell.font = header_font
@@ -654,7 +654,7 @@ def export_historic_image_table_report(
             base_col = block_idx * 3 + 1
             piece_col = base_col + 2
             sheet.cell(row=data_row, column=base_col, value=piece_idx + 1)
-            sheet.cell(row=data_row, column=base_col + 1, value=None)
+            sheet.cell(row=data_row, column=base_col + 1, value=piece_result or None)
 
             selected_images = list(batch or [])[:images_per_piece]
             image_paths = [source_dir / img_name for img_name in selected_images]

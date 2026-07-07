@@ -47,11 +47,17 @@ def main():
     install_print_logger(reset=True)
     logger = get_logger()
 
+    logger.checkpoint("Entro a main.py")
+
+    logger.checkpoint("Antes de importar DisplayWindows y SFTPApp")
     from display_window import DisplayWindow
     from sftp_app import SFTPApp
+    logger.checkpoint("Después de importar DisplayWindow y SFTPApp")
 
+    logger.checkpoint("Antes de leer configuración SFTP")
     try:
         sftp_credentials = get_optional_sftp_settings()
+        logger.checkpoint("Después de leer configuración SFTP")
     except Exception as exc:
         logger.error(
             f"[SSH] Invalid SFTP settings, running local-only: {exc}",
