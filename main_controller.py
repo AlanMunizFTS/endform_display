@@ -2094,6 +2094,7 @@ class MainController:
         output_dir=None,
         endform_type="",
         class_name="",
+        pieces_per_column=60,
     ):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
@@ -2131,6 +2132,7 @@ class MainController:
                     output_dir=output_dir,
                     endform_type=endform_type,
                     class_name=class_name,
+                    pieces_per_column=pieces_per_column,
                     progress_callback=_report_progress_cb,
                 )
                 report_name = os.path.basename(str(report_path))
@@ -5418,6 +5420,7 @@ class MainController:
             self.start_export_historic_image_report_async(
                 endform_type=payload.get("endform_type"),
                 class_name=payload.get("class_name"),
+                pieces_per_column=payload.get("pieces_per_column", 60),
             )
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True

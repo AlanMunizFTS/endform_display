@@ -214,7 +214,7 @@ class TestReportExporter(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "valid DB date range"):
                 export_stats_report(controller, output_dir=tmp_dir)
 
-    def test_export_historic_image_table_report_places_four_pieces_per_row(self):
+    def test_export_historic_image_table_report_places_pieces_per_column(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             historic_dir = Path(tmp_dir) / "historic"
             report_dir = Path(tmp_dir) / "reports"
@@ -245,6 +245,7 @@ class TestReportExporter(unittest.TestCase):
                 created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
                 endform_type="mush",
                 class_name="split",
+                pieces_per_column=2,
             )
 
             path = Path(output_path)
@@ -255,16 +256,25 @@ class TestReportExporter(unittest.TestCase):
             workbook = load_workbook(path)
             sheet = workbook["Piezas"]
             self.assertEqual(sheet["A1"].value, "PART-BY-PART RESULT SPLIT")
-            self.assertEqual(sheet["A2"].value, "Part #")
-            self.assertEqual(sheet["B2"].value, "Original Condition")
-            self.assertEqual(sheet["C2"].value, "mush-split-0")
-            self.assertEqual(sheet["D2"].value, "mush-split-90")
-            self.assertEqual(sheet["E2"].value, "mush-split-180")
-            self.assertEqual(sheet["F2"].value, "mush-split-270")
-            self.assertEqual(sheet["A3"].value, 1)
-            self.assertIsNone(sheet["B3"].value)
-            self.assertEqual(sheet["A4"].value, 2)
+            self.assertEqual(sheet["A2"].value, "Pieces 1-2")
+            self.assertEqual(sheet["D2"].value, "Pieces 3-4")
+            self.assertEqual(sheet["G2"].value, "Pieces 5-5")
+            self.assertEqual(sheet["A3"].value, "Part #")
+            self.assertEqual(sheet["B3"].value, "Original Condition")
+            self.assertEqual(sheet["C3"].value, "mush-split")
+            self.assertEqual(sheet["D3"].value, "Part #")
+            self.assertEqual(sheet["E3"].value, "Original Condition")
+            self.assertEqual(sheet["F3"].value, "mush-split")
+            self.assertEqual(sheet["A4"].value, 1)
             self.assertIsNone(sheet["B4"].value)
+            self.assertEqual(sheet["A5"].value, 2)
+            self.assertIsNone(sheet["B5"].value)
+            self.assertEqual(sheet["D4"].value, 3)
+            self.assertIsNone(sheet["E4"].value)
+            self.assertEqual(sheet["D5"].value, 4)
+            self.assertIsNone(sheet["E5"].value)
+            self.assertEqual(sheet["G4"].value, 5)
+            self.assertIsNone(sheet["H4"].value)
             self.assertEqual(len(sheet._images), 5)
             anchors = [
                 (image.anchor._from.row, image.anchor._from.col)
@@ -273,11 +283,11 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(
                 anchors,
                 [
-                    (2, 2),
-                    (2, 3),
-                    (2, 4),
-                    (2, 5),
                     (3, 2),
+                    (4, 2),
+                    (3, 5),
+                    (4, 5),
+                    (3, 8),
                 ],
             )
 

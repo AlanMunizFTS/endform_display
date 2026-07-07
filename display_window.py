@@ -427,7 +427,19 @@ class DisplayWindow:
                 "Classname:",
                 parent=root,
             )
+            if class_name is None:
+                root.destroy()
+                return None
+            pieces_per_column = simpledialog.askinteger(
+                "Image Report",
+                "Pieces per column:",
+                parent=root,
+                initialvalue=60,
+                minvalue=1,
+            )
             root.destroy()
+            if pieces_per_column is None:
+                return None
 
             endform_type = str(endform_type or "").strip()
             class_name = str(class_name or "").strip()
@@ -440,6 +452,7 @@ class DisplayWindow:
             return {
                 "endform_type": endform_type,
                 "class_name": class_name,
+                "pieces_per_column": int(pieces_per_column),
             }
         except Exception as exc:
             self._set_toast_message(f"Unable to open report dialog: {exc}", is_error=True)

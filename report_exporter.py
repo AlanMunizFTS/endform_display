@@ -186,18 +186,13 @@ def _format_historic_image_report_filename(created_at=None):
     return f"reporte_imagenes_historico_{timestamp:%Y%m%d_%H%M%S}.xlsx"
 
 
-def _build_historic_image_report_headers(endform_type, class_name, pieces_per_row):
+def _build_historic_image_report_image_header(endform_type, class_name):
     base_parts = [
         str(endform_type or "").strip(),
         str(class_name or "").strip(),
     ]
     base_label = "-".join(part for part in base_parts if part)
-    angles = (0, 90, 180, 270)
-    headers = []
-    for idx in range(pieces_per_row):
-        angle = angles[idx] if idx < len(angles) else idx
-        headers.append(f"{base_label}-{angle}" if base_label else str(angle))
-    return headers
+    return base_label or "Image"
 
 
 def _apply_headers(sheet, headers, header_fill, header_font, center):
@@ -545,7 +540,8 @@ def export_historic_image_table_report(
     created_at=None,
     endform_type="",
     class_name="",
-    pieces_per_row=4,
+    pieces_per_column=60,
+    pieces_per_row=None,
     images_per_piece=7,
     progress_callback=None,
 ):
@@ -562,7 +558,9 @@ def export_historic_image_table_report(
     sheet.title = "Piezas"
     sheet.sheet_view.showGridLines = False
 
-    pieces_per_row = max(1, int(pieces_per_row or 4))
+    if pieces_per_row is not None and int(pieces_per_column or 60) == 60:
+        pieces_per_column = pieces_per_row
+    pieces_per_column = max(1, int(pieces_per_column or 60))
     images_per_piece = max(1, int(images_per_piece or 7))
     tile_size = 110
     padding = 6
@@ -578,7 +576,13 @@ def export_historic_image_table_report(
     thin_side = Side(style="thin", color="000000")
     table_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
 
-    total_cols = pieces_per_row + 2
+    total_pieces = len(historic_index)
+    total_blocks = max(1, (total_pieces + pieces_per_column - 1) // pieces_per_column)
+    total_cols = total_blocks * 3
+    first_data_row = 4
+    data_row_count = min(pieces_per_column, total_pieces)
+    image_header = _build_historic_image_report_image_header(endform_type, class_name)
+
     sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     title_cell = sheet.cell(row=1, column=1, value="PART-BY-PART RESULT SPLIT")
     title_cell.fill = title_fill
@@ -590,51 +594,72 @@ def export_historic_image_table_report(
         title_range_cell.border = table_border
     sheet.row_dimensions[1].height = 24
 
-    headers = [
-        "Part #",
-        "Original Condition",
-        *_build_historic_image_report_headers(
-            endform_type,
-            class_name,
-            pieces_per_row,
-        ),
-    ]
-    for col_idx, header in enumerate(headers, start=1):
-        cell = sheet.cell(row=2, column=col_idx, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = center
-        cell.border = table_border
+    for block_idx in range(total_blocks):
+        base_col = block_idx * 3 + 1
+        start_piece = block_idx * pieces_per_column + 1
+        end_piece = min((block_idx + 1) * pieces_per_column, total_pieces)
+        sheet.merge_cells(
+            start_row=2,
+            start_column=base_col,
+            end_row=2,
+            end_column=base_col + 2,
+        )
+        block_cell = sheet.cell(
+            row=2,
+            column=base_col,
+            value=f"Pieces {start_piece}-{end_piece}",
+        )
+        block_cell.fill = header_fill
+        block_cell.font = header_font
+        block_cell.alignment = center
+        for col_idx in range(base_col, base_col + 3):
+            cell = sheet.cell(row=2, column=col_idx)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+            cell.border = table_border
 
-    sheet.column_dimensions["A"].width = 18
-    sheet.column_dimensions["B"].width = 22
-    for col_idx in range(3, total_cols + 1):
-        sheet.column_dimensions[get_column_letter(col_idx)].width = (composite_width + image_margin_px * 2) / 7.0
-    sheet.freeze_panes = "C3"
+        for offset, header in enumerate(("Part #", "Original Condition", image_header)):
+            cell = sheet.cell(row=3, column=base_col + offset, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = center
+            cell.border = table_border
 
-    total_pieces = len(historic_index)
+    for block_idx in range(total_blocks):
+        base_col = block_idx * 3 + 1
+        sheet.column_dimensions[get_column_letter(base_col)].width = 18
+        sheet.column_dimensions[get_column_letter(base_col + 1)].width = 22
+        sheet.column_dimensions[get_column_letter(base_col + 2)].width = (
+            composite_width + image_margin_px * 2
+        ) / 7.0
+    sheet.freeze_panes = "D4"
+
+    for row_idx in range(first_data_row, first_data_row + data_row_count):
+        sheet.row_dimensions[row_idx].height = (composite_height + image_margin_px * 2) * 0.75
+        for col_idx in range(1, total_cols + 1):
+            cell = sheet.cell(row=row_idx, column=col_idx)
+            cell.alignment = center
+            cell.border = table_border
+
     if progress_callback:
         progress_callback(0, total_pieces, "Preparing image report")
 
     with TemporaryDirectory() as temp_dir:
         for piece_idx, batch in enumerate(historic_index):
             piece_result = _historic_piece_result(batch)
-            data_row = (piece_idx // pieces_per_row) + 3
-            piece_col = (piece_idx % pieces_per_row) + 3
-
-            if (piece_idx % pieces_per_row) == 0:
-                sheet.cell(row=data_row, column=1, value=(piece_idx // pieces_per_row) + 1)
-                sheet.cell(row=data_row, column=2, value=None)
-                sheet.row_dimensions[data_row].height = (composite_height + image_margin_px * 2) * 0.75
-                for col_idx in range(1, total_cols + 1):
-                    cell = sheet.cell(row=data_row, column=col_idx)
-                    cell.alignment = center
-                    cell.border = table_border
+            block_idx = piece_idx // pieces_per_column
+            row_in_block = piece_idx % pieces_per_column
+            data_row = first_data_row + row_in_block
+            base_col = block_idx * 3 + 1
+            piece_col = base_col + 2
+            sheet.cell(row=data_row, column=base_col, value=piece_idx + 1)
+            sheet.cell(row=data_row, column=base_col + 1, value=None)
 
             selected_images = list(batch or [])[:images_per_piece]
             image_paths = [source_dir / img_name for img_name in selected_images]
             composite_path = Path(temp_dir) / f"piece_{piece_idx + 1:06d}.png"
-            run_number = (piece_idx % pieces_per_row) + 1
+            run_number = piece_idx + 1
             label_text = f"Run #{run_number}"
             if piece_result:
                 result_label = "Ok" if piece_result == "OK" else piece_result

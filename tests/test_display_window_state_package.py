@@ -35,7 +35,11 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         with patch.object(
             display,
             "_prompt_historic_image_report_labels",
-            return_value={"endform_type": "mush", "class_name": "split"},
+            return_value={
+                "endform_type": "mush",
+                "class_name": "split",
+                "pieces_per_column": 60,
+            },
         ):
             display.mouse_callback(
                 cv2.EVENT_LBUTTONDOWN,
@@ -49,6 +53,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
             "export_historic_image_report",
             endform_type="mush",
             class_name="split",
+            pieces_per_column=60,
         )
 
     @patch("display_window.get_db_connection")
