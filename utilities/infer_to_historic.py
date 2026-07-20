@@ -1,8 +1,9 @@
-"""Run YOLO inference on a folder and save results into historic.
+"""Run YOLO defect inference or piece segmentation into historic.
 
 This utility intentionally does not write to the database. The display app will
 pick up saved ``*_OK`` and ``*_NOK`` files from ``tmp_display/historic`` using
-its existing bootstrap flow.
+its existing bootstrap flow. Defect inference remains the default workflow;
+piece segmentation is enabled explicitly with ``--mode segment``.
 """
 
 import argparse
@@ -11,24 +12,46 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import numpy as np
+
+try:
+    from paths_config import HISTORIC_LOCAL_DIR
+except ModuleNotFoundError:
+    # Support direct execution via ``python utilities/infer_to_historic.py``.
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from paths_config import HISTORIC_LOCAL_DIR
 
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png"}
 POSITIONS = ("side", "front", "diag")
 DEFAULT_CONFIDENCE = 0.33
-DEFAULT_HISTORIC_DIR = Path("tmp_display") / "historic"
+DEFAULT_HISTORIC_DIR = HISTORIC_LOCAL_DIR
+SEGMENT_IMAGE_SIZE = 640
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Run YOLO inference on images and save _OK/_NOK outputs to historic."
+        description="Run YOLO defect inference or piece segmentation into historic."
     )
     parser.add_argument("input_dir", type=Path, help="Folder containing images to process")
+    parser.add_argument(
+        "--mode",
+        choices=("defects", "segment"),
+        default="defects",
+        help="Inference workflow to run. Default: %(default)s",
+    )
     parser.add_argument(
         "--models-dir",
         type=Path,
         default=Path("models"),
         help="Folder containing YOLO .pt models. Default: %(default)s",
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        help="YOLO segmentation .pt model. Required when --mode segment is used.",
     )
     parser.add_argument(
         "--historic-dir",
@@ -47,7 +70,10 @@ def parse_args():
         default="cpu",
         help="Ultralytics device value, for example cpu, 0, or 0,1. Default: %(default)s",
     )
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.mode == "segment" and args.model is None:
+        parser.error("--model is required when --mode segment is used")
+    return args
 
 
 def get_position(filename):
@@ -277,33 +303,191 @@ def process_images(input_dir, models_by_position, historic_dir, confidence, devi
     return summary
 
 
+def load_segmentation_model(model_path, yolo_cls=None):
+    """Load the single YOLO model used by the segmentation workflow."""
+    if yolo_cls is None:
+        from ultralytics import YOLO
+
+        yolo_cls = YOLO
+
+    path = Path(model_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Segmentation model does not exist: {path}")
+    if path.suffix.lower() != ".pt":
+        raise ValueError(f"Segmentation model must be a .pt file: {path}")
+    model = yolo_cls(str(path))
+    print(f"[MODEL] Loaded segmentation model: {path.name}")
+    return model
+
+
+def _to_numpy(values):
+    if values is None:
+        return None
+    cpu = getattr(values, "cpu", None)
+    if callable(cpu):
+        values = cpu()
+    numpy_method = getattr(values, "numpy", None)
+    if callable(numpy_method):
+        values = numpy_method()
+    return np.asarray(values)
+
+
+def pad_to_square(image, size=SEGMENT_IMAGE_SIZE):
+    """Center an image on a black square canvas and resize it."""
+    if image is None or getattr(image, "size", 0) == 0:
+        raise ValueError("Object crop image is empty")
+
+    height, width = image.shape[:2]
+    max_dimension = max(height, width)
+    if max_dimension <= 0:
+        raise ValueError("Object crop has invalid dimensions")
+
+    if image.ndim == 2:
+        padded = np.zeros((max_dimension, max_dimension), dtype=image.dtype)
+    else:
+        padded = np.zeros(
+            (max_dimension, max_dimension, image.shape[2]),
+            dtype=image.dtype,
+        )
+    x_offset = (max_dimension - width) // 2
+    y_offset = (max_dimension - height) // 2
+    padded[y_offset : y_offset + height, x_offset : x_offset + width] = image
+    return cv2.resize(padded, (size, size))
+
+
+def extract_first_segmented_object(result, original_image, image_size=SEGMENT_IMAGE_SIZE):
+    """Return the first valid masked object crop in an Ultralytics result."""
+    if result is None:
+        raise ValueError("Segmentation model returned no result")
+    if original_image is None or getattr(original_image, "size", 0) == 0:
+        raise ValueError("Could not read input image")
+
+    masks = getattr(result, "masks", None)
+    boxes = getattr(result, "boxes", None)
+    polygons = getattr(masks, "xy", None) if masks is not None else None
+    box_values = _to_numpy(getattr(boxes, "xyxy", None)) if boxes is not None else None
+    if polygons is None or box_values is None:
+        raise ValueError("Segmentation result has no masks or bounding boxes")
+
+    box_values = np.atleast_2d(box_values)
+    height, width = original_image.shape[:2]
+    for polygon, bbox in zip(polygons, box_values):
+        try:
+            contour = _to_numpy(polygon).astype(np.int32).reshape(-1, 1, 2)
+            if len(contour) < 3 or np.asarray(bbox).size < 4:
+                continue
+
+            x1, y1, x2, y2 = np.asarray(bbox).reshape(-1)[:4]
+            x1 = max(0, min(width, int(np.floor(x1))))
+            y1 = max(0, min(height, int(np.floor(y1))))
+            x2 = max(0, min(width, int(np.ceil(x2))))
+            y2 = max(0, min(height, int(np.ceil(y2))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            binary_mask = np.zeros((height, width), dtype=np.uint8)
+            cv2.drawContours(binary_mask, [contour], -1, 255, cv2.FILLED)
+            masked = cv2.bitwise_and(original_image, original_image, mask=binary_mask)
+            crop = masked[y1:y2, x1:x2]
+            if crop.size == 0 or not np.any(binary_mask[y1:y2, x1:x2]):
+                continue
+            return pad_to_square(crop, size=image_size)
+        except Exception:
+            continue
+
+    raise ValueError("No valid segmented objects found")
+
+
+def segment_image(image_path, model, confidence, device):
+    original_image = cv2.imread(str(image_path))
+    if original_image is None:
+        raise ValueError("Could not read input image")
+    results = _run_model(model, image_path, confidence, device)
+    result = _prediction_result(results)
+    return extract_first_segmented_object(result, original_image)
+
+
+def save_segment_to_historic(image_path, segmented_image, historic_dir):
+    historic_path = Path(historic_dir)
+    historic_path.mkdir(parents=True, exist_ok=True)
+    output_name = build_status_filename(Path(image_path).name, "OK")
+    output_path = historic_path / output_name
+    if not cv2.imwrite(str(output_path), segmented_image):
+        raise IOError(f"Could not write segmented image: {output_path}")
+    _remove_stale_status_outputs(
+        historic_dir=historic_path,
+        source_path=image_path,
+        output_path=output_path,
+        filename=Path(image_path).name,
+    )
+    return output_path
+
+
+def process_segment_images(input_dir, model, historic_dir, confidence, device):
+    image_paths = collect_images(input_dir)
+    if not image_paths:
+        print(f"[INFO] No images found in {input_dir}")
+        return {"processed": 0, "skipped": 0}
+
+    summary = {"processed": 0, "skipped": 0}
+    for image_path in image_paths:
+        try:
+            segmented_image = segment_image(image_path, model, confidence, device)
+            output_path = save_segment_to_historic(
+                image_path,
+                segmented_image,
+                historic_dir,
+            )
+            summary["processed"] += 1
+            print(f"[SEGMENTED] {image_path.name} -> {output_path.name}")
+        except Exception as exc:
+            summary["skipped"] += 1
+            print(f"[ERROR] Skipping {image_path}: {exc}")
+    return summary
+
+
 def main():
     args = parse_args()
     input_dir = args.input_dir.resolve()
-    models_dir = args.models_dir.resolve()
     historic_dir = args.historic_dir.resolve()
 
     if not input_dir.is_dir():
         raise NotADirectoryError(f"Input folder does not exist: {input_dir}")
 
-    models_by_position = load_models(models_dir)
-    if not any(models_by_position.values()):
-        print("[WARN] No position-matched models loaded; all images will be saved as OK.")
+    if args.mode == "segment":
+        model = load_segmentation_model(args.model.resolve())
+        summary = process_segment_images(
+            input_dir=input_dir,
+            model=model,
+            historic_dir=historic_dir,
+            confidence=float(args.conf),
+            device=args.device,
+        )
+        print(
+            "Done. "
+            f"processed={summary['processed']} "
+            f"skipped={summary['skipped']}"
+        )
+    else:
+        models_dir = args.models_dir.resolve()
+        models_by_position = load_models(models_dir)
+        if not any(models_by_position.values()):
+            print("[WARN] No position-matched models loaded; all images will be saved as OK.")
 
-    summary = process_images(
-        input_dir=input_dir,
-        models_by_position=models_by_position,
-        historic_dir=historic_dir,
-        confidence=float(args.conf),
-        device=args.device,
-    )
-    print(
-        "Done. "
-        f"processed={summary['processed']} "
-        f"ok={summary['ok']} "
-        f"nok={summary['nok']} "
-        f"skipped={summary['skipped']}"
-    )
+        summary = process_images(
+            input_dir=input_dir,
+            models_by_position=models_by_position,
+            historic_dir=historic_dir,
+            confidence=float(args.conf),
+            device=args.device,
+        )
+        print(
+            "Done. "
+            f"processed={summary['processed']} "
+            f"ok={summary['ok']} "
+            f"nok={summary['nok']} "
+            f"skipped={summary['skipped']}"
+        )
     return 0 if summary["skipped"] == 0 else 1
 
 
