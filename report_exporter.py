@@ -383,7 +383,10 @@ def export_ok_nok_traceability_report(db_client, output_dir=None, created_at=Non
     workbook = _build_traceability_workbook(db_client)
     filename = _format_traceability_filename(created_at=created_at)
     output_path = report_dir / filename
-    workbook.save(output_path)
+    try:
+        workbook.save(output_path)
+    finally:
+        workbook.close()
     return str(output_path)
 
 
@@ -403,7 +406,10 @@ def export_combined_traceability_report(controller, db_client=None, output_dir=N
     _add_stats_matrix_sheet(workbook, matrix_rows)
     filename = _format_traceability_filename(created_at=created_at)
     output_path = report_dir / filename
-    workbook.save(output_path)
+    try:
+        workbook.save(output_path)
+    finally:
+        workbook.close()
     return str(output_path)
 
 
@@ -424,5 +430,8 @@ def export_stats_report(controller, db_client=None, output_dir=None):
         report_data.get("end_at"),
     )
     output_path = report_dir / filename
-    workbook.save(output_path)
+    try:
+        workbook.save(output_path)
+    finally:
+        workbook.close()
     return str(output_path)

@@ -643,6 +643,8 @@ class MainController:
         self.remote_db_checkpoint_loaded = False
         self.remote_db_forward_cursor_id = 0
         self.remote_db_backfill_cursor_id = 0
+        self.remote_db_stats_last_refresh_ts = 0.0
+        self.remote_db_stats_refresh_interval_sec = 2.0
         self.last_historic_check = 0.0
         self.dataset_transfer_active = False
         self.historic_render_generation_id = 0
@@ -821,6 +823,27 @@ class MainController:
             f"ORDER BY \"id\" ASC LIMIT %s"
         )
 
+    def _build_remote_db_image_lookup_query(self):
+        if self._is_remote_db_table_placeholder():
+            return None
+
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        selected_columns = ", ".join(
+            self._quote_remote_db_identifier(column_name)
+            for column_name in self.config.remote_db_columns
+        )
+        return (
+            f"SELECT \"id\", {selected_columns} FROM {table_name} "
+            f"WHERE \"img_name\" = ANY(%s) "
+            f"ORDER BY \"id\" ASC"
+        )
+
+    def _build_remote_db_max_id_query(self):
+        if self._is_remote_db_table_placeholder():
+            return None
+        table_name = self._quote_remote_db_identifier(self.config.remote_db_table)
+        return f"SELECT COALESCE(MAX(\"id\"), 0) AS max_id FROM {table_name}"
+
     def _close_remote_db_client(self, reason=None):
         remote_db = self.remote_db_client
         self.remote_db_client = None
@@ -900,7 +923,21 @@ class MainController:
             return 0
         return max(0, int(rows[0].get("max_id") or 0))
 
-    def _ensure_remote_db_checkpoint_initialized(self, local_db):
+    def _get_remote_max_model_result_id(self, remote_db):
+        query = self._build_remote_db_max_id_query()
+        if query is None:
+            return 0
+        try:
+            rows = remote_db.fetch(query)
+        except Exception:
+            if remote_db is self.remote_db_client:
+                self._close_remote_db_client("remote-max-id-failure")
+            raise
+        if not rows:
+            return 0
+        return max(0, int(rows[0].get("max_id") or 0))
+
+    def _ensure_remote_db_checkpoint_initialized(self, local_db, remote_db=None):
         if self.remote_db_checkpoint_loaded:
             return self.remote_db_forward_cursor_id
 
@@ -911,9 +948,13 @@ class MainController:
             return persisted_checkpoint
 
         local_checkpoint = self._get_local_max_remote_model_result_id(local_db)
+        checkpoint_source = "local max remote_model_result_id"
+        if local_checkpoint <= 0 and remote_db is not None:
+            local_checkpoint = self._get_remote_max_model_result_id(remote_db)
+            checkpoint_source = "current remote max id"
         self.logger.info(
-            "[REMOTE_DB] Initializing sync checkpoint from local max "
-            f"remote_model_result_id={local_checkpoint}",
+            f"[REMOTE_DB] Initializing forward sync checkpoint from {checkpoint_source}="
+            f"{local_checkpoint}; local images missing metadata are backfilled by name",
             allow_repeat=True,
         )
         return self._persist_remote_db_checkpoint(local_db, local_checkpoint)
@@ -1042,6 +1083,74 @@ class MainController:
         if not rows:
             return 0
         return max(0, int(rows[0].get("cnt") or 0))
+
+    def _fetch_local_images_missing_remote_metadata(self, local_db, limit):
+        row_limit = max(1, int(limit or 1))
+        cursor_id = max(0, int(self.remote_db_backfill_cursor_id or 0))
+        query = (
+            "SELECT ci.id, ci.img_name "
+            "FROM classified_images ci "
+            "WHERE (%s = 0 OR ci.id < %s) "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM classified_image_defects cid "
+            "  WHERE cid.classified_image_id = ci.id"
+            ") "
+            "ORDER BY ci.id DESC "
+            "LIMIT %s"
+        )
+        rows = local_db.fetch(query, (cursor_id, cursor_id, row_limit)) or []
+        if not rows and cursor_id > 0:
+            self.remote_db_backfill_cursor_id = 0
+            rows = local_db.fetch(query, (0, 0, row_limit)) or []
+
+        valid_rows = [
+            row
+            for row in rows
+            if row.get("id") is not None and str(row.get("img_name") or "").strip()
+        ]
+        if valid_rows:
+            self.remote_db_backfill_cursor_id = min(int(row["id"]) for row in valid_rows)
+        return [str(row["img_name"]).strip() for row in valid_rows]
+
+    def _fetch_remote_rows_for_local_images(self, remote_db, image_names):
+        if not image_names:
+            return []
+        query = self._build_remote_db_image_lookup_query()
+        if query is None:
+            return []
+        try:
+            rows = remote_db.fetch(query, (list(image_names),))
+        except Exception:
+            if remote_db is self.remote_db_client:
+                self._close_remote_db_client("remote-backfill-failure")
+            raise
+        return self._normalize_remote_model_result_rows(rows)
+
+    def _refresh_open_stats_modal_after_remote_sync(self, local_db):
+        d = self.display
+        if not getattr(d, "show_stats_class_modal", False):
+            return
+
+        now = time.monotonic()
+        if (
+            now - self.remote_db_stats_last_refresh_ts
+            < self.remote_db_stats_refresh_interval_sec
+        ):
+            return
+
+        try:
+            d.stats_class_modal_rows = self.get_piece_class_summary(db_client=local_db)
+            d.stats_class_modal_status_rows = self.get_piece_status_summary(
+                db_client=local_db
+            )
+            d.stats_class_modal_matrix_rows = self.build_piece_stats_report(
+                db_client=local_db
+            ).get("rows", [])
+            self.remote_db_stats_last_refresh_ts = now
+        except Exception as exc:
+            self.logger.error(
+                f"[REMOTE_DB] Unable to refresh open stats counter: {exc}",
+            )
 
     def _insert_local_classification_defects(self, local_db, matched_rows):
         synced_img_names = []
@@ -1280,7 +1389,27 @@ class MainController:
 
             total_page_budget = max(1, int(self.config.remote_db_max_scan_pages))
             target_sync_batch = max(1, int(self.config.remote_db_target_sync_batch))
-            start_after_id = self._ensure_remote_db_checkpoint_initialized(local_db)
+            start_after_id = self._ensure_remote_db_checkpoint_initialized(
+                local_db,
+                remote_db=remote_db,
+            )
+
+            backfill_batch_size = max(
+                target_sync_batch,
+                int(self.config.remote_db_query_limit) * total_page_budget,
+            )
+            backfill_image_names = self._fetch_local_images_missing_remote_metadata(
+                local_db,
+                backfill_batch_size,
+            )
+            backfill_rows = self._fetch_remote_rows_for_local_images(
+                remote_db,
+                backfill_image_names,
+            )
+            backfill_queued_count = self._enqueue_remote_model_result_rows(
+                local_db,
+                backfill_rows,
+            )
 
             forward_scan = self._scan_remote_rows_for_enqueue(
                 remote_db=remote_db,
@@ -1299,10 +1428,13 @@ class MainController:
                 local_db=local_db,
                 target_sync_batch=target_sync_batch,
             )
+            if sync_summary["synced_count"] > 0:
+                self._refresh_open_stats_modal_after_remote_sync(local_db)
             pending_count = self._count_pending_remote_rows(local_db)
             has_activity = (
                 scanned_count > 0
                 or queued_count > 0
+                or backfill_queued_count > 0
                 or sync_summary["candidate_count"] > 0
                 or sync_summary["synced_count"] > 0
                 or sync_summary["remote_retained_count"] > 0
@@ -1315,6 +1447,8 @@ class MainController:
                     f"scanned={scanned_count}, "
                     f"pages={pages_scanned}, "
                     f"queued={queued_count}, "
+                    f"backfill_images={len(backfill_image_names)}, "
+                    f"backfill_queued={backfill_queued_count}, "
                     f"candidates={sync_summary['candidate_count']}, "
                     f"matched={sync_summary['matched_count']}, "
                     f"synced={sync_summary['synced_count']}, "
@@ -1788,13 +1922,28 @@ class MainController:
         self.sync_worker_thread.start()
 
     def _pause_dataset_background_workers(self):
+        remote_db_was_running = self._pause_remote_db_background_worker()
+        self.stop_historic_download_worker()
+        return {"remote_db_was_running": remote_db_was_running}
+
+    def _pause_remote_db_background_worker(self):
         remote_db_was_running = bool(
             self.remote_db_poll_thread is not None
             and self.remote_db_poll_thread.is_alive()
         )
-        self.stop_historic_download_worker()
         self.stop_remote_db_polling()
-        return {"remote_db_was_running": remote_db_was_running}
+        return remote_db_was_running
+
+    def _resume_remote_db_background_worker(self, was_running):
+        if not was_running:
+            return
+        try:
+            self.start_remote_db_polling()
+        except Exception as exc:
+            self.logger.error(
+                f"[DATASET_TRANSFER] Error restarting remote DB polling: {exc}",
+                allow_repeat=True,
+            )
 
     def _resume_dataset_background_workers(self, worker_state):
         try:
@@ -1808,14 +1957,9 @@ class MainController:
                 allow_repeat=True,
             )
 
-        if worker_state and worker_state.get("remote_db_was_running"):
-            try:
-                self.start_remote_db_polling()
-            except Exception as exc:
-                self.logger.error(
-                    f"[DATASET_TRANSFER] Error restarting remote DB polling: {exc}",
-                    allow_repeat=True,
-                )
+        self._resume_remote_db_background_worker(
+            bool(worker_state and worker_state.get("remote_db_was_running"))
+        )
 
     def start_export_display_state_async(self):
         d = self.display
@@ -2194,7 +2338,10 @@ class MainController:
 
         def _reset_worker():
             worker_db = None
+            remote_db_was_running = False
             try:
+                remote_db_was_running = self._pause_remote_db_background_worker()
+
                 from db import get_db_connection
 
                 worker_db = get_db_connection()
@@ -2230,6 +2377,7 @@ class MainController:
                 d.sync_message_is_error = True
                 self.logger.error(f"[RESET] Reset failed: {exc}", allow_repeat=True)
             finally:
+                self._resume_remote_db_background_worker(remote_db_was_running)
                 d.reset_in_progress = False
                 d.sync_message_time = time.time()
                 if worker_db is not None:
@@ -2261,7 +2409,10 @@ class MainController:
 
         def _rebuild_worker():
             worker_db = None
+            remote_db_was_running = False
             try:
+                remote_db_was_running = self._pause_remote_db_background_worker()
+
                 from db import get_db_connection
 
                 worker_db = get_db_connection()
@@ -2297,6 +2448,7 @@ class MainController:
                 d.sync_message_is_error = True
                 self.logger.error(f"[REBUILD] Database rebuild failed: {exc}", allow_repeat=True)
             finally:
+                self._resume_remote_db_background_worker(remote_db_was_running)
                 d.reset_in_progress = False
                 d.sync_message_time = time.time()
                 if worker_db is not None:

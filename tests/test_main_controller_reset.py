@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from main_controller import ControllerConfig, MainController
 from paths_config import ANNOTATED_SUBDIR_NAME, HISTORIC_SUBDIR_NAME
@@ -40,6 +40,16 @@ class _DisplayStub:
         self.download_stop_event = None
         self.annotated_download_process = None
         self.annotated_download_stop_event = None
+
+
+class _ImmediateThread:
+    def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+
+    def start(self):
+        self.target(*self.args, **self.kwargs)
 
 
 class TestMainControllerReset(unittest.TestCase):
@@ -159,6 +169,29 @@ class TestMainControllerReset(unittest.TestCase):
 
             self.assertFalse(result["ok"])
             self.assertIn("TimeoutError", result["error"])
+
+    def test_async_reset_pauses_and_resumes_remote_db_worker(self):
+        db = MagicMock()
+        display = _DisplayStub(db=db, sftp_client=None)
+        display.reset_in_progress = False
+        display.sync_in_progress = False
+        controller = MainController(
+            display=display,
+            config=ControllerConfig(),
+        )
+        controller._pause_remote_db_background_worker = MagicMock(return_value=True)
+        controller._resume_remote_db_background_worker = MagicMock()
+        controller.perform_reset = MagicMock(return_value={"ok": True})
+
+        with patch("main_controller.Thread", _ImmediateThread), patch(
+            "db.get_db_connection",
+            return_value=db,
+        ):
+            controller.start_reset_async()
+
+        controller._pause_remote_db_background_worker.assert_called_once_with()
+        controller._resume_remote_db_background_worker.assert_called_once_with(True)
+        controller.perform_reset.assert_called_once()
 
 
 if __name__ == "__main__":

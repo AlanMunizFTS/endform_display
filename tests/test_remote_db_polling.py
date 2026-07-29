@@ -38,6 +38,22 @@ class TestRemoteDbPolling(unittest.TestCase):
         "ORDER BY p.remote_id ASC LIMIT %s"
     )
     PENDING_COUNT_QUERY = "SELECT COUNT(*) AS cnt FROM remote_model_results_pending"
+    LOCAL_BACKFILL_QUERY = (
+        "SELECT ci.id, ci.img_name FROM classified_images ci "
+        "WHERE (%s = 0 OR ci.id < %s) "
+        "AND NOT EXISTS ( "
+        "SELECT 1 FROM classified_image_defects cid "
+        "WHERE cid.classified_image_id = ci.id) "
+        "ORDER BY ci.id DESC LIMIT %s"
+    )
+    REMOTE_IMAGE_LOOKUP_QUERY = (
+        'SELECT "id", "img_name", "class_name", "confidence", "created_at", '
+        '"model_name", "geometry_type", "coordinates", "image_width", "image_height" '
+        'FROM "model_results" WHERE "img_name" = ANY(%s) ORDER BY "id" ASC'
+    )
+    REMOTE_MAX_ID_QUERY = (
+        'SELECT COALESCE(MAX("id"), 0) AS max_id FROM "model_results"'
+    )
 
     def _build_display(self):
         display = MagicMock()
@@ -46,6 +62,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         display.historic_offset = 0
         display.historic_mode = False
         display.historic_db_registered = False
+        display.show_stats_class_modal = False
         display.image_paths = []
         display.exit_requested = False
         display.file_manager = None
@@ -82,6 +99,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         *,
         persisted_checkpoint=None,
         local_max_remote_id=0,
+        local_backfill_rows=None,
         pending_ready_rows=None,
         pending_count=0,
     ):
@@ -93,6 +111,8 @@ class TestRemoteDbPolling(unittest.TestCase):
                 return [{"last_seen_id": persisted_checkpoint}]
             if normalized == self.LOCAL_MAX_REMOTE_ID_QUERY:
                 return [{"max_id": local_max_remote_id}]
+            if normalized == self.LOCAL_BACKFILL_QUERY:
+                return list(local_backfill_rows or [])
             if normalized == self.PENDING_READY_QUERY:
                 return list(pending_ready_rows or [])
             if normalized == self.PENDING_COUNT_QUERY:
@@ -155,6 +175,42 @@ class TestRemoteDbPolling(unittest.TestCase):
         self.assertIsNone(controller.remote_db_poll_thread)
         self.assertIsNone(controller.remote_db_stop_event)
         self.assertFalse(first_thread.is_alive())
+
+    def test_remote_sync_refreshes_open_stats_counter(self):
+        display = self._build_display()
+        display.show_stats_class_modal = True
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(),
+        )
+        local_db = self._build_db_client()
+        controller.get_piece_class_summary = MagicMock(
+            return_value=[{"class_name": "dent", "piece_count": 3}]
+        )
+        controller.get_piece_status_summary = MagicMock(
+            return_value=[{"final_result": "NOK", "piece_count": 3}]
+        )
+        controller.build_piece_stats_report = MagicMock(
+            return_value={"rows": [{"class_name": "dent", "NOK": 3}]}
+        )
+
+        controller._refresh_open_stats_modal_after_remote_sync(local_db)
+
+        self.assertEqual(
+            display.stats_class_modal_rows,
+            [{"class_name": "dent", "piece_count": 3}],
+        )
+        self.assertEqual(
+            display.stats_class_modal_status_rows,
+            [{"final_result": "NOK", "piece_count": 3}],
+        )
+        self.assertEqual(
+            display.stats_class_modal_matrix_rows,
+            [{"class_name": "dent", "NOK": 3}],
+        )
+        controller.get_piece_class_summary.assert_called_once_with(db_client=local_db)
 
     @patch("db.get_remote_db_connection_via_ssh")
     def test_remote_db_poll_iteration_syncs_existing_local_rows_without_mutating_remote(self, remote_db_factory):
@@ -290,7 +346,8 @@ class TestRemoteDbPolling(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "scanned=1, pages=1, queued=1, candidates=1, matched=1, "
+                "scanned=1, pages=1, queued=1, backfill_images=0, "
+                "backfill_queued=0, candidates=1, matched=1, "
                 "synced=1, retained_remote=1, pending_local=0" in call.args[0]
                 for call in logger.info.call_args_list
             )
@@ -540,7 +597,7 @@ class TestRemoteDbPolling(unittest.TestCase):
         )
 
     @patch("db.get_remote_db_connection_via_ssh")
-    def test_remote_db_poll_iteration_bootstraps_from_zero_when_no_local_history(self, remote_db_factory):
+    def test_remote_db_poll_iteration_bootstraps_from_remote_max_when_no_local_history(self, remote_db_factory):
         display = self._build_display()
         local_db = self._build_db_client()
         local_db.execute.return_value = 1
@@ -571,24 +628,109 @@ class TestRemoteDbPolling(unittest.TestCase):
             },
         )
         remote_db = MagicMock()
-        remote_db.fetch.return_value = []
+        remote_db.fetch.side_effect = [
+            [{"max_id": 900}],
+            [],
+        ]
         remote_db_factory.return_value = remote_db
 
         delay = controller._run_remote_db_poll_iteration()
 
         self.assertEqual(delay, 2.0)
-        remote_db.fetch.assert_called_once_with(
-            self.REMOTE_MODEL_RESULTS_QUERY,
-            (0, 25),
+        self.assertEqual(
+            remote_db.fetch.call_args_list[0].args,
+            (self.REMOTE_MAX_ID_QUERY,),
         )
-        self.assertEqual(controller.remote_db_forward_cursor_id, 0)
+        self.assertEqual(
+            remote_db.fetch.call_args_list[1].args,
+            (self.REMOTE_MODEL_RESULTS_QUERY, (900, 25)),
+        )
+        self.assertEqual(controller.remote_db_forward_cursor_id, 900)
         local_db.execute.assert_called_once_with(
             "INSERT INTO remote_sync_state (source_name, last_seen_id) "
             "VALUES (%s, %s) "
             "ON CONFLICT (source_name) DO UPDATE SET "
             "last_seen_id = EXCLUDED.last_seen_id, "
             "updated_at = CURRENT_TIMESTAMP",
-            ("remote_db:model_results", 0),
+            ("remote_db:model_results", 900),
+        )
+
+    @patch("db.get_remote_db_connection_via_ssh")
+    def test_remote_db_poll_iteration_backfills_missing_local_images_by_name(self, remote_db_factory):
+        display = self._build_display()
+        local_db = self._build_db_client()
+        local_db.execute.return_value = 1
+        self._configure_local_db_fetch(
+            local_db,
+            persisted_checkpoint=900,
+            local_backfill_rows=[{"id": 77, "img_name": "img_match.png"}],
+            pending_ready_rows=[
+                {
+                    "remote_id": 500,
+                    "img_name": "img_match.png",
+                    "class_name": "dent",
+                    "confidence": 0.91,
+                    "created_at": None,
+                    "model_name": None,
+                    "geometry_type": None,
+                    "coordinates": None,
+                    "image_width": None,
+                    "image_height": None,
+                    "classified_image_id": 77,
+                }
+            ],
+            pending_count=0,
+        )
+        display.db = local_db
+        logger = self._build_logger()
+        controller = MainController(
+            display=display,
+            logger=logger,
+            config=ControllerConfig(
+                remote_db_table="model_results",
+                remote_db_query_limit=25,
+                remote_db_target_sync_batch=1,
+                remote_db_max_scan_pages=1,
+                remote_db_idle_backoff_sec=2.0,
+            ),
+            sftp_credentials={
+                "hostname": "192.168.1.179",
+                "port": 22,
+                "username": "vision",
+                "password": "secret",
+            },
+        )
+        controller._recalculate_piece_result = MagicMock()
+        remote_db = MagicMock()
+        remote_db.fetch.side_effect = [
+            [
+                {
+                    "id": 500,
+                    "img_name": "img_match.png",
+                    "class_name": "dent",
+                    "confidence": 0.91,
+                }
+            ],
+            [],
+        ]
+        remote_db_factory.return_value = remote_db
+
+        delay = controller._run_remote_db_poll_iteration()
+
+        self.assertEqual(delay, 1.0)
+        self.assertEqual(
+            remote_db.fetch.call_args_list[0].args,
+            (self.REMOTE_IMAGE_LOOKUP_QUERY, (["img_match.png"],)),
+        )
+        self.assertEqual(
+            remote_db.fetch.call_args_list[1].args,
+            (self.REMOTE_MODEL_RESULTS_QUERY, (900, 25)),
+        )
+        self.assertEqual(controller.remote_db_forward_cursor_id, 900)
+        self.assertEqual(controller.remote_db_backfill_cursor_id, 77)
+        controller._recalculate_piece_result.assert_called_once_with(
+            "img",
+            db_client=local_db,
         )
 
     @patch("db.get_remote_db_connection_via_ssh")

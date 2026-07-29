@@ -6,6 +6,17 @@ from unittest.mock import MagicMock, patch
 from file_manager import FileManager
 from main_controller import ControllerConfig, MainController
 
+
+class _ImmediateThread:
+    def __init__(self, target=None, name=None, daemon=None, args=(), kwargs=None):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+
+    def start(self):
+        self.target(*self.args, **self.kwargs)
+
+
 class TestMainControllerRebuild(unittest.TestCase):
     def _build_display(self, db):
         display = MagicMock()
@@ -61,6 +72,30 @@ class TestMainControllerRebuild(unittest.TestCase):
             controller._clear_sync_images_base_dir.assert_not_called()
             self.assertTrue((sync_base_dir / "side_ok" / "old_side.png").exists())
             self.assertTrue((final_classification_dir / "Side_P" / "old_side.png").exists())
+
+    def test_async_rebuild_pauses_and_resumes_remote_db_worker(self):
+        db = MagicMock()
+        display = self._build_display(db)
+        display.reset_in_progress = False
+        display.sync_in_progress = False
+        controller = MainController(
+            display=display,
+            config=ControllerConfig(),
+            file_manager=FileManager(),
+        )
+        controller._pause_remote_db_background_worker = MagicMock(return_value=True)
+        controller._resume_remote_db_background_worker = MagicMock()
+        controller.perform_rebuild_db_from_historic = MagicMock(return_value={"ok": True})
+
+        with patch("main_controller.Thread", _ImmediateThread), patch(
+            "db.get_db_connection",
+            return_value=db,
+        ):
+            controller.start_rebuild_db_from_historic_async()
+
+        controller._pause_remote_db_background_worker.assert_called_once_with()
+        controller._resume_remote_db_background_worker.assert_called_once_with(True)
+        controller.perform_rebuild_db_from_historic.assert_called_once()
 
 
 if __name__ == "__main__":
