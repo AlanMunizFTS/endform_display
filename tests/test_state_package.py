@@ -554,18 +554,20 @@ class TestStatePackage(unittest.TestCase):
             self.assertEqual(workbook["Por hora"]["B3"].value, "07")
             self.assertEqual(workbook["Por hora"]["F3"].value, 0)
 
-    def test_estimate_display_state_export_size_includes_files_and_metadata(self):
+    def test_estimate_display_state_export_size_matches_exported_files_and_metadata(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()
             controller, annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
             (annotated_dir / "11861_A_side_OK.png").write_bytes(b"annotated")
             (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic")
+            controller._get_visible_historic_dir = lambda: str(historic_dir)
 
             result = estimate_display_state_export_size(controller, db_client=source_db)
 
             self.assertTrue(result["ok"])
-            self.assertGreaterEqual(result["required_bytes"], len(b"annotated") + len(b"historic"))
-            self.assertEqual(result["annotated_count"], 1)
+            self.assertGreaterEqual(result["required_bytes"], len(b"historic"))
+            self.assertEqual(result["files_bytes"], len(b"historic"))
+            self.assertEqual(result["annotated_count"], 0)
             self.assertEqual(result["historic_count"], 1)
             self.assertEqual(result["table_counts"]["img_results"], 2)
 

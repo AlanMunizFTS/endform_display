@@ -945,28 +945,22 @@ def estimate_display_state_export_size(controller, db_client=None):
     if db is None:
         return {"ok": False, "error": "No database connection available"}
 
-    annotated_dir = controller._get_visible_historic_dir()
     historic_dir = controller._get_export_historic_dir()
     image_extensions = tuple(getattr(controller.config, "image_extensions", IMAGE_EXTENSIONS))
 
-    annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
     manifest = _build_manifest(
         historic_names=historic_names,
         data_payload=data_payload,
         image_extensions=image_extensions,
-        annotated_names=annotated_names,
     )
     traceability_report_bytes = _estimate_traceability_report_size(db)
 
-    files_size = 0
-    for directory, names in (
-        (annotated_dir, annotated_names),
-        (historic_dir, historic_names),
-    ):
-        for name in names:
-            files_size += int(file_manager.getsize(file_manager.join(directory, name)))
+    files_size = sum(
+        int(file_manager.getsize(file_manager.join(historic_dir, name)))
+        for name in historic_names
+    )
 
     metadata_size = sum(
         len(content.encode("utf-8"))
@@ -983,7 +977,7 @@ def estimate_display_state_export_size(controller, db_client=None):
         "files_bytes": files_size,
         "metadata_bytes": metadata_size,
         "traceability_report_bytes": traceability_report_bytes,
-        "annotated_count": len(annotated_names),
+        "annotated_count": 0,
         "historic_count": len(historic_names),
         "table_counts": manifest["table_counts"],
     }
