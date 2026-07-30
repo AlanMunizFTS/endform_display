@@ -37,6 +37,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
         display.sync_message = ""
         display.sync_message_is_error = False
         display.sync_message_time = 0
+        display.sync_message_auto_dismiss_sec = None
         display.set_db_connection = MagicMock()
         return display
 
@@ -80,7 +81,31 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertEqual(display.sync_progress_title, "Exporting Dataset")
             self.assertEqual(display.sync_message, "Export completed: display_state_20260326_120000")
             self.assertFalse(display.sync_message_is_error)
+            self.assertIsNone(display.sync_message_auto_dismiss_sec)
             fake_db.close.assert_called_once_with()
+
+    @patch("main_controller.Thread", _ImmediateThread)
+    @patch("main_controller.export_display_state", side_effect=RuntimeError("disk full"))
+    def test_export_failure_auto_dismisses_error_message(self, export_mock):
+        fake_db = MagicMock()
+        display = self._build_display(db=fake_db)
+        controller = MainController(
+            display=display,
+            config=ControllerConfig(export_error_auto_dismiss_sec=5.0),
+        )
+        controller._pause_dataset_background_workers = MagicMock(return_value={})
+        controller._resume_dataset_background_workers = MagicMock()
+
+        with patch("db.get_db_connection", return_value=fake_db):
+            controller.start_export_display_state_async()
+
+        export_mock.assert_called_once()
+        self.assertFalse(display.sync_in_progress)
+        self.assertEqual(display.sync_message, "Export failed: disk full")
+        self.assertTrue(display.sync_message_is_error)
+        self.assertEqual(display.sync_message_auto_dismiss_sec, 5.0)
+        self.assertGreater(display.sync_message_time, 0)
+        fake_db.close.assert_called_once_with()
 
     @patch("main_controller.Thread", _ImmediateThread)
     @patch("main_controller.import_display_state")

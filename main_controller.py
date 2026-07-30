@@ -548,6 +548,7 @@ class ControllerConfig:
     image_extensions: tuple = (".png", ".jpg", ".jpeg", ".bmp")
     live_rescan_interval_sec: float = 2.0
     live_batch_rotation_interval_sec: float = 1.0
+    export_error_auto_dismiss_sec: float = 5.0
     sftp_reconnect_interval_sec: float = 10.0
     db_reconnect_interval_sec: float = 3.0
     remote_db_polling_enabled: bool = field(default_factory=is_remote_db_enabled)
@@ -1975,6 +1976,7 @@ class MainController:
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
+        d.sync_message_auto_dismiss_sec = None
 
         def _export_worker():
             worker_db = None
@@ -2020,6 +2022,9 @@ class MainController:
             except Exception as exc:
                 d.sync_message = f"Export failed: {exc}"
                 d.sync_message_is_error = True
+                d.sync_message_auto_dismiss_sec = (
+                    self.config.export_error_auto_dismiss_sec
+                )
                 self.logger.error(f"[EXPORT] Dataset export failed: {exc}", allow_repeat=True)
             finally:
                 if worker_state is not None:
@@ -2066,6 +2071,7 @@ class MainController:
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
+        d.sync_message_auto_dismiss_sec = None
 
         def _export_worker():
             worker_db = None
@@ -2129,6 +2135,9 @@ class MainController:
             except Exception as exc:
                 d.sync_message = f"Dataset export failed: {exc}"
                 d.sync_message_is_error = True
+                d.sync_message_auto_dismiss_sec = (
+                    self.config.export_error_auto_dismiss_sec
+                )
                 self.logger.error(
                     f"[STATS_DATASET] Dataset export failed: {exc}",
                     allow_repeat=True,
@@ -2166,6 +2175,7 @@ class MainController:
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
+        d.sync_message_auto_dismiss_sec = None
 
         def _report_worker():
             worker_db = None
@@ -2210,6 +2220,9 @@ class MainController:
             except Exception as exc:
                 d.sync_message = f"Excel report export failed: {exc}"
                 d.sync_message_is_error = True
+                d.sync_message_auto_dismiss_sec = (
+                    self.config.export_error_auto_dismiss_sec
+                )
                 self.logger.error(
                     f"[STATS_REPORT] Export failed: {exc}",
                     allow_repeat=True,
