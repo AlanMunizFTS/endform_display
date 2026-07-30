@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import cv2
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, Reference
 from openpyxl.drawing.image import Image as WorkbookImage
@@ -18,6 +19,8 @@ from paths_config import REPORTS_DIR
 STATUS_COLUMNS = ("OK", "NOK", "FOK", "FNOK", "Total")
 TRACEABILITY_STATUS_COLUMNS = ("OK", "NOK", "Total")
 TRACEABILITY_REPORT_KIND = "ok_nok_by_jsn"
+DEFAULT_HISTORIC_REPORT_DEFECT_CLASS = "wrinkle"
+DEFAULT_HISTORIC_REPORT_ANGLE = "side"
 
 
 def parse_jsn_datetime(jsn):
@@ -495,31 +498,6 @@ def _make_piece_contact_sheet(
     canvas.save(output_path)
 
 
-def _historic_piece_result(batch):
-    statuses = []
-    for img_name in batch or []:
-        name = str(img_name or "").upper()
-        if (
-            name.endswith("_NOK.PNG")
-            or name.endswith("_NOK.JPG")
-            or name.endswith("_NOK.JPEG")
-            or name.endswith("_NOK.BMP")
-        ):
-            statuses.append("NOK")
-        elif (
-            name.endswith("_OK.PNG")
-            or name.endswith("_OK.JPG")
-            or name.endswith("_OK.JPEG")
-            or name.endswith("_OK.BMP")
-        ):
-            statuses.append("OK")
-    if any(status == "NOK" for status in statuses):
-        return "NOK"
-    if statuses:
-        return "OK"
-    return ""
-
-
 def _set_image_anchor(workbook_image, row_idx, col_idx, width, height, margin_px=6):
     marker = AnchorMarker(
         col=col_idx - 1,
@@ -533,15 +511,192 @@ def _set_image_anchor(workbook_image, row_idx, col_idx, width, height, margin_px
     )
 
 
+def _load_historic_report_overlays(controller, image_names, chunk_size=500):
+    overlay_getter = getattr(controller, "get_model_overlays_for_images", None)
+    if not callable(overlay_getter):
+        return {}
+
+    names = [str(name or "").strip() for name in image_names if str(name or "").strip()]
+    overlays_by_image = {}
+    resolved_chunk_size = max(1, int(chunk_size or 500))
+    for start_idx in range(0, len(names), resolved_chunk_size):
+        chunk = names[start_idx : start_idx + resolved_chunk_size]
+        try:
+            chunk_overlays = overlay_getter(chunk)
+        except Exception:
+            continue
+        if isinstance(chunk_overlays, dict):
+            overlays_by_image.update(chunk_overlays)
+    return overlays_by_image
+
+
+def _is_historic_report_angle_image(img_name, angle):
+    filename = Path(str(img_name or "")).name.lower()
+    normalized_angle = str(angle or "").strip().lower()
+    return bool(normalized_angle) and normalized_angle in filename
+
+
+def _filter_historic_report_overlays(overlays_by_image, defect_class, angle):
+    normalized_class = str(defect_class or "").strip().lower()
+    filtered = {}
+    for img_name, overlays in (overlays_by_image or {}).items():
+        if not _is_historic_report_angle_image(img_name, angle):
+            continue
+        matching_overlays = [
+            overlay
+            for overlay in (overlays or [])
+            if str(overlay.get("class_name") or "").strip().lower()
+            == normalized_class
+        ]
+        if matching_overlays:
+            filtered[img_name] = matching_overlays
+    return filtered
+
+
+def _prepare_historic_report_image(
+    controller,
+    img_name,
+    historic_dir,
+    annotated_dir,
+    overlays,
+    temp_dir,
+    image_idx,
+    target_size=110,
+    allow_annotated_fallback=True,
+):
+    historic_path = Path(historic_dir) / img_name
+    annotated_path = Path(annotated_dir) / img_name if annotated_dir else None
+    overlay_renderer = getattr(
+        getattr(controller, "display", None),
+        "_draw_model_overlays",
+        None,
+    )
+
+    if overlays and historic_path.exists() and callable(overlay_renderer):
+        try:
+            base_image = cv2.imread(str(historic_path), cv2.IMREAD_COLOR)
+            if base_image is not None:
+                source_h, source_w = base_image.shape[:2]
+                target_size = max(1, int(target_size or 110))
+                interpolation = (
+                    cv2.INTER_AREA
+                    if source_h > target_size or source_w > target_size
+                    else cv2.INTER_LINEAR
+                )
+                base_image = cv2.resize(
+                    base_image,
+                    (target_size, target_size),
+                    interpolation=interpolation,
+                )
+                marked_image = overlay_renderer(
+                    base_image.copy(),
+                    overlays,
+                    source_w,
+                    source_h,
+                )
+                marked_path = Path(temp_dir) / f"marked_{image_idx:08d}.png"
+                if marked_image is not None and cv2.imwrite(str(marked_path), marked_image):
+                    return marked_path
+        except Exception:
+            pass
+
+    if (
+        allow_annotated_fallback
+        and annotated_path is not None
+        and annotated_path.exists()
+    ):
+        return annotated_path
+    return historic_path
+
+
+def _extract_historic_batch_jsn(batch):
+    for img_name in batch or []:
+        filename = Path(str(img_name or "")).name
+        if filename:
+            return filename.split("_", 1)[0]
+    return ""
+
+
+def _load_historic_filtered_verdicts(
+    controller,
+    historic_index,
+    defect_class,
+    angle,
+    chunk_size=500,
+):
+    db_client = getattr(getattr(controller, "display", None), "db", None)
+    if db_client is None or not callable(getattr(db_client, "fetch", None)):
+        return {}
+
+    normalized_class = str(defect_class or "").strip().lower()
+    normalized_angle = str(angle or "").strip().lower()
+    if not normalized_class or not normalized_angle:
+        return {}
+
+    filtered_images_by_jsn = {}
+    jsn_by_image = {}
+    for batch in historic_index or []:
+        jsn = _extract_historic_batch_jsn(batch)
+        if not jsn:
+            continue
+        filtered_images = {
+            str(img_name)
+            for img_name in (batch or [])
+            if _is_historic_report_angle_image(img_name, normalized_angle)
+        }
+        if not filtered_images:
+            continue
+        filtered_images_by_jsn[jsn] = filtered_images
+        for img_name in filtered_images:
+            jsn_by_image[img_name] = jsn
+
+    filtered_image_names = list(jsn_by_image)
+    queried_images = set()
+    nok_jsns = set()
+    resolved_chunk_size = max(1, int(chunk_size or 500))
+    for start_idx in range(0, len(filtered_image_names), resolved_chunk_size):
+        chunk = filtered_image_names[start_idx : start_idx + resolved_chunk_size]
+        try:
+            rows = db_client.fetch(
+                "SELECT img_name, class_name FROM model_results "
+                "WHERE img_name = ANY(%s) AND LOWER(TRIM(class_name)) = %s",
+                (chunk, normalized_class),
+            )
+        except Exception:
+            continue
+        if not isinstance(rows, (list, tuple)):
+            continue
+        queried_images.update(chunk)
+        for row in rows:
+            if not hasattr(row, "get"):
+                continue
+            img_name = str(row.get("img_name") or "").strip()
+            class_name = str(row.get("class_name") or "").strip().lower()
+            if class_name != normalized_class:
+                continue
+            jsn = jsn_by_image.get(img_name)
+            if jsn:
+                nok_jsns.add(jsn)
+
+    verdicts = {}
+    for jsn, filtered_images in filtered_images_by_jsn.items():
+        if not filtered_images.issubset(queried_images):
+            continue
+        verdicts[jsn] = "NOK" if jsn in nok_jsns else "OK"
+    return verdicts
+
+
 def export_historic_image_table_report(
     controller,
     output_dir=None,
     historic_dir=None,
+    annotated_dir=None,
     created_at=None,
     endform_type="",
     class_name="",
-    pieces_per_column=60,
-    pieces_per_row=None,
+    defect_class=DEFAULT_HISTORIC_REPORT_DEFECT_CLASS,
+    angle=DEFAULT_HISTORIC_REPORT_ANGLE,
+    pieces_per_group=4,
     images_per_piece=7,
     progress_callback=None,
 ):
@@ -550,6 +705,14 @@ def export_historic_image_table_report(
         raise ValueError("No historic images available to export")
 
     source_dir = Path(historic_dir or controller._get_export_historic_dir())
+    if annotated_dir is None:
+        annotated_dir_getter = getattr(controller, "_get_annotated_historic_dir", None)
+        candidate_annotated_dir = (
+            annotated_dir_getter() if callable(annotated_dir_getter) else None
+        )
+        if isinstance(candidate_annotated_dir, (str, Path)):
+            annotated_dir = candidate_annotated_dir
+    annotated_source_dir = Path(annotated_dir) if annotated_dir else None
     report_dir = Path(output_dir or REPORTS_DIR)
     report_dir.mkdir(parents=True, exist_ok=True)
 
@@ -557,16 +720,20 @@ def export_historic_image_table_report(
     sheet = workbook.active
     sheet.title = "Piezas"
     sheet.sheet_view.showGridLines = False
+    verdict_sheet = workbook.create_sheet("Piezas con veredicto")
+    verdict_sheet.sheet_view.showGridLines = False
 
-    if pieces_per_row is not None and int(pieces_per_column or 60) == 60:
-        pieces_per_column = pieces_per_row
-    pieces_per_column = max(1, int(pieces_per_column or 60))
+    pieces_per_group = max(1, int(pieces_per_group or 4))
     images_per_piece = max(1, int(images_per_piece or 7))
+    defect_class = (
+        str(defect_class or DEFAULT_HISTORIC_REPORT_DEFECT_CLASS).strip().lower()
+    )
+    angle = str(angle or DEFAULT_HISTORIC_REPORT_ANGLE).strip().lower()
     tile_size = 110
     padding = 6
     image_margin_px = 6
     composite_width = 4 * tile_size + 3 * padding
-    composite_height = 30 + 2 * tile_size + padding
+    composite_height = 2 * tile_size + padding
 
     title_fill = PatternFill(fill_type="solid", fgColor="1F4E79")
     header_fill = PatternFill(fill_type="solid", fgColor="D9E2F3")
@@ -575,13 +742,20 @@ def export_historic_image_table_report(
     center = Alignment(horizontal="center", vertical="center")
     thin_side = Side(style="thin", color="000000")
     table_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+    good_fill = PatternFill(fill_type="solid", fgColor="C6EFCE")
+    bad_fill = PatternFill(fill_type="solid", fgColor="FFC7CE")
+    good_font = Font(color="006100", bold=True)
+    bad_font = Font(color="9C0006", bold=True)
 
     total_pieces = len(historic_index)
-    total_blocks = max(1, (total_pieces + pieces_per_column - 1) // pieces_per_column)
-    total_cols = total_blocks * 3
+    total_groups = max(1, (total_pieces + pieces_per_group - 1) // pieces_per_group)
+    total_cols = pieces_per_group + 1
+    verdict_total_cols = pieces_per_group * 2 + 1
     first_data_row = 4
-    data_row_count = min(pieces_per_column, total_pieces)
-    image_header = _build_historic_image_report_image_header(endform_type, class_name)
+    image_header = _build_historic_image_report_image_header(
+        endform_type,
+        defect_class,
+    )
 
     sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=total_cols)
     title_cell = sheet.cell(row=1, column=1, value="PART-BY-PART RESULT SPLIT")
@@ -594,82 +768,192 @@ def export_historic_image_table_report(
         title_range_cell.border = table_border
     sheet.row_dimensions[1].height = 24
 
-    for block_idx in range(total_blocks):
-        base_col = block_idx * 3 + 1
-        start_piece = block_idx * pieces_per_column + 1
-        end_piece = min((block_idx + 1) * pieces_per_column, total_pieces)
-        sheet.merge_cells(
-            start_row=2,
-            start_column=base_col,
-            end_row=2,
-            end_column=base_col + 2,
-        )
-        block_cell = sheet.cell(
-            row=2,
-            column=base_col,
-            value=f"Pieces {start_piece}-{end_piece}",
-        )
-        block_cell.fill = header_fill
-        block_cell.font = header_font
-        block_cell.alignment = center
-        for col_idx in range(base_col, base_col + 3):
-            cell = sheet.cell(row=2, column=col_idx)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center
-            cell.border = table_border
+    group_header = sheet.cell(row=2, column=1, value="Pieza agrupada")
+    group_header.fill = header_fill
+    group_header.font = header_font
+    group_header.alignment = center
+    group_header.border = table_border
 
-        for offset, header in enumerate(("Part #", "Inferenced Condition", image_header)):
-            cell = sheet.cell(row=3, column=base_col + offset, value=header)
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = center
-            cell.border = table_border
+    sheet.merge_cells(start_row=2, start_column=2, end_row=2, end_column=total_cols)
+    image_header_cell = sheet.cell(row=2, column=2, value=image_header)
+    image_header_cell.fill = header_fill
+    image_header_cell.font = header_font
+    image_header_cell.alignment = center
+    for col_idx in range(2, total_cols + 1):
+        cell = sheet.cell(row=2, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
 
-    for block_idx in range(total_blocks):
-        base_col = block_idx * 3 + 1
-        sheet.column_dimensions[get_column_letter(base_col)].width = 18
-        sheet.column_dimensions[get_column_letter(base_col + 1)].width = 22
-        sheet.column_dimensions[get_column_letter(base_col + 2)].width = (
+    column_headers = ["Grupo"] + ["Capturas"] * pieces_per_group
+    for col_idx, header in enumerate(column_headers, start=1):
+        cell = sheet.cell(row=3, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
+
+    sheet.column_dimensions["A"].width = 24
+    for col_idx in range(2, total_cols + 1):
+        sheet.column_dimensions[get_column_letter(col_idx)].width = (
             composite_width + image_margin_px * 2
         ) / 7.0
-    sheet.freeze_panes = "D4"
+    sheet.freeze_panes = "B4"
 
-    for row_idx in range(first_data_row, first_data_row + data_row_count):
+    for group_idx in range(total_groups):
+        row_idx = first_data_row + group_idx
         sheet.row_dimensions[row_idx].height = (composite_height + image_margin_px * 2) * 0.75
         for col_idx in range(1, total_cols + 1):
             cell = sheet.cell(row=row_idx, column=col_idx)
+            cell.alignment = center
+            cell.border = table_border
+        sheet.cell(
+            row=row_idx,
+            column=1,
+            value=f"Pieza agrupada #{group_idx + 1}",
+        )
+
+    verdict_sheet.merge_cells(
+        start_row=1,
+        start_column=1,
+        end_row=1,
+        end_column=verdict_total_cols,
+    )
+    verdict_title_cell = verdict_sheet.cell(
+        row=1,
+        column=1,
+        value=f"PART-BY-PART {defect_class.upper()} {angle.upper()} VERDICT",
+    )
+    verdict_title_cell.fill = title_fill
+    verdict_title_cell.font = title_font
+    verdict_title_cell.alignment = Alignment(horizontal="left", vertical="center")
+    for col_idx in range(1, verdict_total_cols + 1):
+        cell = verdict_sheet.cell(row=1, column=col_idx)
+        cell.fill = title_fill
+        cell.border = table_border
+    verdict_sheet.row_dimensions[1].height = 24
+
+    verdict_group_header = verdict_sheet.cell(
+        row=2,
+        column=1,
+        value="Pieza agrupada",
+    )
+    verdict_group_header.fill = header_fill
+    verdict_group_header.font = header_font
+    verdict_group_header.alignment = center
+    verdict_group_header.border = table_border
+
+    verdict_sheet.merge_cells(
+        start_row=2,
+        start_column=2,
+        end_row=2,
+        end_column=verdict_total_cols,
+    )
+    verdict_image_header = verdict_sheet.cell(row=2, column=2, value=image_header)
+    verdict_image_header.fill = header_fill
+    verdict_image_header.font = header_font
+    verdict_image_header.alignment = center
+    for col_idx in range(2, verdict_total_cols + 1):
+        cell = verdict_sheet.cell(row=2, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
+
+    verdict_headers = ["Grupo"]
+    for _position in range(pieces_per_group):
+        verdict_headers.extend(("Veredicto", "Capturas"))
+    for col_idx, header in enumerate(verdict_headers, start=1):
+        cell = verdict_sheet.cell(row=3, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
+
+    verdict_sheet.column_dimensions["A"].width = 24
+    for position in range(pieces_per_group):
+        verdict_col = position * 2 + 2
+        image_col = verdict_col + 1
+        verdict_sheet.column_dimensions[get_column_letter(verdict_col)].width = 12
+        verdict_sheet.column_dimensions[get_column_letter(image_col)].width = (
+            composite_width + image_margin_px * 2
+        ) / 7.0
+    verdict_sheet.freeze_panes = "B4"
+
+    for group_idx in range(total_groups):
+        row_idx = first_data_row + group_idx
+        verdict_sheet.row_dimensions[row_idx].height = (
+            composite_height + image_margin_px * 2
+        ) * 0.75
+        group_cell = verdict_sheet.cell(
+            row=row_idx,
+            column=1,
+            value=f"Pieza agrupada #{group_idx + 1}",
+        )
+        group_cell.alignment = center
+        group_cell.border = table_border
+        for col_idx in range(2, verdict_total_cols + 1):
+            cell = verdict_sheet.cell(row=row_idx, column=col_idx)
             cell.alignment = center
             cell.border = table_border
 
     if progress_callback:
         progress_callback(0, total_pieces, "Preparing image report")
 
+    selected_image_names = [
+        img_name
+        for batch in historic_index
+        for img_name in list(batch or [])[:images_per_piece]
+    ]
+    overlays_by_image = _filter_historic_report_overlays(
+        _load_historic_report_overlays(
+            controller,
+            selected_image_names,
+        ),
+        defect_class,
+        angle,
+    )
+    model_verdicts = _load_historic_filtered_verdicts(
+        controller,
+        historic_index,
+        defect_class,
+        angle,
+    )
+
     with TemporaryDirectory() as temp_dir:
+        prepared_image_idx = 0
         for piece_idx, batch in enumerate(historic_index):
-            piece_result = _historic_piece_result(batch)
-            block_idx = piece_idx // pieces_per_column
-            row_in_block = piece_idx % pieces_per_column
-            data_row = first_data_row + row_in_block
-            base_col = block_idx * 3 + 1
-            piece_col = base_col + 2
-            sheet.cell(row=data_row, column=base_col, value=piece_idx + 1)
-            sheet.cell(row=data_row, column=base_col + 1, value=piece_result or None)
+            group_idx = piece_idx // pieces_per_group
+            position_in_group = piece_idx % pieces_per_group
+            data_row = first_data_row + group_idx
+            piece_col = position_in_group + 2
+            verdict_col = position_in_group * 2 + 2
+            verdict_piece_col = verdict_col + 1
 
             selected_images = list(batch or [])[:images_per_piece]
-            image_paths = [source_dir / img_name for img_name in selected_images]
+            image_paths = []
+            for img_name in selected_images:
+                prepared_image_idx += 1
+                image_paths.append(
+                    _prepare_historic_report_image(
+                        controller,
+                        img_name,
+                        source_dir,
+                        annotated_source_dir,
+                        overlays_by_image.get(img_name) or [],
+                        temp_dir,
+                        prepared_image_idx,
+                        target_size=tile_size,
+                        allow_annotated_fallback=False,
+                    )
+                )
             composite_path = Path(temp_dir) / f"piece_{piece_idx + 1:06d}.png"
-            run_number = piece_idx + 1
-            label_text = f"Run #{run_number}"
-            if piece_result:
-                result_label = "Ok" if piece_result == "OK" else piece_result
-                label_text = f"{label_text} - {result_label}"
             _make_piece_contact_sheet(
                 image_paths,
                 composite_path,
                 tile_size=tile_size,
                 padding=padding,
-                label_text=label_text,
             )
 
             workbook_image = WorkbookImage(str(composite_path))
@@ -684,6 +968,35 @@ def export_historic_image_table_report(
                 margin_px=image_margin_px,
             )
             sheet.add_image(workbook_image)
+
+            verdict_workbook_image = WorkbookImage(str(composite_path))
+            verdict_workbook_image.width = composite_width
+            verdict_workbook_image.height = composite_height
+            _set_image_anchor(
+                verdict_workbook_image,
+                data_row,
+                verdict_piece_col,
+                composite_width,
+                composite_height,
+                margin_px=image_margin_px,
+            )
+            verdict_sheet.add_image(verdict_workbook_image)
+
+            jsn = _extract_historic_batch_jsn(batch)
+            verdict = model_verdicts.get(jsn)
+            verdict_cell = verdict_sheet.cell(
+                row=data_row,
+                column=verdict_col,
+                value=verdict,
+            )
+            verdict_cell.alignment = center
+            verdict_cell.border = table_border
+            if verdict == "OK":
+                verdict_cell.fill = good_fill
+                verdict_cell.font = good_font
+            elif verdict == "NOK":
+                verdict_cell.fill = bad_fill
+                verdict_cell.font = bad_font
 
             if progress_callback:
                 progress_callback(piece_idx + 1, total_pieces, "Adding pieces to workbook")

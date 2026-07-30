@@ -268,14 +268,17 @@ class TestMainControllerStatePackage(unittest.TestCase):
             ) as export_mock:
                 controller.start_export_historic_image_report_async(
                     endform_type="mush",
-                    class_name="split",
-                    pieces_per_column=60,
+                    class_name="wrinkle",
+                    defect_class="wrinkle",
+                    angle="diag",
                 )
 
             export_mock.assert_called_once()
             self.assertEqual(export_mock.call_args.kwargs["endform_type"], "mush")
-            self.assertEqual(export_mock.call_args.kwargs["class_name"], "split")
-            self.assertEqual(export_mock.call_args.kwargs["pieces_per_column"], 60)
+            self.assertEqual(export_mock.call_args.kwargs["class_name"], "wrinkle")
+            self.assertEqual(export_mock.call_args.kwargs["defect_class"], "wrinkle")
+            self.assertEqual(export_mock.call_args.kwargs["angle"], "diag")
+            self.assertEqual(export_mock.call_args.kwargs["pieces_per_group"], 4)
             controller.stop_historic_download_worker.assert_called_once_with()
             controller.stop_remote_db_polling.assert_called_once_with()
             controller.start_historic_download_on_startup.assert_called_once_with(

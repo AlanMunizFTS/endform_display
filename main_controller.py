@@ -2094,18 +2094,27 @@ class MainController:
         output_dir=None,
         endform_type="",
         class_name="",
-        pieces_per_column=60,
+        defect_class="wrinkle",
+        angle="side",
+        pieces_per_group=4,
     ):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
             return
+
+        defect_class = str(defect_class or "wrinkle").strip().lower()
+        angle = str(angle or "side").strip().lower()
+        report_helper_text = (
+            f"Building four historic pieces per Excel row. "
+            f"Filter: {angle} / {defect_class}."
+        )
 
         self.dataset_transfer_active = True
         d.sync_in_progress = True
         d.sync_progress = 0
         d.sync_stage = "Preparing historic image report..."
         d.sync_progress_title = "Exporting Image Report"
-        d.sync_progress_helper_text = "Building one Excel cell per piece with its historic views."
+        d.sync_progress_helper_text = report_helper_text
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -2124,7 +2133,7 @@ class MainController:
                         stage_text,
                         percent,
                         title="Exporting Image Report",
-                        helper_text="Building one Excel cell per piece with its historic views.",
+                        helper_text=report_helper_text,
                     )
 
                 report_path = export_historic_image_table_report(
@@ -2132,7 +2141,9 @@ class MainController:
                     output_dir=output_dir,
                     endform_type=endform_type,
                     class_name=class_name,
-                    pieces_per_column=pieces_per_column,
+                    defect_class=defect_class,
+                    angle=angle,
+                    pieces_per_group=pieces_per_group,
                     progress_callback=_report_progress_cb,
                 )
                 report_name = os.path.basename(str(report_path))
@@ -2140,7 +2151,7 @@ class MainController:
                     "Completed",
                     100,
                     title="Exporting Image Report",
-                    helper_text="Building one Excel cell per piece with its historic views.",
+                    helper_text=report_helper_text,
                 )
                 d.sync_message = f"Image report exported: {report_name}"
                 d.sync_message_is_error = False
@@ -5419,8 +5430,10 @@ class MainController:
         elif action == "export_historic_image_report":
             self.start_export_historic_image_report_async(
                 endform_type=payload.get("endform_type"),
-                class_name=payload.get("class_name"),
-                pieces_per_column=payload.get("pieces_per_column", 60),
+                class_name=payload.get("defect_class") or "wrinkle",
+                defect_class=payload.get("defect_class") or "wrinkle",
+                angle=payload.get("angle") or "side",
+                pieces_per_group=4,
             )
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True

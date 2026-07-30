@@ -90,6 +90,8 @@ class DisplayWindow:
         self.trash_button_rect = None  # Trash button rect
         self.sync_button_rect = None  # Sync button rect
         self.image_report_button_rect = None  # Historic image report button rect
+        self._image_report_dialog_root = None
+        self._image_report_dialog_result = None
         self.import_button_rect = None  # Import button rect
         self.export_button_rect = None  # Export button rect
         self.exit_button_rect = None  # Exit button rect
@@ -405,58 +407,242 @@ class DisplayWindow:
             self._set_toast_message(f"Unable to open import dialog: {exc}", is_error=True)
             return None
 
-    def _prompt_historic_image_report_labels(self):
-        """Ask the operator for report header labels before exporting."""
+    def _get_historic_image_report_filter_options(self):
+        """Return drawable defect/angle combinations available in model_results."""
+        fallback = [{"angle": "side", "class_name": "wrinkle"}]
+        if not self.db:
+            return fallback
+
+        try:
+            rows = self.db.fetch(
+                """
+                SELECT DISTINCT angle, class_name
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN LOWER(img_name) LIKE '%side%' THEN 'side'
+                            WHEN LOWER(img_name) LIKE '%diag%' THEN 'diag'
+                            WHEN LOWER(img_name) LIKE '%front%' THEN 'front'
+                        END AS angle,
+                        LOWER(TRIM(class_name)) AS class_name
+                    FROM model_results
+                    WHERE coordinates IS NOT NULL
+                ) available_filters
+                WHERE angle IS NOT NULL
+                  AND class_name IS NOT NULL
+                  AND class_name <> ''
+                  AND class_name <> 'ok'
+                ORDER BY angle, class_name
+                """
+            )
+        except Exception as exc:
+            print(f"Error loading image report filters: {exc}")
+            return fallback
+
+        options = []
+        seen = set()
+        for row in rows or []:
+            if not hasattr(row, "get"):
+                continue
+            angle = str(row.get("angle") or "").strip().lower()
+            class_name = str(row.get("class_name") or "").strip().lower()
+            key = (angle, class_name)
+            if not angle or not class_name or key in seen:
+                continue
+            seen.add(key)
+            options.append({"angle": angle, "class_name": class_name})
+
+        angle_order = {"side": 0, "diag": 1, "front": 2}
+        options.sort(
+            key=lambda item: (
+                angle_order.get(item["angle"], 99),
+                item["angle"],
+                item["class_name"],
+            )
+        )
+        return options or fallback
+
+    def _close_historic_image_report_dialog(self):
+        root = self._image_report_dialog_root
+        self._image_report_dialog_root = None
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    def _pump_historic_image_report_dialog(self):
+        """Process Tk events without blocking the OpenCV display loop."""
+        root = self._image_report_dialog_root
+        if root is not None:
+            try:
+                root.update_idletasks()
+                root.update()
+            except Exception:
+                self._image_report_dialog_root = None
+
+        payload = self._image_report_dialog_result
+        if payload:
+            self._image_report_dialog_result = None
+            self._emit_action("export_historic_image_report", **payload)
+
+    def _open_historic_image_report_dialog(self):
+        """Open a visible non-modal report selector and return immediately."""
+        existing_root = self._image_report_dialog_root
+        if existing_root is not None:
+            try:
+                existing_root.deiconify()
+                existing_root.lift()
+                existing_root.focus_force()
+            except Exception:
+                self._image_report_dialog_root = None
+            else:
+                return True
+
         try:
             import tkinter as tk
-            from tkinter import simpledialog
+            from tkinter import ttk
+
+            options = self._get_historic_image_report_filter_options()
+            classes_by_angle = {}
+            for option in options:
+                classes_by_angle.setdefault(option["angle"], []).append(
+                    option["class_name"]
+                )
+
+            angles = list(classes_by_angle)
+            default_angle = "side" if "side" in classes_by_angle else angles[0]
+            default_classes = classes_by_angle[default_angle]
+            default_class = (
+                "wrinkle" if "wrinkle" in default_classes else default_classes[0]
+            )
 
             root = tk.Tk()
-            root.withdraw()
-            root.update_idletasks()
-            endform_type = simpledialog.askstring(
-                "Image Report",
-                "Endform type:",
-                parent=root,
-            )
-            if endform_type is None:
-                root.destroy()
-                return None
-            class_name = simpledialog.askstring(
-                "Image Report",
-                "Classname:",
-                parent=root,
-            )
-            if class_name is None:
-                root.destroy()
-                return None
-            pieces_per_column = simpledialog.askinteger(
-                "Image Report",
-                "Pieces per column:",
-                parent=root,
-                initialvalue=60,
-                minvalue=1,
-            )
-            root.destroy()
-            if pieces_per_column is None:
-                return None
+            self._image_report_dialog_root = root
+            root.title("Image Report")
+            root.resizable(False, False)
 
-            endform_type = str(endform_type or "").strip()
-            class_name = str(class_name or "").strip()
-            if not endform_type or not class_name:
-                self._set_toast_message(
-                    "Endform type and classname are required",
-                    is_error=True,
-                )
-                return None
-            return {
-                "endform_type": endform_type,
-                "class_name": class_name,
-                "pieces_per_column": int(pieces_per_column),
-            }
+            endform_var = tk.StringVar(master=root)
+            angle_var = tk.StringVar(master=root, value=default_angle)
+            class_var = tk.StringVar(master=root, value=default_class)
+
+            ttk.Label(root, text="Endform type:").grid(
+                row=0,
+                column=0,
+                padx=12,
+                pady=(12, 6),
+                sticky="w",
+            )
+            endform_entry = ttk.Entry(root, textvariable=endform_var, width=32)
+            endform_entry.grid(
+                row=0,
+                column=1,
+                padx=12,
+                pady=(12, 6),
+                sticky="ew",
+            )
+
+            ttk.Label(root, text="Angle:").grid(
+                row=1,
+                column=0,
+                padx=12,
+                pady=6,
+                sticky="w",
+            )
+            angle_combo = ttk.Combobox(
+                root,
+                textvariable=angle_var,
+                values=angles,
+                state="readonly",
+                width=29,
+            )
+            angle_combo.grid(row=1, column=1, padx=12, pady=6, sticky="ew")
+
+            ttk.Label(root, text="Defect class:").grid(
+                row=2,
+                column=0,
+                padx=12,
+                pady=6,
+                sticky="w",
+            )
+            class_combo = ttk.Combobox(
+                root,
+                textvariable=class_var,
+                values=default_classes,
+                state="readonly",
+                width=29,
+            )
+            class_combo.grid(row=2, column=1, padx=12, pady=6, sticky="ew")
+
+            def refresh_class_options(_event=None):
+                available_classes = classes_by_angle.get(angle_var.get(), [])
+                class_combo.configure(values=available_classes)
+                if class_var.get() not in available_classes:
+                    class_var.set(
+                        "wrinkle"
+                        if "wrinkle" in available_classes
+                        else (available_classes[0] if available_classes else "")
+                    )
+
+            def submit_dialog():
+                endform_type = endform_var.get().strip()
+                angle = angle_var.get().strip().lower()
+                defect_class = class_var.get().strip().lower()
+                if not endform_type or not angle or not defect_class:
+                    self._set_toast_message(
+                        "Endform type, angle, and defect class are required",
+                        is_error=True,
+                    )
+                    return
+                self._image_report_dialog_result = {
+                    "endform_type": endform_type,
+                    "class_name": defect_class,
+                    "defect_class": defect_class,
+                    "angle": angle,
+                }
+                self._close_historic_image_report_dialog()
+
+            angle_combo.bind("<<ComboboxSelected>>", refresh_class_options)
+            button_frame = ttk.Frame(root)
+            button_frame.grid(
+                row=3,
+                column=0,
+                columnspan=2,
+                padx=12,
+                pady=(8, 12),
+                sticky="e",
+            )
+            ttk.Button(
+                button_frame,
+                text="Cancel",
+                command=self._close_historic_image_report_dialog,
+            ).pack(side="right", padx=(6, 0))
+            ttk.Button(button_frame, text="Export", command=submit_dialog).pack(
+                side="right",
+            )
+
+            root.protocol(
+                "WM_DELETE_WINDOW",
+                self._close_historic_image_report_dialog,
+            )
+            root.bind("<Return>", lambda _event: submit_dialog())
+            root.bind(
+                "<Escape>",
+                lambda _event: self._close_historic_image_report_dialog(),
+            )
+            root.update_idletasks()
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            root.deiconify()
+            root.lift()
+            endform_entry.focus_force()
+            return True
         except Exception as exc:
+            self._close_historic_image_report_dialog()
             self._set_toast_message(f"Unable to open report dialog: {exc}", is_error=True)
-            return None
+            return False
 
     def _copy_stats_modal_jsn(self, jsn):
         """Copy a JSN from the stats modal detail view and show operator feedback."""
@@ -2259,9 +2445,7 @@ class DisplayWindow:
             if self.image_report_button_rect and self.historic_mode and not self.show_no_images_dialog:
                 bx, by, bw, bh = self.image_report_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
-                    labels = self._prompt_historic_image_report_labels()
-                    if labels:
-                        self._emit_action("export_historic_image_report", **labels)
+                    self._open_historic_image_report_dialog()
                     return
 
             if self.import_button_rect and not self.show_no_images_dialog:
@@ -4403,6 +4587,7 @@ class DisplayWindow:
         
         # Loop until it's time to update
         while True:
+            self._pump_historic_image_report_dialog()
             if hasattr(cv2, "waitKeyEx"):
                 key_ex = cv2.waitKeyEx(100)
             else:
@@ -4494,6 +4679,8 @@ class DisplayWindow:
         
     def close(self):
         """Close the display window"""
+        self._close_historic_image_report_dialog()
+
         def _stop_worker(process_attr, stop_attr):
             stop_event = getattr(self, stop_attr, None)
             if stop_event is not None:

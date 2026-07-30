@@ -214,14 +214,14 @@ class TestReportExporter(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "valid DB date range"):
                 export_stats_report(controller, output_dir=tmp_dir)
 
-    def test_export_historic_image_table_report_places_pieces_per_column(self):
+    def test_export_historic_image_table_report_groups_four_pieces_per_row(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             historic_dir = Path(tmp_dir) / "historic"
             report_dir = Path(tmp_dir) / "reports"
             historic_dir.mkdir()
 
             historic_index = []
-            for piece_idx in range(5):
+            for piece_idx in range(8):
                 jsn = f"11861022070165{piece_idx:03d}"
                 batch = []
                 for cam_idx in range(7):
@@ -238,15 +238,47 @@ class TestReportExporter(unittest.TestCase):
             controller = MagicMock()
             controller._load_historic_index.return_value = historic_index
             controller._get_export_historic_dir.return_value = str(historic_dir)
+            controller.display.db.fetch.return_value = [
+                {
+                    "img_name": (
+                        f"11861022070165{piece_idx:03d}_Cam1_Side_OK.png"
+                    ),
+                    "class_name": "wrinkle",
+                }
+                for piece_idx in range(8)
+                if piece_idx % 2 == 1
+            ] + [
+                {
+                    "img_name": "11861022070165000_Cam1_Side_OK.png",
+                    "class_name": "dent",
+                },
+                {
+                    "img_name": "11861022070165000_Cam2_Diag_OK.png",
+                    "class_name": "wrinkle",
+                },
+            ]
+            captured_contact_sheets = []
 
-            output_path = export_historic_image_table_report(
-                controller,
-                output_dir=report_dir,
-                created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
-                endform_type="mush",
-                class_name="split",
-                pieces_per_column=2,
-            )
+            def fake_make_contact_sheet(image_paths, output_path, **kwargs):
+                captured_contact_sheets.append(
+                    {
+                        "images": [Path(image_path).name for image_path in image_paths],
+                        "label_text": kwargs.get("label_text"),
+                    }
+                )
+                PilImage.new("RGB", (32, 32), (120, 120, 120)).save(output_path)
+
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                output_path = export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                    endform_type="mush",
+                    class_name="split",
+                )
 
             path = Path(output_path)
             self.assertEqual(
@@ -256,26 +288,17 @@ class TestReportExporter(unittest.TestCase):
             workbook = load_workbook(path)
             sheet = workbook["Piezas"]
             self.assertEqual(sheet["A1"].value, "PART-BY-PART RESULT SPLIT")
-            self.assertEqual(sheet["A2"].value, "Pieces 1-2")
-            self.assertEqual(sheet["D2"].value, "Pieces 3-4")
-            self.assertEqual(sheet["G2"].value, "Pieces 5-5")
-            self.assertEqual(sheet["A3"].value, "Part #")
-            self.assertEqual(sheet["B3"].value, "Inferenced Condition")
-            self.assertEqual(sheet["C3"].value, "mush-split")
-            self.assertEqual(sheet["D3"].value, "Part #")
-            self.assertEqual(sheet["E3"].value, "Inferenced Condition")
-            self.assertEqual(sheet["F3"].value, "mush-split")
-            self.assertEqual(sheet["A4"].value, 1)
-            self.assertEqual(sheet["B4"].value, "OK")
-            self.assertEqual(sheet["A5"].value, 2)
-            self.assertEqual(sheet["B5"].value, "OK")
-            self.assertEqual(sheet["D4"].value, 3)
-            self.assertEqual(sheet["E4"].value, "OK")
-            self.assertEqual(sheet["D5"].value, 4)
-            self.assertEqual(sheet["E5"].value, "OK")
-            self.assertEqual(sheet["G4"].value, 5)
-            self.assertEqual(sheet["H4"].value, "OK")
-            self.assertEqual(len(sheet._images), 5)
+            self.assertEqual(sheet["A2"].value, "Pieza agrupada")
+            self.assertEqual(sheet["B2"].value, "mush-wrinkle")
+            self.assertEqual(sheet["A3"].value, "Grupo")
+            self.assertEqual(sheet["B3"].value, "Capturas")
+            self.assertEqual(sheet["C3"].value, "Capturas")
+            self.assertEqual(sheet["D3"].value, "Capturas")
+            self.assertEqual(sheet["E3"].value, "Capturas")
+            self.assertEqual(sheet["A4"].value, "Pieza agrupada #1")
+            self.assertEqual(sheet["A5"].value, "Pieza agrupada #2")
+            self.assertEqual(sheet["A6"].value, None)
+            self.assertEqual(len(sheet._images), 8)
             anchors = [
                 (image.anchor._from.row, image.anchor._from.col)
                 for image in sheet._images
@@ -283,13 +306,269 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(
                 anchors,
                 [
+                    (3, 1),
                     (3, 2),
+                    (3, 3),
+                    (3, 4),
+                    (4, 1),
                     (4, 2),
-                    (3, 5),
-                    (4, 5),
-                    (3, 8),
+                    (4, 3),
+                    (4, 4),
                 ],
             )
+            self.assertEqual(
+                [item["label_text"] for item in captured_contact_sheets],
+                [None] * 8,
+            )
+            self.assertTrue(
+                all(len(item["images"]) == 7 for item in captured_contact_sheets)
+            )
+            self.assertEqual(
+                [
+                    image_name.split("_")[1]
+                    for image_name in captured_contact_sheets[0]["images"]
+                ],
+                [f"Cam{cam_idx}" for cam_idx in range(1, 8)],
+            )
+
+            verdict_sheet = workbook["Piezas con veredicto"]
+            self.assertEqual(
+                verdict_sheet["A1"].value,
+                "PART-BY-PART WRINKLE SIDE VERDICT",
+            )
+            self.assertEqual(verdict_sheet["A4"].value, "Pieza agrupada #1")
+            self.assertEqual(verdict_sheet["A5"].value, "Pieza agrupada #2")
+            self.assertEqual(verdict_sheet["B3"].value, "Veredicto")
+            self.assertEqual(verdict_sheet["C3"].value, "Capturas")
+            self.assertEqual(
+                [
+                    verdict_sheet.cell(row=4, column=col_idx).value
+                    for col_idx in (2, 4, 6, 8)
+                ],
+                ["NOK", "OK", "NOK", "OK"],
+            )
+            self.assertEqual(
+                [
+                    verdict_sheet.cell(row=5, column=col_idx).value
+                    for col_idx in (2, 4, 6, 8)
+                ],
+                ["NOK", "OK", "NOK", "OK"],
+            )
+            self.assertEqual(
+                [
+                    (image.anchor._from.row, image.anchor._from.col)
+                    for image in verdict_sheet._images
+                ],
+                [
+                    (3, 2),
+                    (3, 4),
+                    (3, 6),
+                    (3, 8),
+                    (4, 2),
+                    (4, 4),
+                    (4, 6),
+                    (4, 8),
+                ],
+            )
+            verdict_query = controller.display.db.fetch.call_args[0][0]
+            self.assertIn("FROM model_results", verdict_query)
+            self.assertIn("LOWER(TRIM(class_name))", verdict_query)
+
+    def test_export_historic_image_table_report_uses_defect_markings(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            annotated_dir = Path(tmp_dir) / "annotated"
+            report_dir = Path(tmp_dir) / "reports"
+            historic_dir.mkdir()
+            annotated_dir.mkdir()
+
+            jsn = "118610220701650001"
+            overlay_image = f"{jsn}_Cam1_Side_OK.png"
+            annotated_image = f"{jsn}_Cam2_Diag_NOK.png"
+            PilImage.new("RGB", (32, 32), (255, 255, 255)).save(
+                historic_dir / overlay_image
+            )
+            PilImage.new("RGB", (32, 32), (255, 255, 255)).save(
+                historic_dir / annotated_image
+            )
+            PilImage.new("RGB", (32, 32), (0, 0, 255)).save(
+                annotated_dir / annotated_image
+            )
+
+            controller = MagicMock()
+            controller._load_historic_index.return_value = [
+                [overlay_image, annotated_image]
+            ]
+            controller._get_export_historic_dir.return_value = str(historic_dir)
+            controller._get_annotated_historic_dir.return_value = str(annotated_dir)
+            controller.get_model_overlays_for_images.return_value = {
+                overlay_image: [
+                    {
+                        "geometry_type": "bbox",
+                        "coordinates": [1, 1, 8, 8],
+                        "class_name": "wrinkle",
+                    },
+                    {
+                        "geometry_type": "bbox",
+                        "coordinates": [2, 2, 6, 6],
+                        "class_name": "dent",
+                    },
+                ],
+                annotated_image: [
+                    {
+                        "geometry_type": "bbox",
+                        "coordinates": [1, 1, 8, 8],
+                        "class_name": "wrinkle",
+                    }
+                ],
+            }
+            controller.display.db.fetch.return_value = [
+                {
+                    "img_name": annotated_image,
+                    "class_name": "wrinkle",
+                }
+            ]
+
+            def fake_draw_overlays(image, overlays, source_w, source_h):
+                self.assertEqual(len(overlays), 1)
+                self.assertEqual(overlays[0]["class_name"], "wrinkle")
+                self.assertEqual((source_w, source_h), (32, 32))
+                image[:, :] = (0, 0, 255)
+                return image
+
+            controller.display._draw_model_overlays.side_effect = fake_draw_overlays
+            captured_pixels = []
+            captured_labels = []
+
+            def fake_make_contact_sheet(image_paths, output_path, **kwargs):
+                for image_path in image_paths:
+                    with PilImage.open(image_path) as source:
+                        captured_pixels.append(
+                            source.convert("RGB").getpixel((0, 0))
+                        )
+                captured_labels.append(kwargs.get("label_text"))
+                PilImage.new("RGB", (32, 32), (120, 120, 120)).save(output_path)
+
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                side_output_path = export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                    endform_type="mush",
+                    class_name="split",
+                )
+
+            self.assertEqual(captured_pixels, [(255, 0, 0), (255, 255, 255)])
+            self.assertEqual(captured_labels, [None])
+            controller.display._draw_model_overlays.assert_called_once()
+            side_workbook = load_workbook(side_output_path)
+            self.assertEqual(
+                side_workbook["Piezas con veredicto"]["B4"].value,
+                "OK",
+            )
+
+            captured_pixels.clear()
+            captured_labels.clear()
+            controller.display._draw_model_overlays.reset_mock()
+            controller.display._draw_model_overlays.side_effect = fake_draw_overlays
+
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                diag_output_path = export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 31, 0),
+                    endform_type="mush",
+                    defect_class="wrinkle",
+                    angle="diag",
+                )
+
+            self.assertEqual(captured_pixels, [(255, 255, 255), (255, 0, 0)])
+            self.assertEqual(captured_labels, [None])
+            controller.display._draw_model_overlays.assert_called_once()
+            diag_workbook = load_workbook(diag_output_path)
+            self.assertEqual(
+                diag_workbook["Piezas con veredicto"]["B4"].value,
+                "NOK",
+            )
+
+    def test_export_historic_image_table_report_keeps_incomplete_final_group(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            report_dir = Path(tmp_dir) / "reports"
+            historic_dir.mkdir()
+
+            historic_index = []
+            for piece_idx in range(5):
+                jsn = f"11861022070165{piece_idx:03d}"
+                image_name = f"{jsn}_Cam1_Side_OK.png"
+                PilImage.new("RGB", (32, 32), (120, 120, 120)).save(
+                    historic_dir / image_name
+                )
+                historic_index.append([image_name])
+
+            controller = MagicMock()
+            controller._load_historic_index.return_value = historic_index
+            controller._get_export_historic_dir.return_value = str(historic_dir)
+            controller.display.db.fetch.return_value = [
+                {
+                    "img_name": (
+                        f"11861022070165{piece_idx:03d}_Cam1_Side_OK.png"
+                    ),
+                    "class_name": "wrinkle",
+                }
+                for piece_idx in range(5)
+                if piece_idx % 2 == 1
+            ]
+
+            output_path = export_historic_image_table_report(
+                controller,
+                output_dir=report_dir,
+                created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                endform_type="mush",
+                class_name="split",
+            )
+
+            workbook = load_workbook(output_path)
+            sheet = workbook["Piezas"]
+            self.assertEqual(sheet["A4"].value, "Pieza agrupada #1")
+            self.assertEqual(sheet["A5"].value, "Pieza agrupada #2")
+            self.assertEqual(sheet["C5"].value, None)
+            self.assertEqual(sheet["D5"].value, None)
+            self.assertEqual(sheet["E5"].value, None)
+            self.assertEqual(
+                [
+                    (image.anchor._from.row, image.anchor._from.col)
+                    for image in sheet._images
+                ],
+                [
+                    (3, 1),
+                    (3, 2),
+                    (3, 3),
+                    (3, 4),
+                    (4, 1),
+                ],
+            )
+
+            verdict_sheet = workbook["Piezas con veredicto"]
+            self.assertEqual(verdict_sheet["A4"].value, "Pieza agrupada #1")
+            self.assertEqual(verdict_sheet["A5"].value, "Pieza agrupada #2")
+            self.assertEqual(
+                [
+                    verdict_sheet.cell(row=4, column=col_idx).value
+                    for col_idx in (2, 4, 6, 8)
+                ],
+                ["OK", "NOK", "OK", "NOK"],
+            )
+            self.assertEqual(verdict_sheet["B5"].value, "OK")
+            self.assertEqual(verdict_sheet["D5"].value, None)
+            self.assertEqual(verdict_sheet["F5"].value, None)
+            self.assertEqual(verdict_sheet["H5"].value, None)
 
     def test_export_historic_image_table_report_uses_display_piece_order(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
