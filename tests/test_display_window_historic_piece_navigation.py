@@ -61,6 +61,24 @@ class TestDisplayWindowHistoricPieceNavigation(unittest.TestCase):
 
         action_handler.assert_called_once_with("submit_piece_number_dialog")
 
+    @patch("display_window.get_db_connection")
+    def test_mouse_click_on_piece_identifier_opens_dialog(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.historic_mode = True
+        display.piece_identifier_rect = (100, 100, 120, 42)
+
+        display.mouse_callback(
+            cv2.EVENT_LBUTTONDOWN,
+            150,
+            120,
+            cv2.EVENT_FLAG_LBUTTON,
+            None,
+        )
+
+        action_handler.assert_called_once_with("open_piece_identifier_dialog")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

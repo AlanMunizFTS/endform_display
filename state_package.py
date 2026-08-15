@@ -20,6 +20,7 @@ REQUIRED_PACKAGE_FILES = (
     "db/database.sql",
 )
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp")
+PIECE_IDENTIFIERS_FILE = "db/piece_identifiers.json"
 
 
 def _json_safe(value):
@@ -152,6 +153,29 @@ def _build_data_payload(db_client):
         ),
     }
     return payload
+
+
+def _build_piece_identifier_payload(db_client):
+    """Build optional ID metadata without changing legacy package data.json."""
+    rows = db_client.fetch(
+        "SELECT jsn, piece_identifier FROM piece_result "
+        "WHERE piece_identifier IS NOT NULL ORDER BY jsn"
+    ) or []
+    state_rows = db_client.fetch(
+        "SELECT next_identifier FROM piece_identifier_state WHERE singleton = TRUE"
+    ) or []
+    next_identifier = state_rows[0].get("next_identifier") if state_rows else None
+    return {
+        "format_version": 1,
+        "next_identifier": _json_safe(next_identifier),
+        "pieces": [
+            {
+                "jsn": row.get("jsn"),
+                "piece_identifier": _json_safe(row.get("piece_identifier")),
+            }
+            for row in rows
+        ],
+    }
 
 
 def _build_manifest(
@@ -322,6 +346,20 @@ def _validate_manifest_image_entries(package_path, manifest):
         )
 
 
+def _load_piece_identifier_payload(package_path):
+    identifier_path = _package_file_path(package_path, PIECE_IDENTIFIERS_FILE)
+    if not os.path.isfile(identifier_path):
+        return None
+    with open(identifier_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict) or payload.get("format_version") != 1:
+        raise ValueError("Invalid piece identifier metadata")
+    pieces = payload.get("pieces")
+    if not isinstance(pieces, list):
+        raise ValueError("Piece identifier metadata is missing pieces")
+    return payload
+
+
 def _load_package(package_path):
     if not package_path or not os.path.isdir(package_path):
         raise FileNotFoundError(f"Export folder not found: {package_path}")
@@ -346,7 +384,7 @@ def _load_package(package_path):
     with open(_package_file_path(package_path, "db/data.json"), "r", encoding="utf-8") as handle:
         data_payload = json.load(handle)
 
-    return manifest, data_payload
+    return manifest, data_payload, _load_piece_identifier_payload(package_path)
 
 
 def _write_text_file(path, content):
@@ -847,6 +885,98 @@ def _merge_payload_into_db(controller, db_client, data_payload, progress_callbac
     return stats
 
 
+def _normalize_piece_identifier(value):
+    try:
+        identifier = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid piece identifier: {value!r}")
+    if identifier <= 0:
+        raise ValueError(f"Piece identifier must be positive: {value!r}")
+    return identifier
+
+
+def _validate_piece_identifier_import(db_client, identifier_payload):
+    if identifier_payload is None:
+        return
+
+    imported_by_jsn = {}
+    imported_by_identifier = {}
+    for row in identifier_payload.get("pieces", []):
+        jsn = str(row.get("jsn") or "").strip()
+        identifier = _normalize_piece_identifier(row.get("piece_identifier"))
+        if not jsn:
+            raise ValueError("Piece identifier metadata has an empty JSN")
+        if jsn in imported_by_jsn and imported_by_jsn[jsn] != identifier:
+            raise ValueError(f"Imported JSN {jsn} has conflicting identifiers")
+        owner = imported_by_identifier.get(identifier)
+        if owner is not None and owner != jsn:
+            raise ValueError(
+                f"Imported identifier {identifier} is assigned to both {owner} and {jsn}"
+            )
+        imported_by_jsn[jsn] = identifier
+        imported_by_identifier[identifier] = jsn
+
+    next_identifier = identifier_payload.get("next_identifier")
+    if next_identifier is not None:
+        _normalize_piece_identifier(next_identifier)
+
+    local_rows = db_client.fetch("SELECT jsn, piece_identifier FROM piece_result") or []
+    local_by_jsn = {str(row.get("jsn") or ""): row.get("piece_identifier") for row in local_rows}
+    local_by_identifier = {
+        _normalize_piece_identifier(row.get("piece_identifier")): str(row.get("jsn") or "")
+        for row in local_rows
+        if row.get("piece_identifier") is not None
+    }
+    for jsn, identifier in imported_by_jsn.items():
+        local_identifier = local_by_jsn.get(jsn)
+        if local_identifier is not None and _normalize_piece_identifier(local_identifier) != identifier:
+            raise ValueError(
+                f"JSN {jsn} already has identifier {local_identifier}; import has {identifier}"
+            )
+        owner = local_by_identifier.get(identifier)
+        if owner is not None and owner != jsn:
+            raise ValueError(
+                f"Identifier {identifier} already belongs to local JSN {owner}"
+            )
+
+
+def _merge_piece_identifier_payload(db_client, identifier_payload):
+    if identifier_payload is None:
+        return {"updated": 0, "next_identifier": None}
+
+    updated = 0
+    with db_client.get_cursor() as cursor:
+        for row in identifier_payload.get("pieces", []):
+            cursor.execute(
+                "UPDATE piece_result SET piece_identifier = %s "
+                "WHERE jsn = %s AND piece_identifier IS NULL",
+                (_normalize_piece_identifier(row.get("piece_identifier")), str(row.get("jsn")).strip()),
+            )
+            updated += max(0, cursor.rowcount)
+
+        incoming_next = identifier_payload.get("next_identifier")
+        if incoming_next is not None:
+            incoming_next = _normalize_piece_identifier(incoming_next)
+            cursor.execute(
+                "SELECT next_identifier FROM piece_identifier_state "
+                "WHERE singleton = TRUE FOR UPDATE"
+            )
+            state_row = cursor.fetchone()
+            current_next = (
+                _row_get(state_row, "next_identifier", _row_get(state_row, 0))
+                if state_row
+                else None
+            )
+            chosen_next = incoming_next if current_next is None else max(int(current_next), incoming_next)
+            cursor.execute(
+                "UPDATE piece_identifier_state SET next_identifier = %s WHERE singleton = TRUE",
+                (chosen_next,),
+            )
+        else:
+            chosen_next = None
+    return {"updated": updated, "next_identifier": chosen_next}
+
+
 def export_display_state(controller, output_dir=None, progress_callback=None, db_client=None):
     file_manager = controller.file_manager
     db = db_client or getattr(controller.display, "db", None)
@@ -858,6 +988,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
 
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
+    identifier_payload = _build_piece_identifier_payload(db)
     manifest = _build_manifest(
         historic_names=historic_names,
         data_payload=data_payload,
@@ -883,6 +1014,7 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     metadata_files = {
         "db/data.json": json.dumps(data_payload, indent=2, sort_keys=True),
         "db/database.sql": database_sql,
+        PIECE_IDENTIFIERS_FILE: json.dumps(identifier_payload, indent=2, sort_keys=True),
     }
     for relative_path, content in metadata_files.items():
         _write_text_file(_package_file_path(partial_package_path, relative_path), content)
@@ -952,6 +1084,7 @@ def estimate_display_state_export_size(controller, db_client=None):
     annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
+    identifier_payload = _build_piece_identifier_payload(db)
     manifest = _build_manifest(
         historic_names=historic_names,
         data_payload=data_payload,
@@ -973,6 +1106,7 @@ def estimate_display_state_export_size(controller, db_client=None):
         for content in (
             json.dumps(data_payload, indent=2, sort_keys=True),
             _build_database_sql(data_payload),
+            json.dumps(identifier_payload, indent=2, sort_keys=True),
             json.dumps(manifest, indent=2, sort_keys=True),
         )
     ) + traceability_report_bytes
@@ -994,7 +1128,7 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     if db is None:
         return {"ok": False, "error": "No database connection available"}
 
-    manifest, data_payload = _load_package(package_path)
+    manifest, data_payload, identifier_payload = _load_package(package_path)
     file_manager = controller.file_manager
     historic_target_dir = controller._get_export_historic_dir()
     image_extensions = tuple(
@@ -1016,6 +1150,8 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
     if callable(progress_callback):
         progress_callback(0, progress_state["total"], "Preparing import")
 
+    _validate_piece_identifier_import(db, identifier_payload)
+
     historic_stats = _copy_missing_files(
         file_manager=file_manager,
         source_dir=historic_source_dir,
@@ -1033,6 +1169,7 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
         progress_callback=progress_callback,
         progress_state=progress_state,
     )
+    identifier_stats = _merge_piece_identifier_payload(db, identifier_payload)
 
     for jsn in sorted(merge_stats["affected_jsns"]):
         try:
@@ -1057,5 +1194,6 @@ def import_display_state(controller, package_path, progress_callback=None, db_cl
             "inserted": merge_stats["db_inserted"],
             "skipped": merge_stats["db_skipped"],
             "affected_jsns": len(merge_stats["affected_jsns"]),
+            "piece_identifiers_updated": identifier_stats["updated"],
         },
     }

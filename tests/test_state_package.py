@@ -27,16 +27,21 @@ class FakePackageCursor:
     def __init__(self, db):
         self.db = db
         self._results = []
+        self.rowcount = 0
 
     def execute(self, query, params=None):
         normalized = " ".join(query.split())
         params = params or ()
+        self.rowcount = 0
 
         if normalized == "SELECT img_name FROM img_results":
             self._results = [(row["img_name"],) for row in self.db.img_results]
             return
         if normalized == "SELECT jsn FROM piece_result":
             self._results = [(row["jsn"],) for row in self.db.piece_result]
+            return
+        if normalized == "SELECT next_identifier FROM piece_identifier_state WHERE singleton = TRUE FOR UPDATE":
+            self._results = [(self.db.next_identifier,)]
             return
         if normalized == "SELECT img_name FROM classified_images":
             self._results = [(row["img_name"],) for row in self.db.classified_images]
@@ -121,6 +126,19 @@ class FakePackageCursor:
             self.db.next_piece_id += 1
             self.db.piece_result.append(new_row)
             self.db._reindex()
+            self._results = []
+            return
+        if normalized == "UPDATE piece_result SET piece_identifier = %s WHERE jsn = %s AND piece_identifier IS NULL":
+            identifier, jsn = params
+            piece = self.db.piece_by_jsn.get(jsn)
+            if piece is not None and piece.get("piece_identifier") is None:
+                piece["piece_identifier"] = identifier
+                self.rowcount = 1
+            self._results = []
+            return
+        if normalized == "UPDATE piece_identifier_state SET next_identifier = %s WHERE singleton = TRUE":
+            self.db.next_identifier = params[0]
+            self.rowcount = 1
             self._results = []
             return
         if normalized.startswith(
@@ -208,6 +226,7 @@ class FakePackageDB:
         classified_image_defects=None,
         model_results=None,
         piece_result_defects=None,
+        next_identifier=None,
     ):
         self.img_results = list(img_results or [])
         self.piece_result = list(piece_result or [])
@@ -215,6 +234,7 @@ class FakePackageDB:
         self.classified_image_defects = list(classified_image_defects or [])
         self.model_results = list(model_results or [])
         self.piece_result_defects = list(piece_result_defects or [])
+        self.next_identifier = next_identifier
         self.next_piece_id = max((row["id"] for row in self.piece_result), default=0) + 1
         self.next_classified_id = max((row["id"] for row in self.classified_images), default=0) + 1
         self._reindex()
@@ -238,6 +258,19 @@ class FakePackageDB:
                     "created_at": row["created_at"],
                 }
                 for row in sorted(self.piece_result, key=lambda row: row["jsn"])
+            ]
+        if normalized == "SELECT jsn, piece_identifier FROM piece_result WHERE piece_identifier IS NOT NULL ORDER BY jsn":
+            return [
+                {"jsn": row["jsn"], "piece_identifier": row["piece_identifier"]}
+                for row in sorted(self.piece_result, key=lambda row: row["jsn"])
+                if row.get("piece_identifier") is not None
+            ]
+        if normalized == "SELECT next_identifier FROM piece_identifier_state WHERE singleton = TRUE":
+            return [{"next_identifier": self.next_identifier}]
+        if normalized == "SELECT jsn, piece_identifier FROM piece_result":
+            return [
+                {"jsn": row["jsn"], "piece_identifier": row.get("piece_identifier")}
+                for row in self.piece_result
             ]
         if normalized == "SELECT jsn, model_result FROM piece_result ORDER BY jsn":
             return [
@@ -487,6 +520,7 @@ class TestStatePackage(unittest.TestCase):
             self.assertTrue((package_path / "manifest.json").is_file())
             self.assertTrue((package_path / "db" / "data.json").is_file())
             self.assertTrue((package_path / "db" / "database.sql").is_file())
+            self.assertTrue((package_path / "db" / "piece_identifiers.json").is_file())
             self.assertFalse((package_path / "annotated").exists())
             self.assertTrue((package_path / "historic" / "11861_A_front_NOK.png").is_file())
 
@@ -508,6 +542,83 @@ class TestStatePackage(unittest.TestCase):
                 data_payload["classified_image_defects"][0]["coordinates"],
                 {"x1": 10, "x2": 100, "y1": 20, "y2": 120},
             )
+
+    def test_identifier_metadata_round_trips_without_changing_legacy_data(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_source_db()
+            source_db.piece_result[0]["piece_identifier"] = 41
+            source_db.next_identifier = 42
+            source_controller, _annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic")
+            package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
+            package_path = Path(package_result["package_path"])
+
+            legacy_data = json.loads((package_path / "db" / "data.json").read_text(encoding="utf-8"))
+            self.assertNotIn("piece_identifier", legacy_data["piece_result"][0])
+            identifiers = json.loads((package_path / "db" / "piece_identifiers.json").read_text(encoding="utf-8"))
+            self.assertEqual(identifiers["next_identifier"], 42)
+            self.assertEqual(identifiers["pieces"], [{"jsn": "11861", "piece_identifier": 41}])
+
+            target_db = FakePackageDB(
+                piece_result=[
+                    {
+                        "id": 7,
+                        "jsn": "11861",
+                        "operator_result": "OK",
+                        "model_result": "OK",
+                        "created_at": "2026-03-26 10:00:00",
+                    }
+                ]
+            )
+            target_controller, _annotated_dir, _historic_dir = build_controller(target_tmp, target_db)
+            result = import_display_state(target_controller, package_result["package_path"], db_client=target_db)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(target_db.piece_by_jsn["11861"]["piece_identifier"], 41)
+            self.assertEqual(target_db.next_identifier, 42)
+
+    def test_import_legacy_package_without_identifier_metadata(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_source_db()
+            source_db.piece_result[0]["piece_identifier"] = 41
+            source_controller, _annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic")
+            package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
+            (Path(package_result["package_path"]) / "db" / "piece_identifiers.json").unlink()
+
+            target_db = FakePackageDB(next_identifier=90)
+            target_controller, _annotated_dir, _historic_dir = build_controller(target_tmp, target_db)
+            result = import_display_state(target_controller, package_result["package_path"], db_client=target_db)
+
+            self.assertTrue(result["ok"])
+            self.assertIsNone(target_db.piece_by_jsn["11861"].get("piece_identifier"))
+            self.assertEqual(target_db.next_identifier, 90)
+
+    def test_identifier_conflict_blocks_import_before_copying_files(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
+            source_db = build_source_db()
+            source_db.piece_result[0]["piece_identifier"] = 41
+            source_controller, _annotated_dir, historic_dir = build_controller(source_tmp, source_db)
+            (historic_dir / "11861_A_side_OK.png").write_bytes(b"historic")
+            package_result = export_display_state(source_controller, output_dir=source_tmp, db_client=source_db)
+
+            target_db = FakePackageDB(
+                piece_result=[
+                    {
+                        "id": 5,
+                        "jsn": "another-jsn",
+                        "operator_result": "OK",
+                        "model_result": "OK",
+                        "created_at": "2026-03-26 10:00:00",
+                        "piece_identifier": 41,
+                    }
+                ]
+            )
+            target_controller, _annotated_dir, target_historic = build_controller(target_tmp, target_db)
+
+            with self.assertRaisesRegex(ValueError, "already belongs"):
+                import_display_state(target_controller, package_result["package_path"], db_client=target_db)
+            self.assertEqual(list(target_historic.iterdir()), [])
 
     def test_export_display_state_includes_traceability_report(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

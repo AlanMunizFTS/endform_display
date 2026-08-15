@@ -288,11 +288,15 @@ class PostgresDB:
         try:
             with self.get_cursor() as cursor:
                 cursor.execute(
-                    "TRUNCATE TABLE piece_result, classified_images, img_results, model_results, "
+                    "TRUNCATE TABLE piece_identifier_state, piece_result, classified_images, img_results, model_results, "
                     "remote_model_results_pending, remote_sync_state "
                     "RESTART IDENTITY CASCADE"
                 )
-                return 6
+                cursor.execute(
+                    "INSERT INTO piece_identifier_state (singleton, next_identifier) "
+                    "VALUES (TRUE, NULL)"
+                )
+                return 7
         except Exception as e:
             logger.error(f"DB truncate_app_tables error: {e}")
             raise

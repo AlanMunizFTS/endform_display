@@ -135,6 +135,14 @@ class DisplayWindow:
         self.piece_number_dialog_replace_on_input = False
         self.piece_number_dialog_ok_rect = None
         self.piece_number_dialog_cancel_rect = None
+        self.piece_identifier_rect = None
+        self.show_piece_identifier_dialog = False
+        self.piece_identifier_dialog_input = ""
+        self.piece_identifier_dialog_replace_on_input = False
+        self.piece_identifier_dialog_cancel_rect = None
+        self.piece_identifier_dialog_save_rect = None
+        self.piece_identifier_dialog_continue_rect = None
+        self.piece_identifier_dialog_clear_rect = None
         self.piece_counter_rect = None  # Clickable counter above reset button
         self.show_stats_class_modal = False
         self.stats_class_modal_close_rect = None
@@ -189,6 +197,7 @@ class DisplayWindow:
         self._image_cache = OrderedDict()
         self._image_cache_max_items = 32
         self._db_result_cache = {}
+        self._piece_identifier_cache = {}
         self._model_overlay_cache_key = None
         self._model_overlay_cache_value = {}
         self._model_overlay_cache_time = 0.0
@@ -2346,6 +2355,20 @@ class DisplayWindow:
                 return  # Exit early to prevent other clicks
 
             # Piece number dialog buttons (high priority)
+            if self.show_piece_identifier_dialog:
+                for rect, action in (
+                    (self.piece_identifier_dialog_cancel_rect, "close_piece_identifier_dialog"),
+                    (self.piece_identifier_dialog_save_rect, "save_piece_identifier_only"),
+                    (self.piece_identifier_dialog_continue_rect, "save_piece_identifier_and_continue"),
+                    (self.piece_identifier_dialog_clear_rect, "clear_piece_identifier"),
+                ):
+                    if rect:
+                        bx, by, bw, bh = rect
+                        if bx <= x <= bx + bw and by <= y <= by + bh:
+                            self._emit_action(action)
+                            return
+                return
+
             if self.show_piece_number_dialog:
                 if self.piece_number_dialog_ok_rect:
                     bx, by, bw, bh = self.piece_number_dialog_ok_rect
@@ -2468,6 +2491,12 @@ class DisplayWindow:
                 bx, by, bw, bh = self.historic_jsn_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
                     self._copy_current_historic_jsn()
+                    return
+
+            if self.piece_identifier_rect and self.historic_mode:
+                bx, by, bw, bh = self.piece_identifier_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._emit_action("open_piece_identifier_dialog")
                     return
             
             # INFO icon - show piece date (historic mode)
@@ -3455,6 +3484,79 @@ class DisplayWindow:
         _draw_dialog_button(self.piece_number_dialog_cancel_rect, "Cancel", (100, 100, 100))
         _draw_dialog_button(self.piece_number_dialog_ok_rect, "Go", (132, 36, 2))
 
+        return canvas
+
+    def draw_piece_identifier_badge(self, canvas):
+        controller = self._require_controller()
+        identifier = controller.get_current_historic_piece_identifier()
+        label = f"ID: {identifier if identifier is not None else '---'}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        text_size = cv2.getTextSize(label, font, 0.72, 2)[0]
+        box_x, box_y = 28, 18
+        box_w, box_h = text_size[0] + 34, 42
+        self.piece_identifier_rect = (box_x, box_y, box_w, box_h)
+        hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, self.piece_identifier_rect)
+        fill = (175, 105, 30) if hovered else (130, 78, 25)
+        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_w, box_y + box_h), fill, -1)
+        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_w, box_y + box_h), (240, 240, 240), 2)
+        cv2.putText(
+            canvas,
+            label,
+            (box_x + 17, box_y + 28),
+            font,
+            0.72,
+            (255, 255, 255),
+            2,
+        )
+        return canvas
+
+    def draw_piece_identifier_dialog(self, canvas):
+        dialog_width, dialog_height = 660, 320
+        dialog_x = (self.width - dialog_width) // 2
+        dialog_y = (self.height - dialog_height) // 2
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (self.width, self.height), (0, 0, 0), -1)
+        canvas = cv2.addWeighted(canvas, 0.3, overlay, 0.7, 0)
+        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height), (255, 255, 255), -1)
+        cv2.rectangle(canvas, (dialog_x, dialog_y), (dialog_x + dialog_width, dialog_y + dialog_height), (0, 0, 0), 3)
+
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        title = "Piece Numeric ID"
+        title_size = cv2.getTextSize(title, font, 0.9, 2)[0]
+        cv2.putText(canvas, title, (dialog_x + (dialog_width - title_size[0]) // 2, dialog_y + 44), font, 0.9, (0, 0, 0), 2)
+        helper = "Save only this piece, or continue automatic IDs from the next number."
+        helper_size = cv2.getTextSize(helper, font, 0.52, 1)[0]
+        cv2.putText(canvas, helper, (dialog_x + (dialog_width - helper_size[0]) // 2, dialog_y + 76), font, 0.52, (80, 80, 80), 1)
+
+        input_w, input_h = 260, 56
+        input_x, input_y = dialog_x + (dialog_width - input_w) // 2, dialog_y + 98
+        cv2.rectangle(canvas, (input_x, input_y), (input_x + input_w, input_y + input_h), (250, 250, 220), -1)
+        cv2.rectangle(canvas, (input_x, input_y), (input_x + input_w, input_y + input_h), (0, 0, 0), 2)
+        input_text = self.piece_identifier_dialog_input or "Numeric ID"
+        input_color = (0, 0, 0) if self.piece_identifier_dialog_input else (145, 145, 145)
+        input_size = cv2.getTextSize(input_text, font, 0.9, 2)[0]
+        input_text_x = input_x + (input_w - input_size[0]) // 2
+        cv2.putText(canvas, input_text, (input_text_x, input_y + 36), font, 0.9, input_color, 2)
+
+        button_y, button_h, button_gap = dialog_y + 190, 42, 14
+        self.piece_identifier_dialog_cancel_rect = (dialog_x + 24, button_y, 120, button_h)
+        self.piece_identifier_dialog_clear_rect = (dialog_x + 158, button_y, 110, button_h)
+        self.piece_identifier_dialog_save_rect = (dialog_x + 282, button_y, 150, button_h)
+        self.piece_identifier_dialog_continue_rect = (dialog_x + 446, button_y, 190, button_h)
+
+        def draw_button(rect, text, color):
+            x, y, w, h = rect
+            hovered = self._is_point_in_rect(self.mouse_x, self.mouse_y, rect)
+            fill = tuple(min(255, channel + 20) for channel in color) if hovered else color
+            cv2.rectangle(canvas, (x, y), (x + w, y + h), fill, -1)
+            cv2.rectangle(canvas, (x, y), (x + w, y + h), (0, 0, 0), 2)
+            size = cv2.getTextSize(text, font, 0.56, 2)[0]
+            cv2.putText(canvas, text, (x + (w - size[0]) // 2, y + 27), font, 0.56, (255, 255, 255), 2)
+
+        draw_button(self.piece_identifier_dialog_cancel_rect, "Cancel", (100, 100, 100))
+        draw_button(self.piece_identifier_dialog_clear_rect, "Clear ID", (75, 75, 165))
+        draw_button(self.piece_identifier_dialog_save_rect, "This piece only", (70, 120, 70))
+        draw_button(self.piece_identifier_dialog_continue_rect, "Save + continue auto", (132, 36, 2))
         return canvas
 
     def _load_trash_icon(self, size):
@@ -4621,6 +4723,20 @@ class DisplayWindow:
                     self._emit_action("piece_number_append_digit", digit=chr(key))
                     return True
 
+            if self.show_piece_identifier_dialog and not self.show_no_images_dialog and key_ex != -1:
+                if key == 27:
+                    self._emit_action("close_piece_identifier_dialog")
+                    return True
+                if key == 13:
+                    self._emit_action("save_piece_identifier_only")
+                    return True
+                if key == 8:
+                    self._emit_action("piece_identifier_backspace")
+                    return True
+                if 48 <= key <= 57:
+                    self._emit_action("piece_identifier_append_digit", digit=chr(key))
+                    return True
+
             # Handle keyboard input when search is active
             if self.search_active and key_ex != -1:
                 if key == 27:  # ESC key
@@ -4655,6 +4771,7 @@ class DisplayWindow:
                 and not self.show_stats_class_modal
                 and not self.show_piece_date_dialog
                 and not self.show_piece_number_dialog
+                and not self.show_piece_identifier_dialog
                 and not self.show_no_images_dialog
             ):
                 if key in {3, ord('c'), ord('C')}:
@@ -5351,11 +5468,13 @@ class DisplayWindow:
             # Historic mode: show JSN in upper blue bar
             self.historic_jsn_rect = None
             self.piece_counter_rect = None
+            self.piece_identifier_rect = None
             if self.historic_images and len(self.historic_images) > 0:
                 current_batch = self.historic_images[self.historic_offset]
                 is_incomplete = len(current_batch) < 7
 
                 canvas = self.draw_historic_jsn_banner(canvas)
+                canvas = self.draw_piece_identifier_badge(canvas)
 
                 if is_incomplete:
                     incomplete_text = f"INCOMPLETE BATCH ({len(current_batch)}/7)"
@@ -5393,6 +5512,8 @@ class DisplayWindow:
                 canvas = self.draw_piece_date_dialog(canvas)
             if self.show_piece_number_dialog:
                 canvas = self.draw_piece_number_dialog(canvas)
+            if self.show_piece_identifier_dialog:
+                canvas = self.draw_piece_identifier_dialog(canvas)
             
             # Draw confirmation dialog if needed
             if self.show_reset_confirm:
