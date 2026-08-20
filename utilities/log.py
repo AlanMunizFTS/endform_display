@@ -88,6 +88,9 @@ class Logger:
     def debug(self, message, allow_repeat=False):
         self.log(message, level="DEBUG", allow_repeat=allow_repeat)
 
+    def checkpoint(self, message):
+        self.info(f"CHECKPOINT: {message}", allow_repeat=True)
+
     def print(self, *args, **kwargs):
         sep = kwargs.get("sep", " ")
         end = kwargs.get("end", "\n")

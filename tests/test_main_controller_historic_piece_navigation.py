@@ -69,6 +69,20 @@ class TestMainControllerHistoricPieceNavigation(unittest.TestCase):
         self.assertEqual(display.piece_number_dialog_input, "3")
         self.assertTrue(display.piece_number_dialog_replace_on_input)
 
+    def test_piece_identifier_dialog_edits_numeric_input(self):
+        display = _DisplayPieceStub()
+        controller = MainController(display=display)
+        controller.db_connected = True
+        controller.get_current_historic_piece_identifier = MagicMock(return_value=41)
+
+        controller.handle_ui_action("open_piece_identifier_dialog")
+        controller.handle_ui_action("piece_identifier_append_digit", digit="7")
+        controller.handle_ui_action("piece_identifier_backspace")
+
+        self.assertTrue(display.show_piece_identifier_dialog)
+        self.assertEqual(display.piece_identifier_dialog_input, "")
+        self.assertFalse(display.piece_identifier_dialog_replace_on_input)
+
     def test_submit_piece_number_dialog_moves_and_closes_on_success(self):
         display = _DisplayPieceStub()
         controller = MainController(display=display)

@@ -2089,6 +2089,97 @@ class MainController:
         )
         self.export_worker_thread.start()
 
+    def start_export_historic_image_report_async(
+        self,
+        output_dir=None,
+        endform_type="",
+        class_name="",
+        defect_class="wrinkle",
+        angle="side",
+        pieces_per_group=4,
+    ):
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+
+        defect_class = str(defect_class or "wrinkle").strip().lower()
+        angle = str(angle or "side").strip().lower()
+        report_helper_text = (
+            f"Building four historic pieces per Excel row. "
+            f"Filter: {angle} / {defect_class}."
+        )
+
+        self.dataset_transfer_active = True
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing historic image report..."
+        d.sync_progress_title = "Exporting Image Report"
+        d.sync_progress_helper_text = report_helper_text
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _image_report_worker():
+            worker_state = None
+            try:
+                worker_state = self._pause_dataset_background_workers()
+
+                from report_exporter import export_historic_image_table_report
+
+                def _report_progress_cb(done, total, stage):
+                    percent = int((done / total) * 100) if total > 0 else 0
+                    stage_text = f"{stage} ({done}/{total})" if total > 0 else stage
+                    self._set_sync_progress(
+                        stage_text,
+                        percent,
+                        title="Exporting Image Report",
+                        helper_text=report_helper_text,
+                    )
+
+                report_path = export_historic_image_table_report(
+                    self,
+                    output_dir=output_dir,
+                    endform_type=endform_type,
+                    class_name=class_name,
+                    defect_class=defect_class,
+                    angle=angle,
+                    pieces_per_group=pieces_per_group,
+                    progress_callback=_report_progress_cb,
+                )
+                report_name = os.path.basename(str(report_path))
+                self._set_sync_progress(
+                    "Completed",
+                    100,
+                    title="Exporting Image Report",
+                    helper_text=report_helper_text,
+                )
+                d.sync_message = f"Image report exported: {report_name}"
+                d.sync_message_is_error = False
+                self.logger.info(
+                    f"[IMAGE_REPORT] Export completed: {report_path}",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Image report export failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(
+                    f"[IMAGE_REPORT] Export failed: {exc}",
+                    allow_repeat=True,
+                )
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
+                d.sync_in_progress = False
+                d.sync_message_time = time.time()
+
+        self.export_worker_thread = Thread(
+            target=_image_report_worker,
+            name="historic-image-report-export-worker",
+            daemon=True,
+        )
+        self.export_worker_thread.start()
+
     def start_import_display_state_async(self, package_path):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
@@ -2550,6 +2641,9 @@ class MainController:
         d.show_piece_number_dialog = False
         d.piece_number_dialog_input = ""
         d.piece_number_dialog_replace_on_input = False
+        d.show_piece_identifier_dialog = False
+        d.piece_identifier_dialog_input = ""
+        d.piece_identifier_dialog_replace_on_input = False
         self._clear_historic_filter_state()
         if hasattr(d, "historic_jsn_rect"):
             d.historic_jsn_rect = None
@@ -2883,6 +2977,122 @@ class MainController:
         first = batch[0]
         return first.split("_")[0] if "_" in first else first
 
+    @staticmethod
+    def _normalize_piece_identifier(value):
+        try:
+            identifier = int(str(value).strip())
+        except (TypeError, ValueError):
+            return None
+        return identifier if identifier > 0 else None
+
+    def get_current_historic_piece_identifier(self):
+        d = self.display
+        jsn = self._get_current_historic_jsn()
+        if not jsn or not d.db:
+            return None
+        cache = getattr(d, "_piece_identifier_cache", {})
+        if jsn in cache:
+            return cache[jsn]
+        try:
+            rows = d.db.fetch(
+                "SELECT piece_identifier FROM piece_result WHERE jsn = %s",
+                (jsn,),
+            )
+            identifier = rows[0].get("piece_identifier") if rows else None
+            identifier = self._normalize_piece_identifier(identifier)
+            cache[jsn] = identifier
+            d._piece_identifier_cache = cache
+            return identifier
+        except Exception as exc:
+            self.logger.warn(f"Unable to read piece identifier for {jsn}: {exc}")
+            return None
+
+    def _set_piece_identifier_toast(self, message, is_error=False):
+        setter = getattr(self.display, "_set_toast_message", None)
+        if callable(setter):
+            setter(message, is_error=is_error, duration_sec=3.0)
+
+    def _set_current_historic_piece_identifier(self, value, continue_automatic=False):
+        d = self.display
+        jsn = self._get_current_historic_jsn()
+        if not jsn or not d.db:
+            self._set_piece_identifier_toast("No historic piece selected", is_error=True)
+            return False
+
+        identifier = self._normalize_piece_identifier(value)
+        if identifier is None:
+            self._set_piece_identifier_toast("Enter a positive numeric ID", is_error=True)
+            return False
+
+        try:
+            with d.db.get_cursor() as cursor:
+                cursor.execute(
+                    "SELECT jsn FROM piece_result "
+                    "WHERE piece_identifier = %s AND jsn <> %s",
+                    (identifier, jsn),
+                )
+                conflict = cursor.fetchone()
+                if conflict is not None:
+                    owner = conflict.get("jsn") if hasattr(conflict, "get") else conflict[0]
+                    self._set_piece_identifier_toast(
+                        f"ID {identifier} already belongs to JSN {owner}",
+                        is_error=True,
+                    )
+                    return False
+
+                if continue_automatic:
+                    cursor.execute(
+                        "SELECT next_identifier FROM piece_identifier_state "
+                        "WHERE singleton = TRUE FOR UPDATE"
+                    )
+                cursor.execute(
+                    "UPDATE piece_result SET piece_identifier = %s WHERE jsn = %s",
+                    (identifier, jsn),
+                )
+                if cursor.rowcount != 1:
+                    self._set_piece_identifier_toast("Historic piece was not found in DB", is_error=True)
+                    return False
+                if continue_automatic:
+                    cursor.execute(
+                        "UPDATE piece_identifier_state SET next_identifier = %s "
+                        "WHERE singleton = TRUE",
+                        (identifier + 1,),
+                    )
+        except Exception as exc:
+            self.logger.error(f"Unable to set piece identifier for {jsn}: {exc}")
+            self._set_piece_identifier_toast("Unable to save piece ID", is_error=True)
+            return False
+
+        cache = getattr(d, "_piece_identifier_cache", {})
+        cache[jsn] = identifier
+        d._piece_identifier_cache = cache
+        mode_text = "; automatic sequence continues" if continue_automatic else ""
+        self._set_piece_identifier_toast(f"ID {identifier} saved{mode_text}")
+        return True
+
+    def _clear_current_historic_piece_identifier(self):
+        d = self.display
+        jsn = self._get_current_historic_jsn()
+        if not jsn or not d.db:
+            return False
+        try:
+            changed = d.db.execute(
+                "UPDATE piece_result SET piece_identifier = NULL WHERE jsn = %s",
+                (jsn,),
+            )
+        except Exception as exc:
+            self.logger.error(f"Unable to clear piece identifier for {jsn}: {exc}")
+            self._set_piece_identifier_toast("Unable to clear piece ID", is_error=True)
+            return False
+        if not changed:
+            self._set_piece_identifier_toast("Historic piece was not found in DB", is_error=True)
+            return False
+        cache = getattr(d, "_piece_identifier_cache", {})
+        cache[jsn] = None
+        d._piece_identifier_cache = cache
+        self._set_piece_identifier_toast("Piece ID cleared")
+        return True
+
     def perform_delete_current_piece(self):
         d = self.display
         jsn = self._get_current_historic_jsn()
@@ -3020,6 +3230,8 @@ class MainController:
         d._historic_index_last_scan = 0.0
         d._historic_jsn_cache = []
         d._db_result_cache.clear()
+        if hasattr(d, "_piece_identifier_cache"):
+            d._piece_identifier_cache.clear()
         d._image_cache.clear()
         if hasattr(d, "historic_jsn_rect"):
             d.historic_jsn_rect = None
@@ -4011,10 +4223,11 @@ class MainController:
                     "  OR EXCLUDED.operator_result = 'NOK' THEN 'NOK' ELSE 'OK' END, "
                     "model_result = CASE WHEN piece_result.model_result = 'NOK' "
                     "  OR EXCLUDED.model_result = 'NOK' THEN 'NOK' ELSE 'OK' END "
-                    "RETURNING id",
+                    "RETURNING id, (xmax = 0) AS is_new",
                     (jsn, operator_result, model_result),
                 )
-                piece_id = cursor.fetchone()["id"]
+                piece_row = cursor.fetchone()
+                piece_id = piece_row["id"]
 
                 cursor.execute(
                     "INSERT INTO classified_images "
@@ -4026,8 +4239,50 @@ class MainController:
                     "piece_id = EXCLUDED.piece_id",
                     (img_name, operator_result, model_result, piece_id),
                 )
+                if bool(piece_row.get("is_new", False)):
+                    self._assign_automatic_piece_identifier(cursor, jsn)
         except Exception as exc:
             print(f"Error upserting classification for {img_name}: {exc}")
+
+    def _assign_automatic_piece_identifier(self, cursor, jsn):
+        """Assign one queued ID to a newly created JSN, if automation was enabled."""
+        cursor.execute(
+            "SELECT next_identifier FROM piece_identifier_state "
+            "WHERE singleton = TRUE FOR UPDATE"
+        )
+        state_row = cursor.fetchone()
+        next_identifier = (
+            state_row.get("next_identifier") if state_row is not None else None
+        )
+        if next_identifier is None:
+            return
+        next_identifier = int(next_identifier)
+        cursor.execute(
+            "SELECT jsn FROM piece_result WHERE piece_identifier = %s",
+            (next_identifier,),
+        )
+        conflict = cursor.fetchone()
+        if conflict is not None:
+            self.logger.warn(
+                f"Automatic piece ID {next_identifier} is already used; JSN {jsn} was left without an ID",
+                allow_repeat=True,
+            )
+            self._set_piece_identifier_toast(
+                f"ID {next_identifier} is occupied; new piece has no ID",
+                is_error=True,
+            )
+            return
+        cursor.execute(
+            "UPDATE piece_result SET piece_identifier = %s WHERE jsn = %s",
+            (next_identifier, jsn),
+        )
+        cursor.execute(
+            "UPDATE piece_identifier_state SET next_identifier = %s WHERE singleton = TRUE",
+            (next_identifier + 1,),
+        )
+        cache = getattr(self.display, "_piece_identifier_cache", {})
+        cache[jsn] = next_identifier
+        self.display._piece_identifier_cache = cache
 
     def _recalculate_piece_result(self, jsn, db_client=None):
         db = db_client or self.display.db
@@ -5228,6 +5483,47 @@ class MainController:
             d.show_piece_date_dialog = False
         elif action == "open_piece_number_dialog":
             self._open_piece_number_dialog()
+        elif action == "open_piece_identifier_dialog":
+            current_identifier = self.get_current_historic_piece_identifier()
+            d.show_piece_date_dialog = False
+            self._close_piece_number_dialog(clear_input=False)
+            d.show_piece_identifier_dialog = True
+            d.piece_identifier_dialog_input = (
+                "" if current_identifier is None else str(current_identifier)
+            )
+            d.piece_identifier_dialog_replace_on_input = bool(current_identifier is not None)
+        elif action == "close_piece_identifier_dialog":
+            d.show_piece_identifier_dialog = False
+            d.piece_identifier_dialog_input = ""
+            d.piece_identifier_dialog_replace_on_input = False
+        elif action == "piece_identifier_append_digit":
+            digit = str(payload.get("digit") or "")
+            if digit.isdigit():
+                current_input = str(getattr(d, "piece_identifier_dialog_input", "") or "")
+                d.piece_identifier_dialog_input = (
+                    digit if d.piece_identifier_dialog_replace_on_input else f"{current_input}{digit}"
+                )[:18]
+                d.piece_identifier_dialog_replace_on_input = False
+        elif action == "piece_identifier_backspace":
+            d.piece_identifier_dialog_input = str(
+                getattr(d, "piece_identifier_dialog_input", "") or ""
+            )[:-1]
+            d.piece_identifier_dialog_replace_on_input = False
+        elif action == "save_piece_identifier_only":
+            if self._set_current_historic_piece_identifier(
+                getattr(d, "piece_identifier_dialog_input", ""),
+                continue_automatic=False,
+            ):
+                d.show_piece_identifier_dialog = False
+        elif action == "save_piece_identifier_and_continue":
+            if self._set_current_historic_piece_identifier(
+                getattr(d, "piece_identifier_dialog_input", ""),
+                continue_automatic=True,
+            ):
+                d.show_piece_identifier_dialog = False
+        elif action == "clear_piece_identifier":
+            if self._clear_current_historic_piece_identifier():
+                d.show_piece_identifier_dialog = False
         elif action == "close_piece_number_dialog":
             self._close_piece_number_dialog(clear_input=True)
         elif action == "piece_number_append_digit":
@@ -5336,6 +5632,14 @@ class MainController:
                     d._clamp_stats_class_modal_dataset_class_offset()
         elif action == "export_stats_dataset":
             self.start_export_piece_stats_dataset_async()
+        elif action == "export_historic_image_report":
+            self.start_export_historic_image_report_async(
+                endform_type=payload.get("endform_type"),
+                class_name=payload.get("defect_class") or "wrinkle",
+                defect_class=payload.get("defect_class") or "wrinkle",
+                angle=payload.get("angle") or "side",
+                pieces_per_group=4,
+            )
         elif action == "open_reset_confirm":
             d.show_reset_confirm = True
             d.show_delete_confirm = False
