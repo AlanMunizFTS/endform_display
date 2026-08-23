@@ -294,6 +294,56 @@ class TestMainControllerStatePackage(unittest.TestCase):
             )
             self.assertFalse(display.sync_message_is_error)
 
+    @patch("main_controller.Thread", _ImmediateThread)
+    def test_start_open_historic_verdict_analysis_queues_snapshot(self):
+        display = self._build_display(db=MagicMock())
+        controller = MainController(display=display)
+        controller._pause_dataset_background_workers = MagicMock(return_value={})
+        controller._resume_dataset_background_workers = MagicMock()
+        rows = [
+            {
+                "group_number": 1,
+                "group_label": "Pieza agrupada #1",
+                "actual_result": "",
+                "positions": [],
+            }
+        ]
+
+        with patch(
+            "report_exporter.build_historic_verdict_rows",
+            return_value={
+                "rows": rows,
+                "defect_class": "wrinkle",
+                "angle": "diag",
+            },
+        ) as build_mock:
+            controller.start_open_historic_verdict_analysis_async(
+                endform_type="mush",
+                defect_class="wrinkle",
+                angle="diag",
+            )
+
+        build_mock.assert_called_once_with(
+            controller,
+            defect_class="wrinkle",
+            angle="diag",
+            pieces_per_group=4,
+            force_rescan=True,
+        )
+        display.queue_historic_verdict_analysis.assert_called_once_with(
+            rows,
+            filters={
+                "endform_type": "mush",
+                "defect_class": "wrinkle",
+                "angle": "diag",
+            },
+        )
+        self.assertFalse(display.sync_in_progress)
+        self.assertEqual(display.sync_progress_title, "Opening Verdict Analysis")
+        self.assertEqual(display.sync_message, "")
+        self.assertFalse(display.sync_message_is_error)
+        controller._resume_dataset_background_workers.assert_called_once_with({})
+
     def test_check_and_register_new_historic_images_skips_during_dataset_transfer(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             annotated_dir = Path(tmp_dir) / "annotated"

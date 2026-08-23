@@ -686,6 +686,75 @@ def _load_historic_filtered_verdicts(
     return verdicts
 
 
+def build_historic_verdict_rows(
+    controller,
+    historic_index=None,
+    defect_class=DEFAULT_HISTORIC_REPORT_DEFECT_CLASS,
+    angle=DEFAULT_HISTORIC_REPORT_ANGLE,
+    pieces_per_group=4,
+    force_rescan=True,
+):
+    """Return the exact grouped verdict rows shared by Excel and live analysis."""
+    if historic_index is None:
+        loaded_index = controller._load_historic_index(force_rescan=force_rescan) or []
+        historic_index = list(reversed(loaded_index))
+    else:
+        historic_index = list(historic_index or [])
+
+    if not historic_index:
+        raise ValueError("No historic images available")
+
+    resolved_pieces_per_group = max(1, int(pieces_per_group or 4))
+    normalized_class = str(
+        defect_class or DEFAULT_HISTORIC_REPORT_DEFECT_CLASS
+    ).strip().lower()
+    normalized_angle = str(angle or DEFAULT_HISTORIC_REPORT_ANGLE).strip().lower()
+    model_verdicts = _load_historic_filtered_verdicts(
+        controller,
+        historic_index,
+        normalized_class,
+        normalized_angle,
+    )
+
+    total_groups = (
+        len(historic_index) + resolved_pieces_per_group - 1
+    ) // resolved_pieces_per_group
+    rows = []
+    for group_idx in range(total_groups):
+        positions = []
+        for position_idx in range(resolved_pieces_per_group):
+            piece_idx = group_idx * resolved_pieces_per_group + position_idx
+            if piece_idx < len(historic_index):
+                jsn = _extract_historic_batch_jsn(historic_index[piece_idx])
+                inferred_result = model_verdicts.get(jsn)
+            else:
+                jsn = ""
+                inferred_result = None
+            positions.append(
+                {
+                    "position": position_idx + 1,
+                    "jsn": jsn,
+                    "inferred_result": inferred_result,
+                }
+            )
+        rows.append(
+            {
+                "group_number": group_idx + 1,
+                "group_label": f"Pieza agrupada #{group_idx + 1}",
+                "actual_result": "",
+                "positions": positions,
+            }
+        )
+
+    return {
+        "historic_index": historic_index,
+        "rows": rows,
+        "defect_class": normalized_class,
+        "angle": normalized_angle,
+        "pieces_per_group": resolved_pieces_per_group,
+    }
+
+
 def export_historic_image_table_report(
     controller,
     output_dir=None,
@@ -700,9 +769,14 @@ def export_historic_image_table_report(
     images_per_piece=7,
     progress_callback=None,
 ):
-    historic_index = list(reversed(controller._load_historic_index(force_rescan=True) or []))
-    if not historic_index:
-        raise ValueError("No historic images available to export")
+    verdict_data = build_historic_verdict_rows(
+        controller,
+        defect_class=defect_class,
+        angle=angle,
+        pieces_per_group=pieces_per_group,
+        force_rescan=True,
+    )
+    historic_index = verdict_data["historic_index"]
 
     source_dir = Path(historic_dir or controller._get_export_historic_dir())
     if annotated_dir is None:
@@ -723,7 +797,7 @@ def export_historic_image_table_report(
     verdict_sheet = workbook.create_sheet("Piezas con veredicto")
     verdict_sheet.sheet_view.showGridLines = False
 
-    pieces_per_group = max(1, int(pieces_per_group or 4))
+    pieces_per_group = verdict_data["pieces_per_group"]
     images_per_piece = max(1, int(images_per_piece or 7))
     defect_class = (
         str(defect_class or DEFAULT_HISTORIC_REPORT_DEFECT_CLASS).strip().lower()
@@ -914,12 +988,7 @@ def export_historic_image_table_report(
         defect_class,
         angle,
     )
-    model_verdicts = _load_historic_filtered_verdicts(
-        controller,
-        historic_index,
-        defect_class,
-        angle,
-    )
+    verdict_rows = verdict_data["rows"]
 
     with TemporaryDirectory() as temp_dir:
         prepared_image_idx = 0
@@ -982,8 +1051,9 @@ def export_historic_image_table_report(
             )
             verdict_sheet.add_image(verdict_workbook_image)
 
-            jsn = _extract_historic_batch_jsn(batch)
-            verdict = model_verdicts.get(jsn)
+            verdict = verdict_rows[group_idx]["positions"][position_in_group].get(
+                "inferred_result"
+            )
             verdict_cell = verdict_sheet.cell(
                 row=data_row,
                 column=verdict_col,

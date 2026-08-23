@@ -2180,6 +2180,113 @@ class MainController:
         )
         self.export_worker_thread.start()
 
+    def start_open_historic_verdict_analysis_async(
+        self,
+        endform_type="",
+        defect_class="wrinkle",
+        angle="side",
+        pieces_per_group=4,
+    ):
+        """Build a frozen report-equivalent snapshot without blocking the UI."""
+        d = self.display
+        if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
+            return
+
+        normalized_class = str(defect_class or "wrinkle").strip().lower()
+        normalized_angle = str(angle or "side").strip().lower()
+        helper_text = (
+            f"Loading grouped verdicts for {normalized_angle} / {normalized_class}."
+        )
+        self.dataset_transfer_active = True
+        d.sync_in_progress = True
+        d.sync_progress = 0
+        d.sync_stage = "Preparing verdict analysis..."
+        d.sync_progress_title = "Opening Verdict Analysis"
+        d.sync_progress_helper_text = helper_text
+        d.sync_message = ""
+        d.sync_message_is_error = False
+        d.sync_message_time = 0
+
+        def _analysis_worker():
+            worker_state = None
+            succeeded = False
+            try:
+                worker_state = self._pause_dataset_background_workers()
+                from report_exporter import build_historic_verdict_rows
+
+                self._set_sync_progress(
+                    "Loading historic groups...",
+                    25,
+                    title="Opening Verdict Analysis",
+                    helper_text=helper_text,
+                )
+                verdict_data = build_historic_verdict_rows(
+                    self,
+                    defect_class=normalized_class,
+                    angle=normalized_angle,
+                    pieces_per_group=pieces_per_group,
+                    force_rescan=True,
+                )
+                self._set_sync_progress(
+                    "Preparing table...",
+                    85,
+                    title="Opening Verdict Analysis",
+                    helper_text=helper_text,
+                )
+                filters = {
+                    "endform_type": str(endform_type or "").strip(),
+                    "defect_class": verdict_data["defect_class"],
+                    "angle": verdict_data["angle"],
+                }
+                queue_analysis = getattr(
+                    d,
+                    "queue_historic_verdict_analysis",
+                    None,
+                )
+                if callable(queue_analysis):
+                    queue_analysis(verdict_data["rows"], filters=filters)
+                else:
+                    d._verdict_analysis_dialog_request = {
+                        "rows": verdict_data["rows"],
+                        "filters": filters,
+                    }
+                self._set_sync_progress(
+                    "Completed",
+                    100,
+                    title="Opening Verdict Analysis",
+                    helper_text=helper_text,
+                )
+                succeeded = True
+                self.logger.info(
+                    f"[VERDICT_ANALYSIS] Prepared {len(verdict_data['rows'])} grouped rows",
+                    allow_repeat=True,
+                )
+            except Exception as exc:
+                d.sync_message = f"Verdict analysis failed: {exc}"
+                d.sync_message_is_error = True
+                self.logger.error(
+                    f"[VERDICT_ANALYSIS] Failed: {exc}",
+                    allow_repeat=True,
+                )
+            finally:
+                if worker_state is not None:
+                    self._resume_dataset_background_workers(worker_state)
+                self.dataset_transfer_active = False
+                d.sync_in_progress = False
+                if succeeded:
+                    d.sync_message = ""
+                    d.sync_message_is_error = False
+                    d.sync_message_time = 0
+                else:
+                    d.sync_message_time = time.time()
+
+        self.export_worker_thread = Thread(
+            target=_analysis_worker,
+            name="historic-verdict-analysis-worker",
+            daemon=True,
+        )
+        self.export_worker_thread.start()
+
     def start_import_display_state_async(self, package_path):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
@@ -5636,6 +5743,13 @@ class MainController:
             self.start_export_historic_image_report_async(
                 endform_type=payload.get("endform_type"),
                 class_name=payload.get("defect_class") or "wrinkle",
+                defect_class=payload.get("defect_class") or "wrinkle",
+                angle=payload.get("angle") or "side",
+                pieces_per_group=4,
+            )
+        elif action == "open_historic_verdict_analysis":
+            self.start_open_historic_verdict_analysis_async(
+                endform_type=payload.get("endform_type"),
                 defect_class=payload.get("defect_class") or "wrinkle",
                 angle=payload.get("angle") or "side",
                 pieces_per_group=4,

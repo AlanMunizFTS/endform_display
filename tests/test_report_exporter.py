@@ -8,6 +8,7 @@ from openpyxl import load_workbook
 from PIL import Image as PilImage
 
 from report_exporter import (
+    build_historic_verdict_rows,
     export_combined_traceability_report,
     export_historic_image_table_report,
     export_ok_nok_traceability_report,
@@ -46,6 +47,42 @@ class TestReportExporter(unittest.TestCase):
         for series, expected_value_range in zip(chart.series, expected_value_ranges):
             self.assertEqual(series.val.numRef.f, expected_value_range)
             self.assertEqual(series.cat.numRef.f, expected_category_range)
+
+    def test_build_historic_verdict_rows_matches_four_column_report_order(self):
+        historic_index = [
+            [f"jsn-{piece_idx}_Cam1_Side_OK.png"]
+            for piece_idx in range(5)
+        ]
+        controller = MagicMock()
+        controller.display.db.fetch.return_value = [
+            {
+                "img_name": "jsn-1_Cam1_Side_OK.png",
+                "class_name": "wrinkle",
+            },
+            {
+                "img_name": "jsn-3_Cam1_Side_OK.png",
+                "class_name": "wrinkle",
+            },
+        ]
+
+        result = build_historic_verdict_rows(
+            controller,
+            historic_index=historic_index,
+            defect_class="wrinkle",
+            angle="side",
+            pieces_per_group=4,
+        )
+
+        self.assertEqual(len(result["rows"]), 2)
+        self.assertEqual(
+            [item["inferred_result"] for item in result["rows"][0]["positions"]],
+            ["OK", "NOK", "OK", "NOK"],
+        )
+        self.assertEqual(result["rows"][1]["positions"][0]["jsn"], "jsn-4")
+        self.assertEqual(
+            [item["inferred_result"] for item in result["rows"][1]["positions"]],
+            ["OK", None, None, None],
+        )
 
     def test_parse_jsn_datetime_reads_date_and_time_tokens(self):
         parsed = parse_jsn_datetime("218620514260607413863")

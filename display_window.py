@@ -1,5 +1,6 @@
 
 import cv2
+import copy
 import json
 import numpy as np
 import os
@@ -92,6 +93,13 @@ class DisplayWindow:
         self.image_report_button_rect = None  # Historic image report button rect
         self._image_report_dialog_root = None
         self._image_report_dialog_result = None
+        self._verdict_analysis_dialog_root = None
+        self._verdict_analysis_dialog_request = None
+        self._verdict_analysis_rows = []
+        self._verdict_analysis_tree = None
+        self._verdict_analysis_metric_vars = {}
+        self._verdict_analysis_completion_var = None
+        self._verdict_analysis_dirty = False
         self.import_button_rect = None  # Import button rect
         self.export_button_rect = None  # Export button rect
         self.exit_button_rect = None  # Exit button rect
@@ -501,7 +509,21 @@ class DisplayWindow:
         payload = self._image_report_dialog_result
         if payload:
             self._image_report_dialog_result = None
-            self._emit_action("export_historic_image_report", **payload)
+            action = payload.pop("_action", "export_historic_image_report")
+            self._emit_action(action, **payload)
+
+        analysis_request = self._verdict_analysis_dialog_request
+        if analysis_request:
+            self._verdict_analysis_dialog_request = None
+            self._open_historic_verdict_analysis_dialog(**analysis_request)
+
+        analysis_root = self._verdict_analysis_dialog_root
+        if analysis_root is not None:
+            try:
+                analysis_root.update_idletasks()
+                analysis_root.update()
+            except Exception:
+                self._clear_historic_verdict_analysis_state(destroy_root=False)
 
     def _open_historic_image_report_dialog(self):
         """Open a visible non-modal report selector and return immediately."""
@@ -601,7 +623,7 @@ class DisplayWindow:
                         else (available_classes[0] if available_classes else "")
                     )
 
-            def submit_dialog():
+            def submit_dialog(action="export_historic_image_report"):
                 endform_type = endform_var.get().strip()
                 angle = angle_var.get().strip().lower()
                 defect_class = class_var.get().strip().lower()
@@ -617,6 +639,8 @@ class DisplayWindow:
                     "defect_class": defect_class,
                     "angle": angle,
                 }
+                if action != "export_historic_image_report":
+                    self._image_report_dialog_result["_action"] = action
                 self._close_historic_image_report_dialog()
 
             angle_combo.bind("<<ComboboxSelected>>", refresh_class_options)
@@ -634,9 +658,18 @@ class DisplayWindow:
                 text="Cancel",
                 command=self._close_historic_image_report_dialog,
             ).pack(side="right", padx=(6, 0))
-            ttk.Button(button_frame, text="Export", command=submit_dialog).pack(
+            ttk.Button(
+                button_frame,
+                text="Export Excel",
+                command=submit_dialog,
+            ).pack(
                 side="right",
             )
+            ttk.Button(
+                button_frame,
+                text="Open Analysis",
+                command=lambda: submit_dialog("open_historic_verdict_analysis"),
+            ).pack(side="right", padx=(0, 6))
 
             root.protocol(
                 "WM_DELETE_WINDOW",
@@ -659,6 +692,447 @@ class DisplayWindow:
         except Exception as exc:
             self._close_historic_image_report_dialog()
             self._set_toast_message(f"Unable to open report dialog: {exc}", is_error=True)
+            return False
+
+    def queue_historic_verdict_analysis(self, rows, filters=None):
+        """Queue a completed analysis snapshot for creation on the UI thread."""
+        self._verdict_analysis_dialog_request = {
+            "rows": copy.deepcopy(list(rows or [])),
+            "filters": dict(filters or {}),
+        }
+
+    def _clear_historic_verdict_analysis_state(self, destroy_root=True):
+        root = self._verdict_analysis_dialog_root
+        self._verdict_analysis_dialog_root = None
+        if destroy_root and root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        self._verdict_analysis_rows = []
+        self._verdict_analysis_tree = None
+        self._verdict_analysis_metric_vars = {}
+        self._verdict_analysis_completion_var = None
+        self._verdict_analysis_dirty = False
+
+    def _close_historic_verdict_analysis_dialog(self, confirm=True):
+        root = self._verdict_analysis_dialog_root
+        if root is None:
+            self._clear_historic_verdict_analysis_state(destroy_root=False)
+            return True
+
+        if confirm and self._verdict_analysis_dirty:
+            try:
+                from tkinter import messagebox
+
+                should_close = messagebox.askyesno(
+                    "Discard analysis",
+                    "The captured actual verdicts are temporary. Discard them and close?",
+                    parent=root,
+                )
+            except Exception:
+                should_close = False
+            if not should_close:
+                return False
+
+        self._clear_historic_verdict_analysis_state(destroy_root=True)
+        return True
+
+    def _format_verdict_analysis_position(self, entry):
+        if not isinstance(entry, dict):
+            return "-"
+        jsn = str(entry.get("jsn") or "").strip()
+        if not jsn:
+            return "-"
+        inferred = str(entry.get("inferred_result") or "").strip().upper()
+        verdict = inferred if inferred in ("OK", "NOK") else "N/D"
+        return f"{verdict}  |  {jsn}"
+
+    def _refresh_historic_verdict_analysis(self):
+        from verdict_analysis import calculate_position_metrics
+
+        rows = self._verdict_analysis_rows
+        tree = self._verdict_analysis_tree
+        if tree is not None:
+            for row_idx, row in enumerate(rows):
+                item_id = f"row_{row_idx}"
+                positions = list(row.get("positions") or [])
+                position_values = [
+                    self._format_verdict_analysis_position(
+                        positions[position_idx]
+                        if position_idx < len(positions)
+                        else None
+                    )
+                    for position_idx in range(4)
+                ]
+                values = (
+                    row.get("group_label") or f"Pieza agrupada #{row_idx + 1}",
+                    str(row.get("actual_result") or "").strip().upper(),
+                    *position_values,
+                )
+                try:
+                    if tree.exists(item_id):
+                        tree.item(item_id, values=values)
+                    else:
+                        tree.insert("", "end", iid=item_id, values=values)
+                except Exception:
+                    pass
+
+        metrics = calculate_position_metrics(rows, positions=4)
+        for position, position_metrics in metrics.items():
+            for metric_key, value in position_metrics.items():
+                variable = self._verdict_analysis_metric_vars.get(
+                    (position, metric_key)
+                )
+                if variable is not None:
+                    try:
+                        variable.set(str(value))
+                    except Exception:
+                        pass
+
+        completion_var = self._verdict_analysis_completion_var
+        if completion_var is not None:
+            completed = sum(
+                1
+                for row in rows
+                if str(row.get("actual_result") or "").strip().upper()
+                in ("OK", "NOK")
+            )
+            try:
+                completion_var.set(f"Actual values: {completed}/{len(rows)}")
+            except Exception:
+                pass
+
+    def _set_historic_verdict_actual(self, row_index, value):
+        from verdict_analysis import normalize_verdict
+
+        normalized = normalize_verdict(value, allow_blank=True)
+        resolved_index = int(row_index)
+        if resolved_index < 0 or resolved_index >= len(self._verdict_analysis_rows):
+            raise IndexError("Verdict analysis row is outside the available range")
+
+        row = self._verdict_analysis_rows[resolved_index]
+        current = str(row.get("actual_result") or "").strip().upper()
+        if current != normalized:
+            row["actual_result"] = normalized
+            self._verdict_analysis_dirty = True
+            self._refresh_historic_verdict_analysis()
+        return normalized
+
+    def _apply_historic_verdict_paste(self, text, start_index=0):
+        """Atomically apply a pasted column starting at the selected table row."""
+        from verdict_analysis import parse_actual_verdict_values
+
+        values = parse_actual_verdict_values(text)
+        resolved_start = int(start_index or 0)
+        if resolved_start < 0 or resolved_start > len(self._verdict_analysis_rows):
+            raise ValueError("Paste start row is outside the available range")
+        if resolved_start + len(values) > len(self._verdict_analysis_rows):
+            available = max(0, len(self._verdict_analysis_rows) - resolved_start)
+            raise ValueError(
+                f"The pasted list has {len(values)} values but only {available} rows are available."
+            )
+
+        if not values:
+            return 0
+
+        for offset, value in enumerate(values):
+            self._verdict_analysis_rows[resolved_start + offset][
+                "actual_result"
+            ] = value
+        self._verdict_analysis_dirty = True
+        self._refresh_historic_verdict_analysis()
+        return len(values)
+
+    def _open_historic_verdict_analysis_dialog(self, rows, filters=None):
+        """Open the non-modal, spreadsheet-like verdict analysis window."""
+        existing_root = self._verdict_analysis_dialog_root
+        if existing_root is not None:
+            try:
+                existing_root.deiconify()
+                existing_root.lift()
+                existing_root.focus_force()
+            except Exception:
+                self._clear_historic_verdict_analysis_state(destroy_root=False)
+            else:
+                self._set_toast_message(
+                    "Close the current verdict analysis before opening another one",
+                    is_error=True,
+                )
+                return False
+
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, ttk
+
+            analysis_rows = copy.deepcopy(list(rows or []))
+            if not analysis_rows:
+                raise ValueError("No grouped verdict rows are available")
+
+            root = tk.Tk()
+            self._verdict_analysis_dialog_root = root
+            self._verdict_analysis_rows = analysis_rows
+            self._verdict_analysis_dirty = False
+            root.title("Verdict Analysis")
+            root.geometry("1320x820")
+            root.minsize(1040, 620)
+
+            outer = ttk.Frame(root, padding=12)
+            outer.pack(fill="both", expand=True)
+
+            filter_data = dict(filters or {})
+            endform_type = str(filter_data.get("endform_type") or "").strip()
+            angle = str(filter_data.get("angle") or "").strip().upper()
+            defect_class = str(
+                filter_data.get("defect_class") or ""
+            ).strip().upper()
+            ttk.Label(
+                outer,
+                text="Verdict Analysis",
+                font=("Segoe UI", 16, "bold"),
+            ).pack(anchor="w")
+            ttk.Label(
+                outer,
+                text=f"Endform: {endform_type}    Angle: {angle}    Defect: {defect_class}",
+            ).pack(anchor="w", pady=(2, 10))
+
+            metrics_frame = ttk.LabelFrame(
+                outer,
+                text="Immediate comparison by report position",
+                padding=8,
+            )
+            metrics_frame.pack(fill="x", pady=(0, 10))
+            metric_rows = (
+                ("true_ok", "True OK"),
+                ("true_nok", "True NOK"),
+                ("false_negative", "False Negative"),
+                ("false_positive", "False Positive"),
+                ("evaluated", "Evaluated"),
+            )
+            ttk.Label(metrics_frame, text="Metric", font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=0, padx=8, pady=3, sticky="w"
+            )
+            for position in range(1, 5):
+                ttk.Label(
+                    metrics_frame,
+                    text=f"Position {position}",
+                    font=("Segoe UI", 9, "bold"),
+                ).grid(row=0, column=position, padx=22, pady=3)
+                metrics_frame.columnconfigure(position, weight=1)
+            self._verdict_analysis_metric_vars = {}
+            for metric_row_idx, (metric_key, metric_label) in enumerate(
+                metric_rows,
+                start=1,
+            ):
+                ttk.Label(metrics_frame, text=metric_label).grid(
+                    row=metric_row_idx,
+                    column=0,
+                    padx=8,
+                    pady=2,
+                    sticky="w",
+                )
+                for position in range(1, 5):
+                    metric_var = tk.StringVar(master=root, value="0")
+                    self._verdict_analysis_metric_vars[(position, metric_key)] = (
+                        metric_var
+                    )
+                    ttk.Label(
+                        metrics_frame,
+                        textvariable=metric_var,
+                        anchor="center",
+                    ).grid(
+                        row=metric_row_idx,
+                        column=position,
+                        padx=22,
+                        pady=2,
+                        sticky="ew",
+                    )
+
+            toolbar = ttk.Frame(outer)
+            toolbar.pack(fill="x", pady=(0, 8))
+            completion_var = tk.StringVar(master=root)
+            self._verdict_analysis_completion_var = completion_var
+            ttk.Label(toolbar, textvariable=completion_var).pack(side="left")
+
+            table_frame = ttk.Frame(outer)
+            table_frame.pack(fill="both", expand=True)
+            columns = ("group", "actual", "position_1", "position_2", "position_3", "position_4")
+            tree = ttk.Treeview(
+                table_frame,
+                columns=columns,
+                show="headings",
+                selectmode="browse",
+            )
+            self._verdict_analysis_tree = tree
+            tree.heading("group", text="Group")
+            tree.heading("actual", text="Actual value")
+            for position in range(1, 5):
+                tree.heading(f"position_{position}", text=f"Position {position} inferred")
+            tree.column("group", width=160, minwidth=130, anchor="w", stretch=False)
+            tree.column("actual", width=105, minwidth=90, anchor="center", stretch=False)
+            for position in range(1, 5):
+                tree.column(
+                    f"position_{position}",
+                    width=245,
+                    minwidth=150,
+                    anchor="center",
+                )
+            scrollbar = ttk.Scrollbar(
+                table_frame,
+                orient="vertical",
+                command=tree.yview,
+            )
+            tree.configure(yscrollcommand=scrollbar.set)
+            tree.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            def selected_row_index(default=0):
+                selection = tree.selection()
+                if not selection:
+                    return default
+                item_id = str(selection[0])
+                if item_id.startswith("row_"):
+                    try:
+                        return int(item_id.split("_", 1)[1])
+                    except (TypeError, ValueError):
+                        pass
+                return default
+
+            def show_error(message):
+                messagebox.showerror("Verdict Analysis", str(message), parent=root)
+
+            def paste_values(_event=None):
+                try:
+                    clipboard_text = root.clipboard_get()
+                    self._apply_historic_verdict_paste(
+                        clipboard_text,
+                        start_index=selected_row_index(),
+                    )
+                except Exception as exc:
+                    show_error(exc)
+                return "break"
+
+            def clear_values():
+                had_values = any(
+                    str(row.get("actual_result") or "").strip()
+                    for row in self._verdict_analysis_rows
+                )
+                for row in self._verdict_analysis_rows:
+                    row["actual_result"] = ""
+                if had_values:
+                    self._verdict_analysis_dirty = True
+                self._refresh_historic_verdict_analysis()
+
+            def set_selected_value(value):
+                try:
+                    self._set_historic_verdict_actual(selected_row_index(), value)
+                except Exception as exc:
+                    show_error(exc)
+
+            def handle_tree_key(event):
+                key = str(getattr(event, "keysym", "") or "").lower()
+                if key == "o":
+                    set_selected_value("OK")
+                    return "break"
+                if key == "n":
+                    set_selected_value("NOK")
+                    return "break"
+                if key in ("delete", "backspace"):
+                    set_selected_value("")
+                    return "break"
+                return None
+
+            def edit_actual_cell(event):
+                if tree.identify_region(event.x, event.y) != "cell":
+                    return
+                if tree.identify_column(event.x) != "#2":
+                    return
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+                try:
+                    row_index = int(item_id.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    return
+                bbox = tree.bbox(item_id, "actual")
+                if not bbox:
+                    return
+                x, y, width, height = bbox
+                editor_var = tk.StringVar(
+                    master=root,
+                    value=str(
+                        self._verdict_analysis_rows[row_index].get("actual_result")
+                        or ""
+                    ),
+                )
+                editor = ttk.Combobox(
+                    tree,
+                    textvariable=editor_var,
+                    values=("", "OK", "NOK"),
+                    state="readonly",
+                )
+                editor.place(x=x, y=y, width=width, height=height)
+
+                committed = {"done": False}
+
+                def finish(commit=True):
+                    if committed["done"]:
+                        return
+                    committed["done"] = True
+                    if commit:
+                        try:
+                            self._set_historic_verdict_actual(
+                                row_index,
+                                editor_var.get(),
+                            )
+                        except Exception as exc:
+                            show_error(exc)
+                    editor.destroy()
+                    tree.focus_set()
+
+                editor.bind("<<ComboboxSelected>>", lambda _event: finish(True))
+                editor.bind("<Return>", lambda _event: finish(True))
+                editor.bind("<Escape>", lambda _event: finish(False))
+                editor.bind("<FocusOut>", lambda _event: finish(True))
+                editor.focus_set()
+
+            ttk.Button(toolbar, text="Paste values", command=paste_values).pack(
+                side="right"
+            )
+            ttk.Button(toolbar, text="Clear", command=clear_values).pack(
+                side="right", padx=(0, 6)
+            )
+            ttk.Button(
+                toolbar,
+                text="Close",
+                command=self._close_historic_verdict_analysis_dialog,
+            ).pack(side="right", padx=(0, 6))
+
+            tree.bind("<Control-v>", paste_values)
+            tree.bind("<Control-V>", paste_values)
+            tree.bind("<Key>", handle_tree_key)
+            tree.bind("<Double-1>", edit_actual_cell)
+            root.protocol("WM_DELETE_WINDOW", self._close_historic_verdict_analysis_dialog)
+            root.bind(
+                "<Escape>",
+                lambda _event: self._close_historic_verdict_analysis_dialog(),
+            )
+
+            self._refresh_historic_verdict_analysis()
+            if self._verdict_analysis_rows:
+                tree.selection_set("row_0")
+                tree.focus("row_0")
+            root.update_idletasks()
+            root.deiconify()
+            root.lift()
+            tree.focus_set()
+            return True
+        except Exception as exc:
+            self._clear_historic_verdict_analysis_state(destroy_root=True)
+            self._set_toast_message(
+                f"Unable to open verdict analysis: {exc}",
+                is_error=True,
+            )
             return False
 
     def _copy_stats_modal_jsn(self, jsn):
@@ -4808,6 +5282,7 @@ class DisplayWindow:
     def close(self):
         """Close the display window"""
         self._close_historic_image_report_dialog()
+        self._close_historic_verdict_analysis_dialog(confirm=False)
 
         def _stop_worker(process_attr, stop_attr):
             stop_event = getattr(self, stop_attr, None)

@@ -71,6 +71,84 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         )
 
     @patch("display_window.get_db_connection")
+    def test_image_report_dialog_analysis_result_dispatches_action(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display._image_report_dialog_result = {
+            "_action": "open_historic_verdict_analysis",
+            "endform_type": "mush",
+            "class_name": "wrinkle",
+            "defect_class": "wrinkle",
+            "angle": "side",
+        }
+
+        display._pump_historic_image_report_dialog()
+
+        action_handler.assert_called_once_with(
+            "open_historic_verdict_analysis",
+            endform_type="mush",
+            class_name="wrinkle",
+            defect_class="wrinkle",
+            angle="side",
+        )
+
+    @patch("display_window.get_db_connection")
+    def test_verdict_analysis_paste_is_atomic_and_starts_at_selected_row(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display._verdict_analysis_rows = [
+            {"actual_result": "", "positions": []},
+            {"actual_result": "", "positions": []},
+            {"actual_result": "", "positions": []},
+        ]
+
+        applied = display._apply_historic_verdict_paste("ok\nNOK", start_index=1)
+
+        self.assertEqual(applied, 2)
+        self.assertEqual(
+            [row["actual_result"] for row in display._verdict_analysis_rows],
+            ["", "OK", "NOK"],
+        )
+        before_invalid_paste = list(
+            row["actual_result"] for row in display._verdict_analysis_rows
+        )
+        with self.assertRaises(ValueError):
+            display._apply_historic_verdict_paste("OK\nINVALID", start_index=0)
+        self.assertEqual(
+            [row["actual_result"] for row in display._verdict_analysis_rows],
+            before_invalid_paste,
+        )
+        with self.assertRaisesRegex(ValueError, "only 1 rows"):
+            display._apply_historic_verdict_paste("OK\nNOK", start_index=2)
+        self.assertEqual(
+            [row["actual_result"] for row in display._verdict_analysis_rows],
+            before_invalid_paste,
+        )
+
+    @patch("display_window.get_db_connection")
+    def test_closing_verdict_analysis_discards_session_values(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display._verdict_analysis_rows = [{"actual_result": "OK", "positions": []}]
+        display._verdict_analysis_dirty = True
+
+        closed = display._close_historic_verdict_analysis_dialog(confirm=False)
+
+        self.assertTrue(closed)
+        self.assertEqual(display._verdict_analysis_rows, [])
+        self.assertFalse(display._verdict_analysis_dirty)
+
+    @patch("display_window.get_db_connection")
     def test_image_report_dialog_without_result_does_not_emit_action(
         self,
         mock_get_db_connection,
