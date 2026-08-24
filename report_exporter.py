@@ -21,6 +21,7 @@ TRACEABILITY_STATUS_COLUMNS = ("OK", "NOK", "Total")
 TRACEABILITY_REPORT_KIND = "ok_nok_by_jsn"
 DEFAULT_HISTORIC_REPORT_DEFECT_CLASS = "wrinkle"
 DEFAULT_HISTORIC_REPORT_ANGLE = "side"
+COMBINED_HISTORIC_REPORT_ANGLE = "side+diag"
 
 
 def parse_jsn_datetime(jsn):
@@ -530,10 +531,25 @@ def _load_historic_report_overlays(controller, image_names, chunk_size=500):
     return overlays_by_image
 
 
+def _normalize_historic_report_angle(angle):
+    normalized = str(angle or DEFAULT_HISTORIC_REPORT_ANGLE).strip().lower()
+    compact = normalized.replace(" ", "")
+    if compact in {"side+diag", "diag+side"}:
+        return COMBINED_HISTORIC_REPORT_ANGLE, ("side", "diag")
+    return compact, (compact,)
+
+
+def _format_historic_report_angle(angle):
+    normalized_angle, required_angles = _normalize_historic_report_angle(angle)
+    if normalized_angle == COMBINED_HISTORIC_REPORT_ANGLE:
+        return " + ".join(item.upper() for item in required_angles)
+    return normalized_angle.upper()
+
+
 def _is_historic_report_angle_image(img_name, angle):
     filename = Path(str(img_name or "")).name.lower()
-    normalized_angle = str(angle or "").strip().lower()
-    return bool(normalized_angle) and normalized_angle in filename
+    _normalized_angle, required_angles = _normalize_historic_report_angle(angle)
+    return any(required_angle in filename for required_angle in required_angles)
 
 
 def _filter_historic_report_overlays(overlays_by_image, defect_class, angle):
@@ -617,7 +633,7 @@ def _extract_historic_batch_jsn(batch):
     return ""
 
 
-def _load_historic_filtered_verdicts(
+def _load_historic_filtered_confidences(
     controller,
     historic_index,
     defect_class,
@@ -629,36 +645,54 @@ def _load_historic_filtered_verdicts(
         return {}
 
     normalized_class = str(defect_class or "").strip().lower()
-    normalized_angle = str(angle or "").strip().lower()
+    normalized_angle, required_angles = _normalize_historic_report_angle(angle)
     if not normalized_class or not normalized_angle:
         return {}
 
     filtered_images_by_jsn = {}
+    present_angles_by_jsn = {}
     jsn_by_image = {}
+    angle_by_image = {}
     for batch in historic_index or []:
         jsn = _extract_historic_batch_jsn(batch)
         if not jsn:
             continue
-        filtered_images = {
-            str(img_name)
-            for img_name in (batch or [])
-            if _is_historic_report_angle_image(img_name, normalized_angle)
-        }
+        filtered_images = set()
+        present_angles = set()
+        for img_name in batch or []:
+            matching_angles = {
+                required_angle
+                for required_angle in required_angles
+                if _is_historic_report_angle_image(img_name, required_angle)
+            }
+            if not matching_angles:
+                continue
+            normalized_img_name = str(img_name)
+            filtered_images.add(normalized_img_name)
+            present_angles.update(matching_angles)
         if not filtered_images:
             continue
         filtered_images_by_jsn[jsn] = filtered_images
+        present_angles_by_jsn[jsn] = present_angles
         for img_name in filtered_images:
             jsn_by_image[img_name] = jsn
+            for required_angle in required_angles:
+                if _is_historic_report_angle_image(img_name, required_angle):
+                    angle_by_image[img_name] = required_angle
+                    break
 
     filtered_image_names = list(jsn_by_image)
     queried_images = set()
-    nok_jsns = set()
+    max_confidence_by_jsn = {
+        jsn: {required_angle: None for required_angle in required_angles}
+        for jsn in filtered_images_by_jsn
+    }
     resolved_chunk_size = max(1, int(chunk_size or 500))
     for start_idx in range(0, len(filtered_image_names), resolved_chunk_size):
         chunk = filtered_image_names[start_idx : start_idx + resolved_chunk_size]
         try:
             rows = db_client.fetch(
-                "SELECT img_name, class_name FROM model_results "
+                "SELECT img_name, class_name, confidence FROM model_results "
                 "WHERE img_name = ANY(%s) AND LOWER(TRIM(class_name)) = %s",
                 (chunk, normalized_class),
             )
@@ -675,15 +709,32 @@ def _load_historic_filtered_verdicts(
             if class_name != normalized_class:
                 continue
             jsn = jsn_by_image.get(img_name)
-            if jsn:
-                nok_jsns.add(jsn)
+            image_angle = angle_by_image.get(img_name)
+            if not jsn or not image_angle:
+                continue
+            raw_confidence = row.get("confidence")
+            try:
+                confidence = float(raw_confidence) if raw_confidence is not None else 0.0
+            except (TypeError, ValueError):
+                continue
+            current = max_confidence_by_jsn[jsn][image_angle]
+            if current is None or confidence > current:
+                max_confidence_by_jsn[jsn][image_angle] = confidence
 
-    verdicts = {}
+    confidence_data = {}
     for jsn, filtered_images in filtered_images_by_jsn.items():
-        if not filtered_images.issubset(queried_images):
-            continue
-        verdicts[jsn] = "NOK" if jsn in nok_jsns else "OK"
-    return verdicts
+        angles_complete = set(required_angles).issubset(
+            present_angles_by_jsn.get(jsn, set())
+        )
+        query_complete = filtered_images.issubset(queried_images)
+        confidence_data[jsn] = {
+            "confidence_data_complete": angles_complete and query_complete,
+            "max_confidence_by_angle": max_confidence_by_jsn.get(
+                jsn,
+                {required_angle: None for required_angle in required_angles},
+            ),
+        }
+    return confidence_data
 
 
 def build_historic_verdict_rows(
@@ -693,6 +744,7 @@ def build_historic_verdict_rows(
     angle=DEFAULT_HISTORIC_REPORT_ANGLE,
     pieces_per_group=4,
     force_rescan=True,
+    confidence_thresholds=None,
 ):
     """Return the exact grouped verdict rows shared by Excel and live analysis."""
     if historic_index is None:
@@ -708,8 +760,8 @@ def build_historic_verdict_rows(
     normalized_class = str(
         defect_class or DEFAULT_HISTORIC_REPORT_DEFECT_CLASS
     ).strip().lower()
-    normalized_angle = str(angle or DEFAULT_HISTORIC_REPORT_ANGLE).strip().lower()
-    model_verdicts = _load_historic_filtered_verdicts(
+    normalized_angle, required_angles = _normalize_historic_report_angle(angle)
+    confidence_data_by_jsn = _load_historic_filtered_confidences(
         controller,
         historic_index,
         normalized_class,
@@ -726,15 +778,22 @@ def build_historic_verdict_rows(
             piece_idx = group_idx * resolved_pieces_per_group + position_idx
             if piece_idx < len(historic_index):
                 jsn = _extract_historic_batch_jsn(historic_index[piece_idx])
-                inferred_result = model_verdicts.get(jsn)
+                confidence_data = confidence_data_by_jsn.get(jsn) or {}
             else:
                 jsn = ""
-                inferred_result = None
+                confidence_data = {}
             positions.append(
                 {
                     "position": position_idx + 1,
                     "jsn": jsn,
-                    "inferred_result": inferred_result,
+                    "inferred_result": None,
+                    "confidence_data_complete": bool(
+                        confidence_data.get("confidence_data_complete", False)
+                    ),
+                    "max_confidence_by_angle": dict(
+                        confidence_data.get("max_confidence_by_angle")
+                        or {required_angle: None for required_angle in required_angles}
+                    ),
                 }
             )
         rows.append(
@@ -746,11 +805,20 @@ def build_historic_verdict_rows(
             }
         )
 
+    from verdict_analysis import apply_confidence_thresholds
+
+    normalized_thresholds = apply_confidence_thresholds(
+        rows,
+        confidence_thresholds,
+        required_angles=required_angles,
+    )
     return {
         "historic_index": historic_index,
         "rows": rows,
         "defect_class": normalized_class,
         "angle": normalized_angle,
+        "required_angles": list(required_angles),
+        "confidence_thresholds": normalized_thresholds,
         "pieces_per_group": resolved_pieces_per_group,
     }
 
@@ -802,7 +870,7 @@ def export_historic_image_table_report(
     defect_class = (
         str(defect_class or DEFAULT_HISTORIC_REPORT_DEFECT_CLASS).strip().lower()
     )
-    angle = str(angle or DEFAULT_HISTORIC_REPORT_ANGLE).strip().lower()
+    angle, _required_angles = _normalize_historic_report_angle(angle)
     tile_size = 110
     padding = 6
     image_margin_px = 6
@@ -897,7 +965,10 @@ def export_historic_image_table_report(
     verdict_title_cell = verdict_sheet.cell(
         row=1,
         column=1,
-        value=f"PART-BY-PART {defect_class.upper()} {angle.upper()} VERDICT",
+        value=(
+            f"PART-BY-PART {defect_class.upper()} "
+            f"{_format_historic_report_angle(angle)} VERDICT"
+        ),
     )
     verdict_title_cell.fill = title_fill
     verdict_title_cell.font = title_font
@@ -1054,10 +1125,11 @@ def export_historic_image_table_report(
             verdict = verdict_rows[group_idx]["positions"][position_in_group].get(
                 "inferred_result"
             )
+            displayed_verdict = verdict if verdict in {"OK", "NOK"} else "N/D"
             verdict_cell = verdict_sheet.cell(
                 row=data_row,
                 column=verdict_col,
-                value=verdict,
+                value=displayed_verdict,
             )
             verdict_cell.alignment = center
             verdict_cell.border = table_border

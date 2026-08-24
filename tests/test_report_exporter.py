@@ -84,6 +84,131 @@ class TestReportExporter(unittest.TestCase):
             ["OK", None, None, None],
         )
 
+    def test_build_historic_verdict_rows_combines_side_and_diag(self):
+        historic_index = []
+        for piece_idx in range(5):
+            jsn = f"jsn-{piece_idx}"
+            batch = [f"{jsn}_Cam1_Side_OK.png"]
+            if piece_idx < 4:
+                batch.append(f"{jsn}_Cam2_Diag_OK.png")
+            historic_index.append(batch)
+
+        controller = MagicMock()
+        controller.display.db.fetch.return_value = [
+            {
+                "img_name": "jsn-1_Cam1_Side_OK.png",
+                "class_name": "wrinkle",
+            },
+            {
+                "img_name": "jsn-2_Cam2_Diag_OK.png",
+                "class_name": "wrinkle",
+            },
+            {
+                "img_name": "jsn-3_Cam1_Side_OK.png",
+                "class_name": "wrinkle",
+            },
+            {
+                "img_name": "jsn-3_Cam2_Diag_OK.png",
+                "class_name": "wrinkle",
+            },
+        ]
+
+        result = build_historic_verdict_rows(
+            controller,
+            historic_index=historic_index,
+            defect_class="wrinkle",
+            angle="side+diag",
+            pieces_per_group=5,
+        )
+
+        self.assertEqual(result["angle"], "side+diag")
+        self.assertEqual(
+            [item["inferred_result"] for item in result["rows"][0]["positions"]],
+            ["OK", "NOK", "NOK", "NOK", None],
+        )
+
+    def test_build_historic_verdict_rows_marks_query_failure_as_not_available(self):
+        controller = MagicMock()
+        controller.display.db.fetch.side_effect = RuntimeError("database unavailable")
+
+        result = build_historic_verdict_rows(
+            controller,
+            historic_index=[
+                [
+                    "jsn-1_Cam1_Side_OK.png",
+                    "jsn-1_Cam2_Diag_OK.png",
+                ]
+            ],
+            defect_class="wrinkle",
+            angle="side+diag",
+        )
+
+        self.assertIsNone(result["rows"][0]["positions"][0]["inferred_result"])
+        self.assertFalse(
+            result["rows"][0]["positions"][0]["confidence_data_complete"]
+        )
+
+    def test_build_historic_verdict_rows_keeps_max_confidence_by_angle(self):
+        controller = MagicMock()
+        controller.display.db.fetch.return_value = [
+            {
+                "img_name": "jsn-1_Cam1_Side_OK.png",
+                "class_name": "wrinkle",
+                "confidence": 0.30,
+            },
+            {
+                "img_name": "jsn-1_Cam2_Side_OK.png",
+                "class_name": "wrinkle",
+                "confidence": 0.80,
+            },
+            {
+                "img_name": "jsn-1_Cam3_Diag_OK.png",
+                "class_name": "wrinkle",
+                "confidence": 0.40,
+            },
+        ]
+        historic_index = [
+            [
+                "jsn-1_Cam1_Side_OK.png",
+                "jsn-1_Cam2_Side_OK.png",
+                "jsn-1_Cam3_Diag_OK.png",
+            ]
+        ]
+
+        result = build_historic_verdict_rows(
+            controller,
+            historic_index=historic_index,
+            defect_class="wrinkle",
+            angle="side+diag",
+            confidence_thresholds={"side": 0.90, "diag": 0.4001},
+        )
+
+        entry = result["rows"][0]["positions"][0]
+        self.assertTrue(entry["confidence_data_complete"])
+        self.assertEqual(
+            entry["max_confidence_by_angle"],
+            {"side": 0.80, "diag": 0.40},
+        )
+        self.assertEqual(entry["inferred_result"], "OK")
+        self.assertEqual(
+            result["confidence_thresholds"],
+            {"side": 0.90, "diag": 0.4001},
+        )
+        query = controller.display.db.fetch.call_args.args[0]
+        self.assertIn("confidence", query)
+
+        equality_result = build_historic_verdict_rows(
+            controller,
+            historic_index=historic_index,
+            defect_class="wrinkle",
+            angle="side+diag",
+            confidence_thresholds={"side": 0.90, "diag": 0.40},
+        )
+        self.assertEqual(
+            equality_result["rows"][0]["positions"][0]["inferred_result"],
+            "NOK",
+        )
+
     def test_parse_jsn_datetime_reads_date_and_time_tokens(self):
         parsed = parse_jsn_datetime("218620514260607413863")
 
@@ -532,6 +657,58 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(
                 diag_workbook["Piezas con veredicto"]["B4"].value,
                 "NOK",
+            )
+
+            captured_pixels.clear()
+            captured_labels.clear()
+            controller.display._draw_model_overlays.reset_mock()
+            controller.display._draw_model_overlays.side_effect = fake_draw_overlays
+
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                combined_output_path = export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 32, 0),
+                    endform_type="mush",
+                    defect_class="wrinkle",
+                    angle="side+diag",
+                )
+
+            self.assertEqual(captured_pixels, [(255, 0, 0), (255, 0, 0)])
+            self.assertEqual(captured_labels, [None])
+            self.assertEqual(controller.display._draw_model_overlays.call_count, 2)
+            combined_workbook = load_workbook(combined_output_path)
+            combined_verdict_sheet = combined_workbook["Piezas con veredicto"]
+            self.assertEqual(
+                combined_verdict_sheet["A1"].value,
+                "PART-BY-PART WRINKLE SIDE + DIAG VERDICT",
+            )
+            self.assertEqual(combined_verdict_sheet["B4"].value, "NOK")
+
+            controller._load_historic_index.return_value = [[overlay_image]]
+            controller.display.db.fetch.return_value = [
+                {"img_name": overlay_image, "class_name": "wrinkle"}
+            ]
+            with patch(
+                "report_exporter._make_piece_contact_sheet",
+                side_effect=fake_make_contact_sheet,
+            ):
+                incomplete_output_path = export_historic_image_table_report(
+                    controller,
+                    output_dir=report_dir,
+                    created_at=datetime.datetime(2026, 5, 14, 9, 33, 0),
+                    endform_type="mush",
+                    defect_class="wrinkle",
+                    angle="side+diag",
+                )
+
+            incomplete_workbook = load_workbook(incomplete_output_path)
+            self.assertEqual(
+                incomplete_workbook["Piezas con veredicto"]["B4"].value,
+                "N/D",
             )
 
     def test_export_historic_image_table_report_keeps_incomplete_final_group(self):

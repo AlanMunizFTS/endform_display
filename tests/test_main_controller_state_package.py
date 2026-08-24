@@ -314,19 +314,21 @@ class TestMainControllerStatePackage(unittest.TestCase):
             return_value={
                 "rows": rows,
                 "defect_class": "wrinkle",
-                "angle": "diag",
+                "angle": "side+diag",
+                "required_angles": ["side", "diag"],
+                "confidence_thresholds": {"side": 0.0, "diag": 0.0},
             },
         ) as build_mock:
             controller.start_open_historic_verdict_analysis_async(
                 endform_type="mush",
                 defect_class="wrinkle",
-                angle="diag",
+                angle="side+diag",
             )
 
         build_mock.assert_called_once_with(
             controller,
             defect_class="wrinkle",
-            angle="diag",
+            angle="side+diag",
             pieces_per_group=4,
             force_rescan=True,
         )
@@ -335,11 +337,14 @@ class TestMainControllerStatePackage(unittest.TestCase):
             filters={
                 "endform_type": "mush",
                 "defect_class": "wrinkle",
-                "angle": "diag",
+                "angle": "side+diag",
+                "required_angles": ["side", "diag"],
+                "confidence_thresholds": {"side": 0.0, "diag": 0.0},
             },
         )
         self.assertFalse(display.sync_in_progress)
         self.assertEqual(display.sync_progress_title, "Opening Verdict Analysis")
+        self.assertIn("SIDE + DIAG", display.sync_progress_helper_text)
         self.assertEqual(display.sync_message, "")
         self.assertFalse(display.sync_message_is_error)
         controller._resume_dataset_background_workers.assert_called_once_with({})

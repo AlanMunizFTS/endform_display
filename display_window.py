@@ -99,6 +99,11 @@ class DisplayWindow:
         self._verdict_analysis_tree = None
         self._verdict_analysis_metric_vars = {}
         self._verdict_analysis_completion_var = None
+        self._verdict_analysis_required_angles = ()
+        self._verdict_analysis_confidence_thresholds = {}
+        self._verdict_analysis_threshold_vars = {}
+        self._verdict_analysis_threshold_summary_var = None
+        self._verdict_analysis_optimization_var = None
         self._verdict_analysis_dirty = False
         self.import_button_rect = None  # Import button rect
         self.export_button_rect = None  # Export button rect
@@ -477,7 +482,21 @@ class DisplayWindow:
             seen.add(key)
             options.append({"angle": angle, "class_name": class_name})
 
-        angle_order = {"side": 0, "diag": 1, "front": 2}
+        classes_by_single_angle = {}
+        for option in options:
+            classes_by_single_angle.setdefault(option["angle"], set()).add(
+                option["class_name"]
+            )
+        combined_classes = sorted(
+            classes_by_single_angle.get("side", set())
+            & classes_by_single_angle.get("diag", set())
+        )
+        options.extend(
+            {"angle": "side+diag", "class_name": class_name}
+            for class_name in combined_classes
+        )
+
+        angle_order = {"side": 0, "diag": 1, "side+diag": 2, "front": 3}
         options.sort(
             key=lambda item: (
                 angle_order.get(item["angle"], 99),
@@ -561,8 +580,22 @@ class DisplayWindow:
             root.title("Image Report")
             root.resizable(False, False)
 
+            angle_labels = {
+                angle: (
+                    "SIDE + DIAG"
+                    if angle == "side+diag"
+                    else angle.upper()
+                )
+                for angle in angles
+            }
+            angle_values_by_label = {
+                label: angle for angle, label in angle_labels.items()
+            }
             endform_var = tk.StringVar(master=root)
-            angle_var = tk.StringVar(master=root, value=default_angle)
+            angle_var = tk.StringVar(
+                master=root,
+                value=angle_labels[default_angle],
+            )
             class_var = tk.StringVar(master=root, value=default_class)
 
             ttk.Label(root, text="Endform type:").grid(
@@ -591,7 +624,7 @@ class DisplayWindow:
             angle_combo = ttk.Combobox(
                 root,
                 textvariable=angle_var,
-                values=angles,
+                values=[angle_labels[angle] for angle in angles],
                 state="readonly",
                 width=29,
             )
@@ -614,7 +647,8 @@ class DisplayWindow:
             class_combo.grid(row=2, column=1, padx=12, pady=6, sticky="ew")
 
             def refresh_class_options(_event=None):
-                available_classes = classes_by_angle.get(angle_var.get(), [])
+                selected_angle = angle_values_by_label.get(angle_var.get(), "")
+                available_classes = classes_by_angle.get(selected_angle, [])
                 class_combo.configure(values=available_classes)
                 if class_var.get() not in available_classes:
                     class_var.set(
@@ -625,7 +659,7 @@ class DisplayWindow:
 
             def submit_dialog(action="export_historic_image_report"):
                 endform_type = endform_var.get().strip()
-                angle = angle_var.get().strip().lower()
+                angle = angle_values_by_label.get(angle_var.get(), "")
                 defect_class = class_var.get().strip().lower()
                 if not endform_type or not angle or not defect_class:
                     self._set_toast_message(
@@ -713,6 +747,11 @@ class DisplayWindow:
         self._verdict_analysis_tree = None
         self._verdict_analysis_metric_vars = {}
         self._verdict_analysis_completion_var = None
+        self._verdict_analysis_required_angles = ()
+        self._verdict_analysis_confidence_thresholds = {}
+        self._verdict_analysis_threshold_vars = {}
+        self._verdict_analysis_threshold_summary_var = None
+        self._verdict_analysis_optimization_var = None
         self._verdict_analysis_dirty = False
 
     def _close_historic_verdict_analysis_dialog(self, confirm=True):
@@ -748,10 +787,64 @@ class DisplayWindow:
         verdict = inferred if inferred in ("OK", "NOK") else "N/D"
         return f"{verdict}  |  {jsn}"
 
+    def _set_historic_verdict_confidence_thresholds(
+        self,
+        thresholds,
+        status_message="Manual thresholds.",
+    ):
+        from verdict_analysis import normalize_confidence_thresholds
+
+        angles = self._verdict_analysis_required_angles or ("side", "diag")
+        normalized = normalize_confidence_thresholds(thresholds, angles=angles)
+        self._verdict_analysis_confidence_thresholds = normalized
+        for angle, value in normalized.items():
+            variable = self._verdict_analysis_threshold_vars.get(angle)
+            if variable is not None:
+                try:
+                    variable.set(value)
+                except Exception:
+                    pass
+        status_var = self._verdict_analysis_optimization_var
+        if status_var is not None and status_message is not None:
+            try:
+                status_var.set(status_message)
+            except Exception:
+                pass
+        self._refresh_historic_verdict_analysis()
+        return normalized
+
+    def _optimize_historic_verdict_confidence_thresholds(self):
+        from verdict_analysis import optimize_confidence_thresholds
+
+        angles = self._verdict_analysis_required_angles or ("side", "diag")
+        result = optimize_confidence_thresholds(
+            self._verdict_analysis_rows,
+            required_angles=angles,
+            false_negative_target=0.10,
+            positions=4,
+        )
+        status = result.get("message") or "Confidence optimization completed."
+        self._set_historic_verdict_confidence_thresholds(
+            result["thresholds"],
+            status_message=status,
+        )
+        return result
+
     def _refresh_historic_verdict_analysis(self):
-        from verdict_analysis import calculate_position_metrics
+        from verdict_analysis import (
+            apply_confidence_thresholds,
+            calculate_average_error_rates,
+            calculate_position_metrics,
+        )
 
         rows = self._verdict_analysis_rows
+        required_angles = self._verdict_analysis_required_angles
+        if required_angles:
+            apply_confidence_thresholds(
+                rows,
+                self._verdict_analysis_confidence_thresholds,
+                required_angles=required_angles,
+            )
         tree = self._verdict_analysis_tree
         if tree is not None:
             for row_idx, row in enumerate(rows):
@@ -789,6 +882,43 @@ class DisplayWindow:
                         variable.set(str(value))
                     except Exception:
                         pass
+
+        threshold_summary_var = self._verdict_analysis_threshold_summary_var
+        if threshold_summary_var is not None:
+            rate_summary = calculate_average_error_rates(rows, positions=4)
+            false_positive_rate = rate_summary["average_false_positive_rate"]
+            false_negative_rate = rate_summary["average_false_negative_rate"]
+            total_evaluated = rate_summary["total_evaluated"]
+            fp_text = (
+                f"{false_positive_rate:.2%} "
+                f"({rate_summary['total_false_positive']}/{total_evaluated})"
+                if false_positive_rate is not None
+                else "N/A"
+            )
+            fn_text = (
+                f"{false_negative_rate:.2%} "
+                f"({rate_summary['total_false_negative']}/{total_evaluated})"
+                if false_negative_rate is not None
+                else "N/A"
+            )
+            target_text = (
+                "Target met"
+                if false_negative_rate is not None
+                and false_negative_rate < 0.10
+                else "Target not met"
+            )
+            threshold_text = "    ".join(
+                f"{angle.upper()}: "
+                f"{self._verdict_analysis_confidence_thresholds.get(angle, 0.0):.4f}"
+                for angle in required_angles
+            )
+            try:
+                threshold_summary_var.set(
+                    f"{threshold_text}    Avg FP: {fp_text}    "
+                    f"Avg FN: {fn_text}    {target_text} (FN < 10%)"
+                )
+            except Exception:
+                pass
 
         completion_var = self._verdict_analysis_completion_var
         if completion_var is not None:
@@ -874,7 +1004,7 @@ class DisplayWindow:
             self._verdict_analysis_rows = analysis_rows
             self._verdict_analysis_dirty = False
             root.title("Verdict Analysis")
-            root.geometry("1320x820")
+            root.geometry("1320x930")
             root.minsize(1040, 620)
 
             outer = ttk.Frame(root, padding=12)
@@ -882,7 +1012,12 @@ class DisplayWindow:
 
             filter_data = dict(filters or {})
             endform_type = str(filter_data.get("endform_type") or "").strip()
-            angle = str(filter_data.get("angle") or "").strip().upper()
+            angle_value = str(filter_data.get("angle") or "").strip().lower()
+            angle = " + ".join(
+                part.strip().upper()
+                for part in angle_value.split("+")
+                if part.strip()
+            )
             defect_class = str(
                 filter_data.get("defect_class") or ""
             ).strip().upper()
@@ -895,6 +1030,186 @@ class DisplayWindow:
                 outer,
                 text=f"Endform: {endform_type}    Angle: {angle}    Defect: {defect_class}",
             ).pack(anchor="w", pady=(2, 10))
+
+            required_angles = tuple(
+                str(item or "").strip().lower()
+                for item in (filter_data.get("required_angles") or [])
+                if str(item or "").strip()
+            )
+            if angle_value == "side+diag" and required_angles == ("side", "diag"):
+                from verdict_analysis import normalize_confidence_thresholds
+
+                self._verdict_analysis_required_angles = required_angles
+                self._verdict_analysis_confidence_thresholds = (
+                    normalize_confidence_thresholds(
+                        filter_data.get("confidence_thresholds") or {},
+                        angles=required_angles,
+                    )
+                )
+
+                confidence_frame = ttk.LabelFrame(
+                    outer,
+                    text="Global confidence thresholds (temporary)",
+                    padding=8,
+                )
+                confidence_frame.pack(fill="x", pady=(0, 10))
+                self._verdict_analysis_threshold_vars = {}
+
+                def commit_threshold(selected_angle, raw_value=None):
+                    try:
+                        value = (
+                            raw_value
+                            if raw_value is not None
+                            else self._verdict_analysis_threshold_vars[
+                                selected_angle
+                            ].get()
+                        )
+                        thresholds = dict(
+                            self._verdict_analysis_confidence_thresholds
+                        )
+                        thresholds[selected_angle] = float(value)
+                        self._set_historic_verdict_confidence_thresholds(thresholds)
+                    except Exception as exc:
+                        variable = self._verdict_analysis_threshold_vars.get(
+                            selected_angle
+                        )
+                        if variable is not None:
+                            variable.set(
+                                self._verdict_analysis_confidence_thresholds.get(
+                                    selected_angle,
+                                    0.0,
+                                )
+                            )
+                        show_error(exc)
+
+                for column_idx, selected_angle in enumerate(required_angles):
+                    value_var = tk.DoubleVar(
+                        master=root,
+                        value=self._verdict_analysis_confidence_thresholds.get(
+                            selected_angle,
+                            0.0,
+                        ),
+                    )
+                    self._verdict_analysis_threshold_vars[selected_angle] = value_var
+                    ttk.Label(
+                        confidence_frame,
+                        text=f"{selected_angle.upper()}:",
+                        font=("Segoe UI", 9, "bold"),
+                    ).grid(
+                        row=column_idx,
+                        column=0,
+                        padx=(4, 8),
+                        pady=3,
+                        sticky="w",
+                    )
+                    ttk.Scale(
+                        confidence_frame,
+                        from_=0.0,
+                        to=1.0,
+                        variable=value_var,
+                        command=lambda raw, selected_angle=selected_angle: commit_threshold(
+                            selected_angle,
+                            raw,
+                        ),
+                    ).grid(
+                        row=column_idx,
+                        column=1,
+                        padx=4,
+                        pady=3,
+                        sticky="ew",
+                    )
+                    spinbox = ttk.Spinbox(
+                        confidence_frame,
+                        from_=0.0,
+                        to=1.0,
+                        increment=0.0001,
+                        textvariable=value_var,
+                        width=9,
+                        format="%.4f",
+                        command=lambda selected_angle=selected_angle: commit_threshold(
+                            selected_angle
+                        ),
+                    )
+                    spinbox.grid(
+                        row=column_idx,
+                        column=2,
+                        padx=(8, 12),
+                        pady=3,
+                    )
+                    spinbox.bind(
+                        "<Return>",
+                        lambda _event, selected_angle=selected_angle: commit_threshold(
+                            selected_angle
+                        ),
+                    )
+                    spinbox.bind(
+                        "<FocusOut>",
+                        lambda _event, selected_angle=selected_angle: commit_threshold(
+                            selected_angle
+                        ),
+                    )
+
+                confidence_frame.columnconfigure(1, weight=1)
+                threshold_summary_var = tk.StringVar(master=root)
+                self._verdict_analysis_threshold_summary_var = threshold_summary_var
+                ttk.Label(
+                    confidence_frame,
+                    textvariable=threshold_summary_var,
+                ).grid(
+                    row=2,
+                    column=0,
+                    columnspan=3,
+                    padx=4,
+                    pady=(6, 2),
+                    sticky="w",
+                )
+                optimization_var = tk.StringVar(
+                    master=root,
+                    value="Enter actual OK/NOK values, then find the best point.",
+                )
+                self._verdict_analysis_optimization_var = optimization_var
+                ttk.Label(
+                    confidence_frame,
+                    textvariable=optimization_var,
+                ).grid(
+                    row=3,
+                    column=0,
+                    columnspan=2,
+                    padx=4,
+                    pady=(2, 4),
+                    sticky="w",
+                )
+
+                def find_best_point():
+                    try:
+                        self._optimize_historic_verdict_confidence_thresholds()
+                    except Exception as exc:
+                        show_error(exc)
+
+                def reset_thresholds():
+                    self._set_historic_verdict_confidence_thresholds(
+                        {selected_angle: 0.0 for selected_angle in required_angles},
+                        status_message="Thresholds reset to 0.0000.",
+                    )
+
+                button_box = ttk.Frame(confidence_frame)
+                button_box.grid(
+                    row=3,
+                    column=2,
+                    padx=(8, 4),
+                    pady=(2, 4),
+                    sticky="e",
+                )
+                ttk.Button(
+                    button_box,
+                    text="Reset thresholds",
+                    command=reset_thresholds,
+                ).pack(side="right")
+                ttk.Button(
+                    button_box,
+                    text="Find best point",
+                    command=find_best_point,
+                ).pack(side="right", padx=(0, 6))
 
             metrics_frame = ttk.LabelFrame(
                 outer,

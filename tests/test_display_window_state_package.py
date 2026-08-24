@@ -83,7 +83,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
             "endform_type": "mush",
             "class_name": "wrinkle",
             "defect_class": "wrinkle",
-            "angle": "side",
+            "angle": "side+diag",
         }
 
         display._pump_historic_image_report_dialog()
@@ -93,7 +93,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
             endform_type="mush",
             class_name="wrinkle",
             defect_class="wrinkle",
-            angle="side",
+            angle="side+diag",
         )
 
     @patch("display_window.get_db_connection")
@@ -140,12 +140,60 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         mock_get_db_connection.return_value = MagicMock()
         display = DisplayWindow(file_manager=MagicMock())
         display._verdict_analysis_rows = [{"actual_result": "OK", "positions": []}]
+        display._verdict_analysis_required_angles = ("side", "diag")
+        display._verdict_analysis_confidence_thresholds = {
+            "side": 0.45,
+            "diag": 0.60,
+        }
         display._verdict_analysis_dirty = True
 
         closed = display._close_historic_verdict_analysis_dialog(confirm=False)
 
         self.assertTrue(closed)
         self.assertEqual(display._verdict_analysis_rows, [])
+        self.assertEqual(display._verdict_analysis_required_angles, ())
+        self.assertEqual(display._verdict_analysis_confidence_thresholds, {})
+        self.assertFalse(display._verdict_analysis_dirty)
+
+    @patch("display_window.get_db_connection")
+    def test_verdict_analysis_threshold_change_recalculates_without_changing_actual(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display._verdict_analysis_required_angles = ("side", "diag")
+        display._verdict_analysis_confidence_thresholds = {
+            "side": 0.0,
+            "diag": 0.0,
+        }
+        display._verdict_analysis_rows = [
+            {
+                "actual_result": "NOK",
+                "positions": [
+                    {
+                        "position": 1,
+                        "jsn": "jsn-1",
+                        "inferred_result": "NOK",
+                        "confidence_data_complete": True,
+                        "max_confidence_by_angle": {
+                            "side": 0.60,
+                            "diag": 0.20,
+                        },
+                    }
+                ],
+            }
+        ]
+
+        display._set_historic_verdict_confidence_thresholds(
+            {"side": 0.70, "diag": 0.30}
+        )
+
+        self.assertEqual(display._verdict_analysis_rows[0]["actual_result"], "NOK")
+        self.assertEqual(
+            display._verdict_analysis_rows[0]["positions"][0]["inferred_result"],
+            "OK",
+        )
         self.assertFalse(display._verdict_analysis_dirty)
 
     @patch("display_window.get_db_connection")
@@ -184,6 +232,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
                 {"angle": "side", "class_name": "dent"},
                 {"angle": "side", "class_name": "wrinkle"},
                 {"angle": "diag", "class_name": "wrinkle"},
+                {"angle": "side+diag", "class_name": "wrinkle"},
             ],
         )
         query = db.fetch.call_args[0][0]

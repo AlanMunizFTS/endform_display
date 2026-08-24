@@ -2103,10 +2103,13 @@ class MainController:
             return
 
         defect_class = str(defect_class or "wrinkle").strip().lower()
-        angle = str(angle or "side").strip().lower()
+        angle = str(angle or "side").strip().lower().replace(" ", "")
+        if angle == "diag+side":
+            angle = "side+diag"
+        angle_label = " + ".join(part.upper() for part in angle.split("+"))
         report_helper_text = (
             f"Building four historic pieces per Excel row. "
-            f"Filter: {angle} / {defect_class}."
+            f"Filter: {angle_label} / {defect_class}."
         )
 
         self.dataset_transfer_active = True
@@ -2193,9 +2196,14 @@ class MainController:
             return
 
         normalized_class = str(defect_class or "wrinkle").strip().lower()
-        normalized_angle = str(angle or "side").strip().lower()
+        normalized_angle = str(angle or "side").strip().lower().replace(" ", "")
+        if normalized_angle == "diag+side":
+            normalized_angle = "side+diag"
+        angle_label = " + ".join(
+            part.upper() for part in normalized_angle.split("+")
+        )
         helper_text = (
-            f"Loading grouped verdicts for {normalized_angle} / {normalized_class}."
+            f"Loading grouped verdicts for {angle_label} / {normalized_class}."
         )
         self.dataset_transfer_active = True
         d.sync_in_progress = True
@@ -2237,6 +2245,11 @@ class MainController:
                     "endform_type": str(endform_type or "").strip(),
                     "defect_class": verdict_data["defect_class"],
                     "angle": verdict_data["angle"],
+                    "required_angles": verdict_data.get("required_angles") or [],
+                    "confidence_thresholds": verdict_data.get(
+                        "confidence_thresholds"
+                    )
+                    or {},
                 }
                 queue_analysis = getattr(
                     d,
