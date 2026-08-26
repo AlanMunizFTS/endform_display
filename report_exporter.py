@@ -186,7 +186,7 @@ def _format_traceability_filename(created_at=None):
 
 def _format_historic_image_report_filename(created_at=None):
     timestamp = created_at or datetime.now()
-    return f"reporte_imagenes_historico_{timestamp:%Y%m%d_%H%M%S}.xlsx"
+    return f"historic_image_report_{timestamp:%Y%m%d_%H%M%S}.xlsx"
 
 
 def _build_historic_image_report_image_header(endform_type, class_name):
@@ -718,10 +718,12 @@ def export_historic_image_table_report(
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Piezas"
+    sheet.title = "Pieces"
     sheet.sheet_view.showGridLines = False
-    verdict_sheet = workbook.create_sheet("Piezas con veredicto")
+    verdict_sheet = workbook.create_sheet("Pieces with verdict")
     verdict_sheet.sheet_view.showGridLines = False
+    jsn_sheet = workbook.create_sheet("JSN by round")
+    jsn_sheet.sheet_view.showGridLines = False
 
     pieces_per_group = max(1, int(pieces_per_group or 4))
     images_per_piece = max(1, int(images_per_piece or 7))
@@ -768,7 +770,7 @@ def export_historic_image_table_report(
         title_range_cell.border = table_border
     sheet.row_dimensions[1].height = 24
 
-    group_header = sheet.cell(row=2, column=1, value="Pieza agrupada")
+    group_header = sheet.cell(row=2, column=1, value="Grouped piece")
     group_header.fill = header_fill
     group_header.font = header_font
     group_header.alignment = center
@@ -786,7 +788,7 @@ def export_historic_image_table_report(
         cell.alignment = center
         cell.border = table_border
 
-    column_headers = ["Grupo"] + ["Capturas"] * pieces_per_group
+    column_headers = ["Group"] + ["Captures"] * pieces_per_group
     for col_idx, header in enumerate(column_headers, start=1):
         cell = sheet.cell(row=3, column=col_idx, value=header)
         cell.fill = header_fill
@@ -811,7 +813,7 @@ def export_historic_image_table_report(
         sheet.cell(
             row=row_idx,
             column=1,
-            value=f"Pieza agrupada #{group_idx + 1}",
+            value=f"Grouped piece #{group_idx + 1}",
         )
 
     verdict_sheet.merge_cells(
@@ -837,7 +839,7 @@ def export_historic_image_table_report(
     verdict_group_header = verdict_sheet.cell(
         row=2,
         column=1,
-        value="Pieza agrupada",
+        value="Grouped piece",
     )
     verdict_group_header.fill = header_fill
     verdict_group_header.font = header_font
@@ -861,9 +863,9 @@ def export_historic_image_table_report(
         cell.alignment = center
         cell.border = table_border
 
-    verdict_headers = ["Grupo"]
+    verdict_headers = ["Group"]
     for _position in range(pieces_per_group):
-        verdict_headers.extend(("Veredicto", "Capturas"))
+        verdict_headers.extend(("Verdict", "Captures"))
     for col_idx, header in enumerate(verdict_headers, start=1):
         cell = verdict_sheet.cell(row=3, column=col_idx, value=header)
         cell.fill = header_fill
@@ -889,7 +891,7 @@ def export_historic_image_table_report(
         group_cell = verdict_sheet.cell(
             row=row_idx,
             column=1,
-            value=f"Pieza agrupada #{group_idx + 1}",
+            value=f"Grouped piece #{group_idx + 1}",
         )
         group_cell.alignment = center
         group_cell.border = table_border
@@ -897,6 +899,51 @@ def export_historic_image_table_report(
             cell = verdict_sheet.cell(row=row_idx, column=col_idx)
             cell.alignment = center
             cell.border = table_border
+
+    jsn_headers = (
+        ["Grouped piece"]
+        + [f"Round {position + 1}" for position in range(pieces_per_group)]
+        + ["Original OK/NOK value"]
+    )
+    for col_idx, header in enumerate(jsn_headers, start=1):
+        cell = jsn_sheet.cell(row=1, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = center
+        cell.border = table_border
+
+    jsn_sheet.column_dimensions["A"].width = 24
+    for col_idx in range(2, pieces_per_group + 2):
+        jsn_sheet.column_dimensions[get_column_letter(col_idx)].width = 26
+    manual_result_col = pieces_per_group + 2
+    jsn_sheet.column_dimensions[get_column_letter(manual_result_col)].width = 24
+    jsn_sheet.freeze_panes = "B2"
+    jsn_sheet.auto_filter.ref = (
+        f"A1:{get_column_letter(manual_result_col)}{total_groups + 1}"
+    )
+
+    for group_idx in range(total_groups):
+        row_idx = group_idx + 2
+        group_cell = jsn_sheet.cell(
+            row=row_idx,
+            column=1,
+            value=f"Grouped piece {group_idx + 1}",
+        )
+        group_cell.font = header_font
+        for col_idx in range(1, manual_result_col + 1):
+            cell = jsn_sheet.cell(row=row_idx, column=col_idx)
+            cell.alignment = center
+            cell.border = table_border
+
+        group_start = group_idx * pieces_per_group
+        group_batches = historic_index[group_start : group_start + pieces_per_group]
+        for position, batch in enumerate(group_batches, start=1):
+            jsn_cell = jsn_sheet.cell(
+                row=row_idx,
+                column=position + 1,
+                value=_extract_historic_batch_jsn(batch),
+            )
+            jsn_cell.number_format = "@"
 
     if progress_callback:
         progress_callback(0, total_pieces, "Preparing image report")

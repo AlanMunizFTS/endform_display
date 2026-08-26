@@ -283,20 +283,20 @@ class TestReportExporter(unittest.TestCase):
             path = Path(output_path)
             self.assertEqual(
                 path.name,
-                "reporte_imagenes_historico_20260514_093000.xlsx",
+                "historic_image_report_20260514_093000.xlsx",
             )
             workbook = load_workbook(path)
-            sheet = workbook["Piezas"]
+            sheet = workbook["Pieces"]
             self.assertEqual(sheet["A1"].value, "PART-BY-PART RESULT SPLIT")
-            self.assertEqual(sheet["A2"].value, "Pieza agrupada")
+            self.assertEqual(sheet["A2"].value, "Grouped piece")
             self.assertEqual(sheet["B2"].value, "mush-wrinkle")
-            self.assertEqual(sheet["A3"].value, "Grupo")
-            self.assertEqual(sheet["B3"].value, "Capturas")
-            self.assertEqual(sheet["C3"].value, "Capturas")
-            self.assertEqual(sheet["D3"].value, "Capturas")
-            self.assertEqual(sheet["E3"].value, "Capturas")
-            self.assertEqual(sheet["A4"].value, "Pieza agrupada #1")
-            self.assertEqual(sheet["A5"].value, "Pieza agrupada #2")
+            self.assertEqual(sheet["A3"].value, "Group")
+            self.assertEqual(sheet["B3"].value, "Captures")
+            self.assertEqual(sheet["C3"].value, "Captures")
+            self.assertEqual(sheet["D3"].value, "Captures")
+            self.assertEqual(sheet["E3"].value, "Captures")
+            self.assertEqual(sheet["A4"].value, "Grouped piece #1")
+            self.assertEqual(sheet["A5"].value, "Grouped piece #2")
             self.assertEqual(sheet["A6"].value, None)
             self.assertEqual(len(sheet._images), 8)
             anchors = [
@@ -331,15 +331,15 @@ class TestReportExporter(unittest.TestCase):
                 [f"Cam{cam_idx}" for cam_idx in range(1, 8)],
             )
 
-            verdict_sheet = workbook["Piezas con veredicto"]
+            verdict_sheet = workbook["Pieces with verdict"]
             self.assertEqual(
                 verdict_sheet["A1"].value,
                 "PART-BY-PART WRINKLE SIDE VERDICT",
             )
-            self.assertEqual(verdict_sheet["A4"].value, "Pieza agrupada #1")
-            self.assertEqual(verdict_sheet["A5"].value, "Pieza agrupada #2")
-            self.assertEqual(verdict_sheet["B3"].value, "Veredicto")
-            self.assertEqual(verdict_sheet["C3"].value, "Capturas")
+            self.assertEqual(verdict_sheet["A4"].value, "Grouped piece #1")
+            self.assertEqual(verdict_sheet["A5"].value, "Grouped piece #2")
+            self.assertEqual(verdict_sheet["B3"].value, "Verdict")
+            self.assertEqual(verdict_sheet["C3"].value, "Captures")
             self.assertEqual(
                 [
                     verdict_sheet.cell(row=4, column=col_idx).value
@@ -373,6 +373,32 @@ class TestReportExporter(unittest.TestCase):
             verdict_query = controller.display.db.fetch.call_args[0][0]
             self.assertIn("FROM model_results", verdict_query)
             self.assertIn("LOWER(TRIM(class_name))", verdict_query)
+
+            jsn_sheet = workbook["JSN by round"]
+            self.assertEqual(
+                [jsn_sheet.cell(row=1, column=col_idx).value for col_idx in range(1, 7)],
+                [
+                    "Grouped piece",
+                    "Round 1",
+                    "Round 2",
+                    "Round 3",
+                    "Round 4",
+                    "Original OK/NOK value",
+                ],
+            )
+            self.assertEqual(jsn_sheet["A2"].value, "Grouped piece 1")
+            self.assertEqual(jsn_sheet["A3"].value, "Grouped piece 2")
+            self.assertEqual(
+                [jsn_sheet.cell(row=2, column=col_idx).value for col_idx in range(2, 6)],
+                [f"11861022070165{piece_idx:03d}" for piece_idx in range(7, 3, -1)],
+            )
+            self.assertEqual(
+                [jsn_sheet.cell(row=3, column=col_idx).value for col_idx in range(2, 6)],
+                [f"11861022070165{piece_idx:03d}" for piece_idx in range(3, -1, -1)],
+            )
+            self.assertEqual(jsn_sheet["F2"].value, None)
+            self.assertEqual(jsn_sheet["F3"].value, None)
+            self.assertEqual(len(jsn_sheet._images), 0)
 
     def test_export_historic_image_table_report_uses_defect_markings(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -466,7 +492,7 @@ class TestReportExporter(unittest.TestCase):
             controller.display._draw_model_overlays.assert_called_once()
             side_workbook = load_workbook(side_output_path)
             self.assertEqual(
-                side_workbook["Piezas con veredicto"]["B4"].value,
+                side_workbook["Pieces with verdict"]["B4"].value,
                 "OK",
             )
 
@@ -493,7 +519,7 @@ class TestReportExporter(unittest.TestCase):
             controller.display._draw_model_overlays.assert_called_once()
             diag_workbook = load_workbook(diag_output_path)
             self.assertEqual(
-                diag_workbook["Piezas con veredicto"]["B4"].value,
+                diag_workbook["Pieces with verdict"]["B4"].value,
                 "NOK",
             )
 
@@ -535,9 +561,9 @@ class TestReportExporter(unittest.TestCase):
             )
 
             workbook = load_workbook(output_path)
-            sheet = workbook["Piezas"]
-            self.assertEqual(sheet["A4"].value, "Pieza agrupada #1")
-            self.assertEqual(sheet["A5"].value, "Pieza agrupada #2")
+            sheet = workbook["Pieces"]
+            self.assertEqual(sheet["A4"].value, "Grouped piece #1")
+            self.assertEqual(sheet["A5"].value, "Grouped piece #2")
             self.assertEqual(sheet["C5"].value, None)
             self.assertEqual(sheet["D5"].value, None)
             self.assertEqual(sheet["E5"].value, None)
@@ -555,9 +581,9 @@ class TestReportExporter(unittest.TestCase):
                 ],
             )
 
-            verdict_sheet = workbook["Piezas con veredicto"]
-            self.assertEqual(verdict_sheet["A4"].value, "Pieza agrupada #1")
-            self.assertEqual(verdict_sheet["A5"].value, "Pieza agrupada #2")
+            verdict_sheet = workbook["Pieces with verdict"]
+            self.assertEqual(verdict_sheet["A4"].value, "Grouped piece #1")
+            self.assertEqual(verdict_sheet["A5"].value, "Grouped piece #2")
             self.assertEqual(
                 [
                     verdict_sheet.cell(row=4, column=col_idx).value
@@ -569,6 +595,14 @@ class TestReportExporter(unittest.TestCase):
             self.assertEqual(verdict_sheet["D5"].value, None)
             self.assertEqual(verdict_sheet["F5"].value, None)
             self.assertEqual(verdict_sheet["H5"].value, None)
+
+            jsn_sheet = workbook["JSN by round"]
+            self.assertEqual(jsn_sheet["A3"].value, "Grouped piece 2")
+            self.assertEqual(jsn_sheet["B3"].value, "11861022070165000")
+            self.assertEqual(jsn_sheet["C3"].value, None)
+            self.assertEqual(jsn_sheet["D3"].value, None)
+            self.assertEqual(jsn_sheet["E3"].value, None)
+            self.assertEqual(jsn_sheet["F3"].value, None)
 
     def test_export_historic_image_table_report_uses_display_piece_order(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

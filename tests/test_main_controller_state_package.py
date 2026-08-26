@@ -264,7 +264,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
 
             with patch(
                 "report_exporter.export_historic_image_table_report",
-                return_value=f"{tmp_dir}\\reports\\reporte_imagenes_historico_20260514_093000.xlsx",
+                return_value=f"{tmp_dir}\\reports\\historic_image_report_20260514_093000.xlsx",
             ) as export_mock:
                 controller.start_export_historic_image_report_async(
                     endform_type="mush",
@@ -290,7 +290,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertEqual(display.sync_progress_title, "Exporting Image Report")
             self.assertEqual(
                 display.sync_message,
-                "Image report exported: reporte_imagenes_historico_20260514_093000.xlsx",
+                "Image report exported: historic_image_report_20260514_093000.xlsx",
             )
             self.assertFalse(display.sync_message_is_error)
 
