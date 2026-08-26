@@ -150,6 +150,52 @@ class TestVerdictAnalysis(unittest.TestCase):
         self.assertEqual(result["average_false_negative_rate"], 0.0)
         self.assertEqual(result["thresholds"], {"side": 0.8, "diag": 0.7})
 
+    def test_optimizer_finds_best_point_for_side_only(self):
+        rows = [
+            {
+                "actual_result": "OK",
+                "positions": [self._confidence_entry(0.20, 0.95)],
+            },
+            {
+                "actual_result": "NOK",
+                "positions": [self._confidence_entry(0.80, 0.10)],
+            },
+        ]
+
+        result = optimize_confidence_thresholds(
+            rows,
+            required_angles=("side",),
+            positions=1,
+        )
+
+        self.assertTrue(result["target_met"])
+        self.assertEqual(result["average_false_positive_rate"], 0.0)
+        self.assertEqual(result["average_false_negative_rate"], 0.0)
+        self.assertEqual(result["thresholds"], {"side": 0.8})
+
+    def test_optimizer_finds_best_point_for_diag_only(self):
+        rows = [
+            {
+                "actual_result": "OK",
+                "positions": [self._confidence_entry(0.95, 0.15)],
+            },
+            {
+                "actual_result": "NOK",
+                "positions": [self._confidence_entry(0.10, 0.70)],
+            },
+        ]
+
+        result = optimize_confidence_thresholds(
+            rows,
+            required_angles=("diag",),
+            positions=1,
+        )
+
+        self.assertTrue(result["target_met"])
+        self.assertEqual(result["average_false_positive_rate"], 0.0)
+        self.assertEqual(result["average_false_negative_rate"], 0.0)
+        self.assertEqual(result["thresholds"], {"diag": 0.7})
+
     def test_optimizer_requires_both_actual_classes(self):
         rows = [
             {

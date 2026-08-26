@@ -1036,7 +1036,12 @@ class DisplayWindow:
                 for item in (filter_data.get("required_angles") or [])
                 if str(item or "").strip()
             )
-            if angle_value == "side+diag" and required_angles == ("side", "diag"):
+            supported_best_point_angles = {
+                ("side",),
+                ("diag",),
+                ("side", "diag"),
+            }
+            if required_angles in supported_best_point_angles:
                 from verdict_analysis import normalize_confidence_thresholds
 
                 self._verdict_analysis_required_angles = required_angles
@@ -1152,11 +1157,12 @@ class DisplayWindow:
                 confidence_frame.columnconfigure(1, weight=1)
                 threshold_summary_var = tk.StringVar(master=root)
                 self._verdict_analysis_threshold_summary_var = threshold_summary_var
+                threshold_summary_row = len(required_angles)
                 ttk.Label(
                     confidence_frame,
                     textvariable=threshold_summary_var,
                 ).grid(
-                    row=2,
+                    row=threshold_summary_row,
                     column=0,
                     columnspan=3,
                     padx=4,
@@ -1168,11 +1174,12 @@ class DisplayWindow:
                     value="Enter actual OK/NOK values, then find the best point.",
                 )
                 self._verdict_analysis_optimization_var = optimization_var
+                optimization_row = threshold_summary_row + 1
                 ttk.Label(
                     confidence_frame,
                     textvariable=optimization_var,
                 ).grid(
-                    row=3,
+                    row=optimization_row,
                     column=0,
                     columnspan=2,
                     padx=4,
@@ -1194,7 +1201,7 @@ class DisplayWindow:
 
                 button_box = ttk.Frame(confidence_frame)
                 button_box.grid(
-                    row=3,
+                    row=optimization_row,
                     column=2,
                     padx=(8, 4),
                     pady=(2, 4),

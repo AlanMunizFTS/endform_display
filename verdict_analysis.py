@@ -373,16 +373,143 @@ def _collect_weighted_optimization_records(rows, positions, angles):
     return weighted_records, counts
 
 
+def _collect_single_angle_optimization_records(rows, positions, angle):
+    resolved_positions = max(1, int(positions or 4))
+    counts = {
+        position: {"OK": 0, "NOK": 0}
+        for position in range(1, resolved_positions + 1)
+    }
+    raw_records = []
+
+    for row in rows or []:
+        try:
+            actual = normalize_verdict(row.get("actual_result"), allow_blank=True)
+        except (AttributeError, ValueError):
+            continue
+        if not actual:
+            continue
+        for fallback_position, entry in enumerate(row.get("positions") or [], start=1):
+            if (
+                not isinstance(entry, dict)
+                or not str(entry.get("jsn") or "").strip()
+                or not entry.get("confidence_data_complete", False)
+            ):
+                continue
+            try:
+                position = int(entry.get("position") or fallback_position)
+            except (TypeError, ValueError):
+                continue
+            if position not in counts:
+                continue
+            confidence_by_angle = entry.get("max_confidence_by_angle") or {}
+            raw_records.append(
+                (
+                    _normalized_optimization_score(confidence_by_angle.get(angle)),
+                    actual,
+                )
+            )
+            counts[position][actual] += 1
+
+    record_weight = 1.0 / len(raw_records) if raw_records else 0.0
+    return [
+        (score, actual, record_weight)
+        for score, actual in raw_records
+    ], counts
+
+
+def _optimize_single_confidence_threshold(
+    rows,
+    angle,
+    false_negative_target,
+    positions,
+):
+    candidates = _build_threshold_candidates(rows, angle)
+    records, counts = _collect_single_angle_optimization_records(
+        rows,
+        positions,
+        angle,
+    )
+    total_actual_ok = sum(values["OK"] for values in counts.values())
+    total_actual_nok = sum(values["NOK"] for values in counts.values())
+    if total_actual_ok <= 0 or total_actual_nok <= 0:
+        raise ValueError(
+            "Enter both OK and NOK actual values before finding the best point"
+        )
+
+    records.sort(key=lambda record: record[0])
+    record_index = 0
+    true_ok_rate = 0.0
+    false_positive_rate = 0.0
+    actual_ok_rate = total_actual_ok / (total_actual_ok + total_actual_nok)
+    epsilon = 1e-12
+    minimum_fp = None
+    minimum_fp_candidates = []
+
+    for threshold in candidates:
+        while record_index < len(records) and records[record_index][0] < threshold:
+            _score, actual, weight = records[record_index]
+            if actual == "OK":
+                true_ok_rate += weight
+            else:
+                false_positive_rate += weight
+            record_index += 1
+
+        candidate = {
+            "threshold": threshold,
+            "average_false_negative_rate": min(
+                1.0,
+                max(0.0, actual_ok_rate - true_ok_rate),
+            ),
+            "average_false_positive_rate": min(
+                1.0,
+                max(0.0, false_positive_rate),
+            ),
+        }
+        if minimum_fp is None:
+            minimum_fp = candidate["average_false_positive_rate"]
+        elif candidate["average_false_positive_rate"] > minimum_fp + epsilon:
+            break
+        minimum_fp_candidates.append(candidate)
+
+    best_candidate = min(
+        minimum_fp_candidates,
+        key=lambda candidate: (
+            round(candidate["average_false_negative_rate"], 12),
+            -candidate["threshold"],
+        ),
+    )
+    best = evaluate_confidence_thresholds(
+        rows,
+        {angle: best_candidate["threshold"]},
+        required_angles=(angle,),
+        positions=positions,
+    )
+    target_met = best["average_false_negative_rate"] < false_negative_target
+    return {
+        **best,
+        "target_met": target_met,
+        "message": (
+            "Best point minimizes false positives and meets the false-negative target."
+            if target_met
+            else "Best point minimizes false positives; the false-negative target is not met."
+        ),
+    }
+
+
 def optimize_confidence_thresholds(
     rows,
     required_angles=DEFAULT_REQUIRED_ANGLES,
     false_negative_target=0.10,
     positions=4,
 ):
-    """Find the lexicographically best SIDE/DIAG threshold pair."""
-    angles = tuple(required_angles or DEFAULT_REQUIRED_ANGLES)
-    if len(angles) != 2:
-        raise ValueError("Confidence optimization requires exactly two angles")
+    """Find the best threshold for one angle or threshold pair for two angles."""
+    angles = tuple(
+        str(angle or "").strip().lower()
+        for angle in (required_angles or DEFAULT_REQUIRED_ANGLES)
+        if str(angle or "").strip()
+    )
+    if len(angles) not in (1, 2):
+        raise ValueError("Confidence optimization requires one or two angles")
     try:
         resolved_target = float(false_negative_target)
     except (TypeError, ValueError) as exc:
@@ -393,6 +520,14 @@ def optimize_confidence_thresholds(
         or resolved_target > 1.0
     ):
         raise ValueError("False-negative target must be between 0 and 1")
+
+    if len(angles) == 1:
+        return _optimize_single_confidence_threshold(
+            rows,
+            angles[0],
+            resolved_target,
+            positions,
+        )
 
     side_angle, diag_angle = angles
     side_candidates = _build_threshold_candidates(rows, side_angle)

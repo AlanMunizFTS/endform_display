@@ -129,6 +129,7 @@ class TestInferToHistoric(unittest.TestCase):
         self.assertEqual(args.mode, "defects")
         self.assertIsNone(args.model)
         self.assertTrue(args.write_db)
+        self.assertEqual(args.device, "auto")
 
         args = infer_to_historic.parse_args(["input", "--no-db"])
         self.assertFalse(args.write_db)
@@ -144,6 +145,21 @@ class TestInferToHistoric(unittest.TestCase):
         self.assertEqual(args.mode, "segment")
         self.assertEqual(args.model, Path("piece.pt"))
 
+    def test_resolve_inference_device_auto_uses_cuda_when_available(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            self.assertEqual(infer_to_historic.resolve_inference_device("auto"), "0")
+
+    def test_resolve_inference_device_auto_falls_back_to_cpu(self):
+        with patch("torch.cuda.is_available", return_value=False):
+            self.assertEqual(
+                infer_to_historic.resolve_inference_device("auto"),
+                "cpu",
+            )
+
+    def test_resolve_inference_device_preserves_explicit_device(self):
+        self.assertEqual(infer_to_historic.resolve_inference_device("cpu"), "cpu")
+        self.assertEqual(infer_to_historic.resolve_inference_device("0,1"), "0,1")
+
     def test_build_status_filename_strips_existing_status(self):
         self.assertEqual(
             infer_to_historic.build_status_filename("11861_side.png", "OK"),
@@ -157,6 +173,41 @@ class TestInferToHistoric(unittest.TestCase):
             infer_to_historic.build_status_filename("11861_side_nok.jpg", "OK"),
             "11861_side_OK.jpg",
         )
+
+    def test_normalize_input_status_filenames_renames_source_images(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_dir = Path(tmp_dir)
+            (input_dir / "11861_side_OK.png").write_bytes(b"side")
+            (input_dir / "11861_front_nok.jpg").write_bytes(b"front")
+            (input_dir / "11861_diag.png").write_bytes(b"diag")
+            (input_dir / "notes_OK.txt").write_text("keep", encoding="utf-8")
+
+            renamed = infer_to_historic.normalize_input_status_filenames(input_dir)
+
+            self.assertEqual(
+                sorted(path.name for path in renamed),
+                ["11861_front.jpg", "11861_side.png"],
+            )
+            self.assertEqual((input_dir / "11861_side.png").read_bytes(), b"side")
+            self.assertEqual((input_dir / "11861_front.jpg").read_bytes(), b"front")
+            self.assertTrue((input_dir / "11861_diag.png").exists())
+            self.assertTrue((input_dir / "notes_OK.txt").exists())
+            self.assertFalse((input_dir / "11861_side_OK.png").exists())
+            self.assertFalse((input_dir / "11861_front_nok.jpg").exists())
+
+    def test_normalize_input_status_filenames_refuses_name_collision(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_dir = Path(tmp_dir)
+            original = input_dir / "11861_side.png"
+            suffixed = input_dir / "11861_side_OK.png"
+            original.write_bytes(b"original")
+            suffixed.write_bytes(b"suffixed")
+
+            with self.assertRaises(FileExistsError):
+                infer_to_historic.normalize_input_status_filenames(input_dir)
+
+            self.assertEqual(original.read_bytes(), b"original")
+            self.assertEqual(suffixed.read_bytes(), b"suffixed")
 
     def test_load_models_routes_pt_files_by_position(self):
         loaded_paths = []
@@ -274,6 +325,8 @@ class TestInferToHistoric(unittest.TestCase):
             self.assertEqual(summary, {"processed": 1, "ok": 0, "nok": 1, "skipped": 0})
             self.assertTrue(output_path.exists())
             self.assertEqual(output_path.read_bytes(), b"raw-image-bytes")
+            self.assertTrue((input_dir / "11861_cam_front.png").exists())
+            self.assertFalse(source.exists())
             self.assertFalse((historic_dir / "11861_cam_front_OK.png").exists())
             self.assertFalse((base_dir / "annotated").exists())
 

@@ -68,8 +68,11 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--device",
-        default="cpu",
-        help="Ultralytics device value, for example cpu, 0, or 0,1. Default: %(default)s",
+        default="auto",
+        help=(
+            "Ultralytics device value, for example auto, cpu, 0, or 0,1. "
+            "Default: %(default)s"
+        ),
     )
     parser.add_argument(
         "--no-db",
@@ -90,6 +93,22 @@ def get_position(filename):
         if position in lower_name:
             return position
     return None
+
+
+def resolve_inference_device(device):
+    """Select the first CUDA GPU for auto mode, falling back to CPU."""
+    requested_device = str(device or "auto").strip()
+    if requested_device.lower() != "auto":
+        return requested_device
+
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "0"
+    except (ImportError, RuntimeError):
+        pass
+    return "cpu"
 
 
 def strip_trailing_status(filename):
@@ -118,6 +137,49 @@ def collect_images(input_dir):
         for path in sorted(input_path.iterdir())
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
     ]
+
+
+def normalize_input_status_filenames(input_dir):
+    """Remove a trailing _OK/_NOK from image names in the input folder."""
+    image_paths = collect_images(input_dir)
+    existing_names = {path.name.casefold(): path for path in image_paths}
+    planned_targets = {}
+    renames = []
+
+    for source_path in image_paths:
+        normalized_name = strip_trailing_status(source_path.name)
+        if normalized_name == source_path.name:
+            continue
+
+        target_path = source_path.with_name(normalized_name)
+        target_key = target_path.name.casefold()
+        conflicting_path = existing_names.get(target_key)
+        if conflicting_path is not None and conflicting_path != source_path:
+            raise FileExistsError(
+                f"Cannot rename {source_path.name} to {target_path.name}: "
+                f"{conflicting_path.name} already exists"
+            )
+
+        previous_source = planned_targets.get(target_key)
+        if previous_source is not None:
+            raise FileExistsError(
+                f"Cannot remove status suffixes from {previous_source.name} and "
+                f"{source_path.name}: both would become {target_path.name}"
+            )
+
+        planned_targets[target_key] = source_path
+        renames.append((source_path, target_path))
+
+    for source_path, target_path in renames:
+        if target_path.exists():
+            raise FileExistsError(
+                f"Cannot rename {source_path.name} to {target_path.name}: "
+                "destination already exists"
+            )
+        source_path.rename(target_path)
+        print(f"[RENAME] {source_path.name} -> {target_path.name}")
+
+    return [target_path for _, target_path in renames]
 
 
 def load_models(models_dir, yolo_cls=None):
@@ -512,6 +574,9 @@ def process_images(
     device,
     db_client=None,
 ):
+    device = resolve_inference_device(device)
+    print(f"[DEVICE] Inference device: {device}")
+    normalize_input_status_filenames(input_dir)
     image_paths = collect_images(input_dir)
     if not image_paths:
         print(f"[INFO] No images found in {input_dir}")
@@ -665,6 +730,9 @@ def save_segment_to_historic(image_path, segmented_image, historic_dir):
 
 
 def process_segment_images(input_dir, model, historic_dir, confidence, device):
+    device = resolve_inference_device(device)
+    print(f"[DEVICE] Inference device: {device}")
+    normalize_input_status_filenames(input_dir)
     image_paths = collect_images(input_dir)
     if not image_paths:
         print(f"[INFO] No images found in {input_dir}")

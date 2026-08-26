@@ -1,0 +1,7 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+-r requirements.txt
+
+# NVIDIA CUDA 13.0 build for Windows/Linux. The CUDA runtime is bundled.
+torch==2.10.0+cu130
+torchvision==0.25.0+cu130

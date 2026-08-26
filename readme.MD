@@ -98,6 +98,8 @@ Expected logs include:
 - Activate virtualenv: `venv\Scripts\activate`
 - Create Python 3.12 venv: `py -3.12 -m venv venv`
 - Run app: `python main.py`
+- Install all dependencies with NVIDIA CUDA support: `python -m pip install -r requirements-cuda.txt`
+- Auto inference uses GPU 0 when CUDA is available; force CPU with `--device cpu`.
 - Check remote historic folder: `python utilities/check_hist_display.py`
 - Run status-sync unittest: `.\venv\Scripts\python.exe -m unittest tests/test_sync_images_by_status.py`
 - Run FileManager unittest: `.\venv\Scripts\python.exe -m unittest tests/test_file_manager.py`
