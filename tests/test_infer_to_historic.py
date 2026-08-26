@@ -168,6 +168,7 @@ class TestInferToHistoric(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             models_dir = Path(tmp_dir)
             (models_dir / "wrinkle_side.pt").write_bytes(b"model")
+            (models_dir / "scratch_side.pt").write_bytes(b"model")
             (models_dir / "breakage_front.pt").write_bytes(b"model")
             (models_dir / "nylon_diag.pt").write_bytes(b"model")
             (models_dir / "unmatched.pt").write_bytes(b"model")
@@ -175,11 +176,56 @@ class TestInferToHistoric(unittest.TestCase):
 
             models = infer_to_historic.load_models(models_dir, yolo_cls=FakeYOLO)
 
-        self.assertEqual(loaded_paths, ["breakage_front.pt", "nylon_diag.pt", "wrinkle_side.pt"])
-        self.assertEqual(len(models["side"]), 1)
+        self.assertEqual(
+            loaded_paths,
+            [
+                "breakage_front.pt",
+                "nylon_diag.pt",
+                "scratch_side.pt",
+                "wrinkle_side.pt",
+            ],
+        )
+        self.assertEqual(len(models["side"]), 2)
         self.assertEqual(len(models["front"]), 1)
         self.assertEqual(len(models["diag"]), 1)
         self.assertEqual(len(models["unknown"]), 0)
+
+    def test_infer_image_runs_all_models_and_combines_their_detections(self):
+        first_model = _FakeModel(
+            _FakeResult([0.81], class_ids=[0], names={0: "WRINKLE"})
+        )
+        first_model._inference_model_name = "wrinkle_side.pt"
+        second_model = _FakeModel(
+            _FakeResult([0.92], class_ids=[0], names={0: "SCRATCH"})
+        )
+        second_model._inference_model_name = "scratch_side.pt"
+        third_model = _FakeModel(
+            _FakeResult([0.12], class_ids=[0], names={0: "LOW_CONFIDENCE"})
+        )
+        third_model._inference_model_name = "low_side.pt"
+
+        inference = infer_to_historic.infer_image(
+            image_path="11861_cam_side.png",
+            models_by_position={
+                "side": [first_model, second_model, third_model],
+            },
+            confidence=0.33,
+            device="cpu",
+        )
+
+        self.assertEqual(inference["status"], "NOK")
+        self.assertEqual(inference["model_count"], 3)
+        self.assertEqual(len(first_model.calls), 1)
+        self.assertEqual(len(second_model.calls), 1)
+        self.assertEqual(len(third_model.calls), 1)
+        self.assertEqual(
+            [detection["class_name"] for detection in inference["detections"]],
+            ["WRINKLE", "SCRATCH"],
+        )
+        self.assertEqual(
+            [detection["model_name"] for detection in inference["detections"]],
+            ["wrinkle_side.pt", "scratch_side.pt"],
+        )
 
     def test_no_detection_copies_original_to_historic_ok_only(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

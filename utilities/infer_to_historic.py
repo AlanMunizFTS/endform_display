@@ -315,30 +315,29 @@ def extract_defect_detections(result, confidence_threshold, model=None):
 def infer_image(image_path, models_by_position, confidence, device):
     position = get_position(Path(image_path).name)
     models = list(models_by_position.get(position, [])) if position else []
+    detections = []
+    first_detection_result = None
 
     for model in models:
         results = _run_model(model, image_path, confidence, device)
         result = _prediction_result(results)
         if has_high_confidence_detection(result, confidence):
-            detections = extract_defect_detections(
-                result,
-                confidence_threshold=confidence,
-                model=model,
+            if first_detection_result is None:
+                first_detection_result = result
+            detections.extend(
+                extract_defect_detections(
+                    result,
+                    confidence_threshold=confidence,
+                    model=model,
+                )
             )
-            return {
-                "position": position,
-                "model_count": len(models),
-                "status": "NOK",
-                "result": result,
-                "detections": detections,
-            }
 
     return {
         "position": position,
         "model_count": len(models),
-        "status": "OK",
-        "result": None,
-        "detections": [],
+        "status": "NOK" if first_detection_result is not None else "OK",
+        "result": first_detection_result,
+        "detections": detections,
     }
 
 
