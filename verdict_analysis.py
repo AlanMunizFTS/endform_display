@@ -13,7 +13,8 @@ METRIC_KEYS = (
 )
 DEFAULT_CONFIDENCE_THRESHOLD = 0.0
 DEFAULT_REQUIRED_ANGLES = ("side", "diag")
-CONFIDENCE_PRECISION = 4
+CONFIDENCE_PRECISION = 2
+CONFIDENCE_STEP = 10 ** -CONFIDENCE_PRECISION
 
 
 def normalize_verdict(value, allow_blank=True):
@@ -82,7 +83,7 @@ def calculate_position_metrics(rows, positions=4):
 
 
 def normalize_confidence_thresholds(thresholds=None, angles=DEFAULT_REQUIRED_ANGLES):
-    """Return validated per-angle thresholds rounded to DB confidence precision."""
+    """Return validated per-angle thresholds rounded to analysis precision."""
     source = thresholds if isinstance(thresholds, dict) else {}
     normalized = {}
     for raw_angle in angles or DEFAULT_REQUIRED_ANGLES:
@@ -128,7 +129,7 @@ def _infer_position_result_normalized(entry, thresholds, required_angles):
         if confidence is None:
             continue
         try:
-            confidence_value = float(confidence)
+            confidence_value = round(float(confidence), CONFIDENCE_PRECISION)
         except (TypeError, ValueError):
             continue
         if confidence_value >= thresholds[angle]:
@@ -293,7 +294,9 @@ def _build_threshold_candidates(rows, angle):
             if not math.isfinite(value) or value < 0.0 or value > 1.0:
                 continue
             candidates.add(value)
-            candidates.add(round(min(1.0, value + 0.0001), CONFIDENCE_PRECISION))
+            candidates.add(
+                round(min(1.0, value + CONFIDENCE_STEP), CONFIDENCE_PRECISION)
+            )
     return sorted(candidates)
 
 

@@ -909,7 +909,7 @@ class DisplayWindow:
             )
             threshold_text = "    ".join(
                 f"{angle.upper()}: "
-                f"{self._verdict_analysis_confidence_thresholds.get(angle, 0.0):.4f}"
+                f"{self._verdict_analysis_confidence_thresholds.get(angle, 0.0):.2f}"
                 for angle in required_angles
             )
             try:
@@ -1127,10 +1127,10 @@ class DisplayWindow:
                         confidence_frame,
                         from_=0.0,
                         to=1.0,
-                        increment=0.0001,
+                        increment=0.01,
                         textvariable=value_var,
                         width=9,
-                        format="%.4f",
+                        format="%.2f",
                         command=lambda selected_angle=selected_angle: commit_threshold(
                             selected_angle
                         ),
@@ -1196,7 +1196,7 @@ class DisplayWindow:
                 def reset_thresholds():
                     self._set_historic_verdict_confidence_thresholds(
                         {selected_angle: 0.0 for selected_angle in required_angles},
-                        status_message="Thresholds reset to 0.0000.",
+                        status_message="Thresholds reset to 0.00.",
                     )
 
                 button_box = ttk.Frame(confidence_frame)

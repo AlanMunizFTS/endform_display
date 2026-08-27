@@ -7,6 +7,7 @@ from verdict_analysis import (
     infer_position_result,
     optimize_confidence_thresholds,
     parse_actual_verdict_values,
+    normalize_confidence_thresholds,
 )
 
 
@@ -71,7 +72,7 @@ class TestVerdictAnalysis(unittest.TestCase):
         self.assertEqual(
             infer_position_result(
                 complete,
-                {"side": 0.7001, "diag": 0.5000},
+                {"side": 0.71, "diag": 0.50},
             ),
             "OK",
         )
@@ -80,6 +81,19 @@ class TestVerdictAnalysis(unittest.TestCase):
                 incomplete,
                 {"side": 0.0, "diag": 0.0},
             )
+        )
+
+    def test_confidences_are_handled_with_two_decimal_precision(self):
+        self.assertEqual(
+            normalize_confidence_thresholds({"side": 0.456, "diag": 0.104}),
+            {"side": 0.46, "diag": 0.10},
+        )
+        self.assertEqual(
+            infer_position_result(
+                self._confidence_entry(0.456, 0.104),
+                {"side": 0.46, "diag": 0.11},
+            ),
+            "NOK",
         )
 
     def test_apply_confidence_thresholds_changes_only_inferred_values(self):
@@ -149,6 +163,26 @@ class TestVerdictAnalysis(unittest.TestCase):
         self.assertEqual(result["average_false_positive_rate"], 0.0)
         self.assertEqual(result["average_false_negative_rate"], 0.0)
         self.assertEqual(result["thresholds"], {"side": 0.8, "diag": 0.7})
+
+    def test_optimizer_returns_thresholds_with_two_decimal_precision(self):
+        rows = [
+            {
+                "actual_result": "OK",
+                "positions": [self._confidence_entry(0.204, 0.204)],
+            },
+            {
+                "actual_result": "NOK",
+                "positions": [self._confidence_entry(0.804, 0.104)],
+            },
+            {
+                "actual_result": "NOK",
+                "positions": [self._confidence_entry(0.104, 0.706)],
+            },
+        ]
+
+        result = optimize_confidence_thresholds(rows, positions=1)
+
+        self.assertEqual(result["thresholds"], {"side": 0.8, "diag": 0.71})
 
     def test_optimizer_finds_best_point_for_side_only(self):
         rows = [
