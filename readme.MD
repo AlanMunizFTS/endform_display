@@ -86,6 +86,8 @@ Expected logs include:
 - The automatic export/reset job is scheduled for 05:40.
 - Set `APP_DAILY_EXPORT_RESET_ENABLED=0` in `.env` to disable the scheduled job.
 - The reset phase starts only after the state export completes successfully; export failures stop the workflow before dataset or DB reset.
+- State exports also archive matching files from remote `/media/ssd/raw` under the package `raw/` folder. RAW transfer issues are recorded as warnings in `manifest.json` and do not invalidate the historic/DB package.
+- Deleting one piece requires SFTP and removes the matching JSN from remote historic, annotated, and RAW folders before changing local state. `RESET` also clears the remote RAW folder.
 
 ## Historic Keyboard Navigation
 

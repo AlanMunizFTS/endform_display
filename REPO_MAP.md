@@ -45,6 +45,7 @@
   - Central logging and print redirection (`log.txt`).
 - `paths_config.py`
   - Canonical path constants and status-folder mapping.
+  - Includes remote RAW source `/media/ssd/raw`, archived by state export and cleared by piece delete/reset flows.
 
 ## Folder Layout
 - `utilities/` - utility scripts and logging module.

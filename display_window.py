@@ -120,7 +120,9 @@ class DisplayWindow:
         self.reset_progress = 0
         self.reset_stage = ""
         self.reset_progress_title = "Resetting Dataset"
-        self.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
+        self.reset_progress_helper_text = (
+            "Clearing historic, annotated, RAW, classified, and final folders."
+        )
         self.exit_requested = False
         self.trash_icon = None
         self.trash_icon_size = None
@@ -4194,7 +4196,7 @@ class DisplayWindow:
 
         body_block = self._prepare_wrapped_text_block(
             [
-                "Warning: This will reset DB and delete images in historic, annotated, classified, and final_classification.",
+                "Warning: This will reset DB and delete images in historic, annotated, RAW, classified, and final_classification.",
                 "Confirm reset operation?",
             ],
             font,

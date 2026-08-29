@@ -69,6 +69,9 @@ class FileManager:
             sftp_client.chdir(remote_dir)
         return sftp_client.listdir()
 
+    def sftp_listdir_attr(self, sftp_client, remote_dir: str):
+        return sftp_client.listdir_attr(remote_dir)
+
     def sftp_remove(self, sftp_client, remote_path: str) -> None:
         sftp_client.remove(remote_path)
 

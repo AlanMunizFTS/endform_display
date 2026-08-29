@@ -547,23 +547,99 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             db.execute.return_value = 1
             display = self._build_display(db=db)
             display.historic_images = [[target_name], [survivor_name]]
+            display.sftp_client = object()
 
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(
+                    temp_dir=tmp_dir,
+                    remote_hist_dir="/remote/historic",
+                    remote_annotated_dir="/remote/annotated",
+                    remote_raw_dir="/remote/raw",
+                ),
+                file_manager=FileManager(),
+            )
+            raw_target = "118610000000000000001_camera.raw"
+            raw_collision = "1186100000000000000012_camera.raw"
+            controller.file_manager.sftp_chdir = MagicMock()
+            controller.file_manager.sftp_listdir = MagicMock(
+                side_effect=[
+                    [target_name, survivor_name],
+                    [target_name, survivor_name],
+                    [raw_target, raw_collision],
+                ]
+            )
+            controller.file_manager.sftp_remove = MagicMock()
+            controller.enter_historic_mode = MagicMock()
+            controller.exit_historic_mode = MagicMock()
+            controller._show_no_images_dialog = MagicMock()
+
+            result = controller.perform_delete_current_piece()
+
+            self.assertTrue(result["ok"])
+            self.assertFalse((annotated_dir / target_name).exists())
+            self.assertFalse((historic_dir / target_name).exists())
+            self.assertTrue((annotated_dir / survivor_name).exists())
+            self.assertTrue((historic_dir / survivor_name).exists())
+            controller.file_manager.sftp_remove.assert_any_call(
+                display.sftp_client,
+                f"/remote/raw/{raw_target}",
+            )
+            removed_paths = [call.args[1] for call in controller.file_manager.sftp_remove.call_args_list]
+            self.assertNotIn(f"/remote/raw/{raw_collision}", removed_paths)
+            controller.enter_historic_mode.assert_called_once()
+
+    def test_perform_delete_current_piece_without_sftp_preserves_local_and_db(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            historic_dir.mkdir()
+            target_name = "12_Cam1_Side1_OK.png"
+            (historic_dir / target_name).write_bytes(b"target")
+            db = MagicMock()
+            display = self._build_display(db=db)
+            display.historic_images = [[target_name]]
             controller = MainController(
                 display=display,
                 config=ControllerConfig(temp_dir=tmp_dir),
                 file_manager=FileManager(),
             )
-            controller.enter_historic_mode = MagicMock()
-            controller.exit_historic_mode = MagicMock()
-            controller._show_no_images_dialog = MagicMock()
 
-            controller.perform_delete_current_piece()
+            result = controller.perform_delete_current_piece()
 
-            self.assertFalse((annotated_dir / target_name).exists())
-            self.assertFalse((historic_dir / target_name).exists())
-            self.assertTrue((annotated_dir / survivor_name).exists())
-            self.assertTrue((historic_dir / survivor_name).exists())
-            controller.enter_historic_mode.assert_called_once()
+            self.assertFalse(result["ok"])
+            self.assertTrue((historic_dir / target_name).exists())
+            db.execute.assert_not_called()
+            self.assertIn("SFTP", display.sync_message)
+
+    def test_perform_delete_current_piece_remote_failure_preserves_local_and_db(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            historic_dir.mkdir()
+            target_name = "12_Cam1_Side1_OK.png"
+            (historic_dir / target_name).write_bytes(b"target")
+            db = MagicMock()
+            display = self._build_display(db=db)
+            display.historic_images = [[target_name]]
+            display.sftp_client = object()
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+                file_manager=FileManager(),
+            )
+            controller.file_manager.sftp_chdir = MagicMock()
+            controller.file_manager.sftp_listdir = MagicMock(
+                side_effect=[[target_name], [target_name], ["12_camera.raw"]]
+            )
+            controller.file_manager.sftp_remove = MagicMock(
+                side_effect=[None, None, OSError("raw delete failed")]
+            )
+
+            result = controller.perform_delete_current_piece()
+
+            self.assertFalse(result["ok"])
+            self.assertTrue((historic_dir / target_name).exists())
+            db.execute.assert_not_called()
+            self.assertIn("raw delete failed", result["error"])
 
     def test_perform_reset_clears_classified_and_final_dirs_and_keeps_live_root(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -603,12 +679,17 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
                     temp_dir=tmp_dir,
                     remote_hist_dir="/remote/historic",
                     remote_annotated_dir="/remote/annotated",
+                    remote_raw_dir="/remote/raw",
                 ),
                 file_manager=FileManager(),
             )
             controller.file_manager.sftp_chdir = MagicMock()
             controller.file_manager.sftp_listdir = MagicMock(
-                side_effect=[["remote_historic.png"], ["remote_annotated.png"]]
+                side_effect=[
+                    ["remote_historic.png"],
+                    ["remote_annotated.png"],
+                    ["remote_piece.raw"],
+                ]
             )
             controller.file_manager.sftp_remove = MagicMock()
 
@@ -650,6 +731,10 @@ class TestMainControllerAnnotatedHistoric(unittest.TestCase):
             controller.file_manager.sftp_remove.assert_any_call(
                 display.sftp_client,
                 "/remote/annotated/remote_annotated.png",
+            )
+            controller.file_manager.sftp_remove.assert_any_call(
+                display.sftp_client,
+                "/remote/raw/remote_piece.raw",
             )
 
 

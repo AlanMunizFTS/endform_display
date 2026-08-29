@@ -94,6 +94,11 @@ class TestFileManager(unittest.TestCase):
         sftp.chdir.assert_called_once_with("/remote2")
         sftp.listdir.assert_called_once_with()
 
+        attrs = [object()]
+        sftp.listdir_attr.return_value = attrs
+        self.assertEqual(self.fm.sftp_listdir_attr(sftp, "/remote3"), attrs)
+        sftp.listdir_attr.assert_called_once_with("/remote3")
+
         self.fm.sftp_remove(sftp, "/remote/file.txt")
         sftp.remove.assert_called_once_with("/remote/file.txt")
 

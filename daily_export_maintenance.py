@@ -174,11 +174,30 @@ class DailyExportMaintenance:
             package_name = export_result.get("package_name") or os.path.basename(
                 str(export_result.get("package_path") or "")
             )
+            raw_result = export_result.get("raw") or {}
+            raw_warning = bool(raw_result) and not raw_result.get("complete", True)
+            raw_downloaded = int(raw_result.get("downloaded", 0) or 0)
+            raw_matched = int(raw_result.get("matched", 0) or 0)
             if reset_result and not reset_result.get("ok", False):
                 status = "success_with_reset_issues"
                 error_text = reset_result.get("error", "Reset completed with issues")
+                raw_suffix = (
+                    f"; RAW export warning ({raw_downloaded}/{raw_matched})"
+                    if raw_warning
+                    else ""
+                )
                 d.sync_message = (
-                    f"Daily export completed: {package_name}; reset had issues: {error_text}"
+                    f"Daily export completed: {package_name}; reset had issues: "
+                    f"{error_text}{raw_suffix}"
+                )
+                d.sync_message_is_error = True
+            elif raw_warning:
+                status = "success_with_raw_warnings"
+                raw_errors = list(raw_result.get("errors") or [])
+                error_text = raw_errors[0] if raw_errors else "RAW export incomplete"
+                d.sync_message = (
+                    f"Daily export/reset completed with RAW warnings: {package_name} "
+                    f"({raw_downloaded}/{raw_matched} RAW files)"
                 )
                 d.sync_message_is_error = True
             else:

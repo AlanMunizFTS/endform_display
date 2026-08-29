@@ -28,6 +28,7 @@ from paths_config import (
     HISTORIC_SUBDIR_NAME,
     REMOTE_ANNOTATED_DIR,
     REMOTE_HIST_DISPLAY_DIR,
+    REMOTE_RAW_DIR,
     REMOTE_TEST_DISPLAY_DIR,
     STATUS_SYNC_DIRS,
     SYNC_IMAGES_BASE_DIR,
@@ -60,6 +61,12 @@ def _extract_numeric_jsn(filename):
         return None
     jsn = str(filename).split("_", 1)[0]
     return jsn if jsn.isdigit() else None
+
+
+def _filename_matches_jsn(filename, jsn):
+    if not filename or not jsn or "_" not in str(filename):
+        return False
+    return str(filename).split("_", 1)[0] == str(jsn)
 
 
 def _quote_sql_identifier(identifier):
@@ -582,6 +589,7 @@ class ControllerConfig:
     remote_live_dir: str = REMOTE_TEST_DISPLAY_DIR
     remote_hist_dir: str = REMOTE_HIST_DISPLAY_DIR
     remote_annotated_dir: str = REMOTE_ANNOTATED_DIR
+    remote_raw_dir: str = REMOTE_RAW_DIR
     historic_gate_remote_db_validation_enabled: bool = field(
         default_factory=is_historic_download_remote_jsn_validation_enabled
     )
@@ -1867,8 +1875,18 @@ class MainController:
                 package_name = result.get("package_name") or os.path.basename(
                     str(result.get("package_path") or "")
                 )
-                d.sync_message = f"Export completed: {package_name}"
-                d.sync_message_is_error = False
+                raw_result = result.get("raw") or {}
+                if raw_result and not raw_result.get("complete", True):
+                    downloaded = int(raw_result.get("downloaded", 0) or 0)
+                    matched = int(raw_result.get("matched", 0) or 0)
+                    d.sync_message = (
+                        f"Export completed with RAW warnings: {package_name} "
+                        f"({downloaded}/{matched} RAW files)"
+                    )
+                    d.sync_message_is_error = True
+                else:
+                    d.sync_message = f"Export completed: {package_name}"
+                    d.sync_message_is_error = False
                 self.logger.info(
                     f"[EXPORT] Dataset export completed: {result.get('package_path')}",
                     allow_repeat=True,
@@ -2278,7 +2296,9 @@ class MainController:
         d.reset_progress = 0
         d.reset_stage = "Preparing reset..."
         d.reset_progress_title = "Resetting Dataset"
-        d.reset_progress_helper_text = "Clearing historic, annotated, classified, and final folders."
+        d.reset_progress_helper_text = (
+            "Clearing historic, annotated, RAW, classified, and final folders."
+        )
         d.sync_message = ""
         d.sync_message_is_error = False
         d.sync_message_time = 0
@@ -2301,7 +2321,9 @@ class MainController:
                         stage_text,
                         phase_percent,
                         title="Resetting Dataset",
-                        helper_text="Clearing historic, annotated, classified, and final folders.",
+                        helper_text=(
+                            "Clearing historic, annotated, RAW, classified, and final folders."
+                        ),
                     )
 
                 result = self.perform_reset(
@@ -3098,11 +3120,73 @@ class MainController:
         jsn = self._get_current_historic_jsn()
         if not jsn:
             print("No historic piece selected for deletion")
-            return
+            return {"ok": False, "error": "No historic piece selected for deletion"}
 
         print("\n" + "=" * 70)
         print(f"STARTING PIECE DELETE (JSN {jsn})")
         print("=" * 70)
+
+        def _block_delete(message):
+            error_text = str(message).strip() or "Unknown remote deletion error"
+            print(f"PIECE DELETE BLOCKED: {error_text}")
+            d.sync_message = f"Piece delete blocked: {error_text}"
+            d.sync_message_is_error = True
+            d.sync_message_time = time.time()
+            print("=" * 70 + "\n")
+            return {"ok": False, "error": error_text}
+
+        remote_sources = [
+            ("historic", self.config.remote_hist_dir, True),
+            ("annotated", self.config.remote_annotated_dir, True),
+            ("raw", self.config.remote_raw_dir, False),
+        ]
+        if not d.sftp_client:
+            return _block_delete("SFTP connection is not available")
+
+        remote_candidates_by_source = []
+        scan_errors = []
+        for label, remote_dir, image_only in remote_sources:
+            try:
+                self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
+                remote_files = self.file_manager.sftp_listdir(d.sftp_client)
+                remote_candidates = [
+                    name
+                    for name in remote_files
+                    if _filename_matches_jsn(name, jsn)
+                    and (
+                        not image_only
+                        or name.lower().endswith(self.config.image_extensions)
+                    )
+                ]
+                remote_candidates_by_source.append(
+                    (label, remote_dir, remote_candidates)
+                )
+            except Exception as exc:
+                error_text = str(exc).strip() or exc.__class__.__name__
+                scan_errors.append(
+                    f"Unable to access remote {label} folder: {error_text}"
+                )
+
+        if scan_errors:
+            return _block_delete("; ".join(scan_errors))
+
+        remote_deleted = 0
+        delete_errors = []
+        for label, remote_dir, remote_candidates in remote_candidates_by_source:
+            for remote_file in remote_candidates:
+                try:
+                    file_path = f"{remote_dir.rstrip('/')}/{remote_file}"
+                    self.file_manager.sftp_remove(d.sftp_client, file_path)
+                    remote_deleted += 1
+                except Exception as exc:
+                    error_text = str(exc).strip() or exc.__class__.__name__
+                    delete_errors.append(
+                        f"Unable to delete remote {label} file {remote_file}: {error_text}"
+                    )
+            print(f"Remote {label} delete: {len(remote_candidates)} candidates")
+
+        if delete_errors:
+            return _block_delete("; ".join(delete_errors))
 
         local_sources = self._dedupe_local_sources(
             [
@@ -3118,7 +3202,9 @@ class MainController:
             if self.file_manager.exists(local_dir):
                 try:
                     for name in self.file_manager.listdir(local_dir):
-                        if name.startswith(jsn) and name.lower().endswith(self.config.image_extensions):
+                        if _filename_matches_jsn(name, jsn) and name.lower().endswith(
+                            self.config.image_extensions
+                        ):
                             folder_candidates.append(self.file_manager.join(local_dir, name))
                     for path in folder_candidates:
                         try:
@@ -3133,38 +3219,12 @@ class MainController:
             else:
                 print(f"Local {label} folder does not exist")
 
-        remote_deleted = 0
-        remote_sources = [
-            ("historic", self.config.remote_hist_dir),
-            ("annotated", self.config.remote_annotated_dir),
-        ]
-        if d.sftp_client:
-            for label, remote_dir in remote_sources:
-                try:
-                    self.file_manager.sftp_chdir(d.sftp_client, remote_dir)
-                    remote_files = self.file_manager.sftp_listdir(d.sftp_client)
-                    remote_candidates = [
-                        f
-                        for f in remote_files
-                        if f.startswith(jsn) and f.lower().endswith(self.config.image_extensions)
-                    ]
-                    for remote_file in remote_candidates:
-                        try:
-                            file_path = f"{remote_dir}/{remote_file}"
-                            self.file_manager.sftp_remove(d.sftp_client, file_path)
-                            remote_deleted += 1
-                        except Exception as exc:
-                            print(f"Error deleting remote {label} file {remote_file}: {exc}")
-                    print(f"Remote {label} delete: {len(remote_candidates)} candidates")
-                except Exception as exc:
-                    print(f"Error accessing remote {label} folder: {exc}")
-        else:
-            print("No SFTP connection available")
-
         if d.db:
             try:
-                query_delete = "DELETE FROM img_results WHERE img_name LIKE %s"
-                affected_rows = d.db.execute(query_delete, (f"{jsn}%",))
+                query_delete = (
+                    "DELETE FROM img_results WHERE SPLIT_PART(img_name, '_', 1) = %s"
+                )
+                affected_rows = d.db.execute(query_delete, (jsn,))
                 print(f"Deleted {affected_rows} database records")
             except Exception as exc:
                 print(f"Error clearing database records: {exc}")
@@ -3172,11 +3232,17 @@ class MainController:
             print("No database connection available")
 
         if d.temp_results:
-            d.temp_results = {k: v for k, v in d.temp_results.items() if not k.startswith(jsn)}
-        d._db_registered_images = {name for name in d._db_registered_images if not name.startswith(jsn)}
+            d.temp_results = {
+                k: v for k, v in d.temp_results.items() if not _filename_matches_jsn(k, jsn)
+            }
+        d._db_registered_images = {
+            name for name in d._db_registered_images if not _filename_matches_jsn(name, jsn)
+        }
         if d._db_result_cache:
             d._db_result_cache = {
-                k: v for k, v in d._db_result_cache.items() if not k.startswith(jsn)
+                k: v
+                for k, v in d._db_result_cache.items()
+                if not _filename_matches_jsn(k, jsn)
             }
         for path in local_candidates:
             if hasattr(d, "clear_cached_image"):
@@ -3210,6 +3276,11 @@ class MainController:
         print("=" * 70)
         print("PIECE DELETE COMPLETED")
         print("=" * 70 + "\n")
+        return {
+            "ok": True,
+            "local_deleted": local_deleted,
+            "remote_deleted": remote_deleted,
+        }
 
     def _invalidate_dataset_runtime_state(self, clear_historic_images=False):
         d = self.display
@@ -3435,6 +3506,7 @@ class MainController:
         remote_targets = [
             ("historic", self.config.remote_hist_dir),
             ("annotated", self.config.remote_annotated_dir),
+            ("raw", self.config.remote_raw_dir),
         ]
 
         self.stop_historic_download_worker()

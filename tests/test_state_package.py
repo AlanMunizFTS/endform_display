@@ -1,4 +1,5 @@
 import json
+import stat
 import tempfile
 import unittest
 from collections import Counter
@@ -402,11 +403,14 @@ def build_controller(tmp_dir, db, historic_mode=False):
     historic_dir = tmp_path / "historic"
     annotated_dir.mkdir(exist_ok=True)
     historic_dir.mkdir(exist_ok=True)
-    display = SimpleNamespace(db=db, historic_mode=historic_mode)
+    display = SimpleNamespace(db=db, historic_mode=historic_mode, sftp_client=None)
     controller = SimpleNamespace(
         file_manager=FileManager(),
         display=display,
-        config=SimpleNamespace(image_extensions=(".png", ".jpg", ".jpeg", ".bmp")),
+        config=SimpleNamespace(
+            image_extensions=(".png", ".jpg", ".jpeg", ".bmp"),
+            remote_raw_dir="/media/ssd/raw",
+        ),
         _get_visible_historic_dir=lambda: str(annotated_dir),
         _get_export_historic_dir=lambda: str(historic_dir),
         _recalculate_piece_result=MagicMock(),
@@ -499,6 +503,134 @@ def build_source_db():
 
 
 class TestStatePackage(unittest.TestCase):
+    @staticmethod
+    def _configure_raw_sftp(controller, files, modes=None, failing_names=None):
+        modes = modes or {}
+        failing_names = set(failing_names or [])
+        sftp = MagicMock()
+        sftp.listdir_attr.return_value = [
+            SimpleNamespace(
+                filename=name,
+                st_size=len(content),
+                st_mode=modes.get(name, stat.S_IFREG | 0o644),
+            )
+            for name, content in files.items()
+        ]
+
+        def _download(remote_path, local_path):
+            name = remote_path.rsplit("/", 1)[-1]
+            if name in failing_names:
+                raise OSError("download failed")
+            Path(local_path).write_bytes(files[name])
+
+        sftp.get.side_effect = _download
+        controller.display.sftp_client = sftp
+        return sftp
+
+    def test_export_display_state_includes_matching_raw_files_of_any_extension(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_source_db()
+            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (historic_dir / "12_A_side_OK.png").write_bytes(b"historic")
+            files = {
+                "12_camera_a.bin": b"raw-a",
+                "12_camera_b.tiff": b"raw-bb",
+                "123_collision.raw": b"wrong-piece",
+                "12_folder": b"not-a-file",
+            }
+            sftp = self._configure_raw_sftp(
+                controller,
+                files,
+                modes={"12_folder": stat.S_IFDIR | 0o755},
+            )
+
+            result = export_display_state(
+                controller,
+                output_dir=str(Path(tmp_dir) / "exports"),
+                db_client=source_db,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["raw"]["matched"], 2)
+            self.assertEqual(result["raw"]["downloaded"], 2)
+            self.assertTrue(result["raw"]["complete"])
+            package_path = Path(result["package_path"])
+            self.assertEqual((package_path / "raw" / "12_camera_a.bin").read_bytes(), b"raw-a")
+            self.assertEqual((package_path / "raw" / "12_camera_b.tiff").read_bytes(), b"raw-bb")
+            self.assertFalse((package_path / "raw" / "123_collision.raw").exists())
+            manifest = json.loads((package_path / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["raw_count"], 2)
+            self.assertEqual(manifest["raw_expected_count"], 2)
+            self.assertTrue(manifest["raw_export_complete"])
+            self.assertEqual(manifest["raw_export_errors"], [])
+            sftp.listdir_attr.assert_called_once_with("/media/ssd/raw")
+
+    def test_export_display_state_keeps_package_when_raw_download_is_partial(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_source_db()
+            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (historic_dir / "12_A_side_OK.png").write_bytes(b"historic")
+            self._configure_raw_sftp(
+                controller,
+                {"12_good.raw": b"good", "12_bad.raw": b"bad"},
+                failing_names={"12_bad.raw"},
+            )
+
+            result = export_display_state(controller, output_dir=tmp_dir, db_client=source_db)
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["raw"]["complete"])
+            self.assertEqual(result["raw"]["matched"], 2)
+            self.assertEqual(result["raw"]["downloaded"], 1)
+            manifest = result["manifest"]
+            self.assertEqual(manifest["raw_images"], ["12_good.raw"])
+            self.assertEqual(manifest["raw_count"], 1)
+            self.assertEqual(manifest["raw_expected_count"], 2)
+            self.assertFalse(manifest["raw_export_complete"])
+            self.assertTrue(manifest["raw_export_errors"])
+
+            raw_path = Path(result["package_path"]) / "raw" / "12_good.raw"
+            raw_path.unlink()
+            target_controller, _a, _h = build_controller(tmp_dir, FakePackageDB())
+            with self.assertRaisesRegex(ValueError, "raw/12_good.raw"):
+                import_display_state(
+                    target_controller,
+                    result["package_path"],
+                    db_client=target_controller.display.db,
+                )
+
+    def test_export_display_state_without_sftp_reports_raw_warning(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_source_db()
+            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (historic_dir / "12_A_side_OK.png").write_bytes(b"historic")
+
+            result = export_display_state(controller, output_dir=tmp_dir, db_client=source_db)
+
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["raw"]["complete"])
+            self.assertEqual(result["raw"]["matched"], 0)
+            self.assertEqual(result["raw"]["downloaded"], 0)
+            self.assertIn("SFTP", result["raw"]["errors"][0])
+            self.assertTrue(Path(result["package_path"], "historic", "12_A_side_OK.png").is_file())
+
+    def test_estimate_display_state_export_size_includes_matching_raw_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            source_db = build_source_db()
+            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            (historic_dir / "12_A_side_OK.png").write_bytes(b"historic")
+            self._configure_raw_sftp(
+                controller,
+                {"12_a.raw": b"1234", "123_other.raw": b"123456"},
+            )
+
+            result = estimate_display_state_export_size(controller, db_client=source_db)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["raw_count"], 1)
+            self.assertEqual(result["raw_bytes"], 4)
+            self.assertEqual(result["raw_estimate_errors"], [])
+
     def test_export_display_state_creates_expected_folder_structure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             source_db = build_source_db()

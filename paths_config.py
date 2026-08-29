@@ -25,6 +25,7 @@ SYNC_IMAGES_BASE_DIR = Path("./classified")
 REMOTE_TEST_DISPLAY_DIR = "/media/ssd/test_display"
 REMOTE_HIST_DISPLAY_DIR = "/media/ssd/hist_display"
 REMOTE_ANNOTATED_DIR = "/media/ssd/annotated"
+REMOTE_RAW_DIR = "/media/ssd/raw"
 
 # --------------------------------------
 # Status folders used by sync operations

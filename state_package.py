@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import stat
 import tempfile
 from datetime import datetime
 from decimal import Decimal
@@ -185,9 +186,15 @@ def _build_manifest(
     annotated_names=None,
     traceability_reports=None,
     traceability_report_error=None,
+    raw_names=None,
+    raw_expected_count=0,
+    raw_export_complete=True,
+    raw_export_errors=None,
 ):
     annotated_names = list(annotated_names or [])
     traceability_reports = list(traceability_reports or [])
+    raw_names = list(raw_names or [])
+    raw_export_errors = list(raw_export_errors or [])
     return {
         "package_version": STATE_PACKAGE_VERSION,
         "package_kind": PACKAGE_KIND,
@@ -198,6 +205,11 @@ def _build_manifest(
         "historic_count": len(historic_names),
         "annotated_images": annotated_names,
         "historic_images": list(historic_names),
+        "raw_count": len(raw_names),
+        "raw_expected_count": int(raw_expected_count or 0),
+        "raw_images": raw_names,
+        "raw_export_complete": bool(raw_export_complete),
+        "raw_export_errors": raw_export_errors,
         "table_counts": {
             table_name: len(rows)
             for table_name, rows in data_payload.items()
@@ -314,9 +326,13 @@ def _package_file_path(package_path, relative_path):
 
 
 def _validate_manifest_image_entries(package_path, manifest):
-    expected_groups = (
+    expected_groups = [
         ("historic", manifest.get("historic_images"), manifest.get("historic_count")),
-    )
+    ]
+    if "raw_images" in manifest or "raw_count" in manifest:
+        expected_groups.append(
+            ("raw", manifest.get("raw_images"), manifest.get("raw_count"))
+        )
     missing = []
     count_mismatches = []
 
@@ -344,6 +360,72 @@ def _validate_manifest_image_entries(package_path, manifest):
         raise ValueError(
             "Export folder is missing manifest-listed images: " + ", ".join(missing[:20])
         )
+
+
+def _filename_jsn_token(filename):
+    if not isinstance(filename, str) or "_" not in filename:
+        return None
+    token = filename.split("_", 1)[0]
+    return token or None
+
+
+def _format_remote_error(prefix, exc):
+    detail = str(exc).strip() or exc.__class__.__name__
+    return f"{prefix}: {detail}"
+
+
+def _collect_remote_raw_entries(controller, historic_names):
+    export_jsns = {
+        token
+        for token in (_filename_jsn_token(name) for name in historic_names)
+        if token is not None
+    }
+    if not export_jsns:
+        return {"entries": [], "errors": []}
+
+    display = getattr(controller, "display", None)
+    sftp_client = getattr(display, "sftp_client", None)
+    if sftp_client is None:
+        return {
+            "entries": [],
+            "errors": ["RAW SFTP connection is not available"],
+        }
+
+    file_manager = controller.file_manager
+    remote_raw_dir = str(getattr(controller.config, "remote_raw_dir", "/media/ssd/raw"))
+    try:
+        remote_attrs = file_manager.sftp_listdir_attr(sftp_client, remote_raw_dir)
+    except Exception as exc:
+        return {
+            "entries": [],
+            "errors": [_format_remote_error(f"Unable to list RAW folder {remote_raw_dir}", exc)],
+        }
+
+    entries = []
+    errors = []
+    for remote_attr in remote_attrs:
+        name = getattr(remote_attr, "filename", None)
+        if not name or os.path.basename(name) != name:
+            continue
+        if _filename_jsn_token(name) not in export_jsns:
+            continue
+
+        mode = getattr(remote_attr, "st_mode", None)
+        if mode not in (None, 0) and not stat.S_ISREG(mode):
+            continue
+
+        size = getattr(remote_attr, "st_size", None)
+        if size is None:
+            try:
+                remote_path = f"{remote_raw_dir.rstrip('/')}/{name}"
+                size = getattr(file_manager.sftp_stat(sftp_client, remote_path), "st_size", 0)
+            except Exception as exc:
+                errors.append(_format_remote_error(f"Unable to stat RAW file {name}", exc))
+                size = 0
+        entries.append({"name": name, "size": max(0, int(size or 0))})
+
+    entries.sort(key=lambda item: item["name"])
+    return {"entries": entries, "errors": errors}
 
 
 def _load_piece_identifier_payload(package_path):
@@ -989,17 +1071,15 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
     data_payload = _build_data_payload(db)
     identifier_payload = _build_piece_identifier_payload(db)
-    manifest = _build_manifest(
-        historic_names=historic_names,
-        data_payload=data_payload,
-        image_extensions=image_extensions,
-    )
+    raw_scan = _collect_remote_raw_entries(controller, historic_names)
+    raw_entries = raw_scan["entries"]
+    raw_export_errors = list(raw_scan["errors"])
 
     output_root = str(output_dir or EXPORTS_DIR)
     file_manager.makedirs(output_root, exist_ok=True)
     package_name, package_path = _build_unique_export_dir(file_manager, output_root)
     partial_package_path = f"{package_path}.partial"
-    total_steps = len(historic_names) + 4
+    total_steps = len(historic_names) + len(raw_entries) + 4
     done = 0
 
     if callable(progress_callback):
@@ -1025,20 +1105,14 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
         traceability_reports.append(_write_traceability_report(partial_package_path, db))
     except Exception as exc:
         traceability_report_error = str(exc)
-    manifest = _build_manifest(
-        historic_names=historic_names,
-        data_payload=data_payload,
-        image_extensions=image_extensions,
-        traceability_reports=traceability_reports,
-        traceability_report_error=traceability_report_error,
-    )
-
     done += 1
     if callable(progress_callback):
         progress_callback(done, total_steps, "Writing traceability report")
 
     historic_package_dir = file_manager.join(partial_package_path, "historic")
+    raw_package_dir = file_manager.join(partial_package_path, "raw")
     file_manager.makedirs(historic_package_dir, exist_ok=True)
+    file_manager.makedirs(raw_package_dir, exist_ok=True)
 
     done += 1
     if callable(progress_callback):
@@ -1052,6 +1126,37 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
         done += 1
         if callable(progress_callback):
             progress_callback(done, total_steps, "Copying historic images")
+
+    raw_downloaded_names = []
+    sftp_client = getattr(controller.display, "sftp_client", None)
+    remote_raw_dir = str(getattr(controller.config, "remote_raw_dir", "/media/ssd/raw"))
+    for raw_entry in raw_entries:
+        name = raw_entry["name"]
+        try:
+            remote_path = f"{remote_raw_dir.rstrip('/')}/{name}"
+            local_path = file_manager.join(raw_package_dir, name)
+            file_manager.sftp_get(sftp_client, remote_path, local_path)
+            raw_downloaded_names.append(name)
+        except Exception as exc:
+            raw_export_errors.append(
+                _format_remote_error(f"Unable to download RAW file {name}", exc)
+            )
+        done += 1
+        if callable(progress_callback):
+            progress_callback(done, total_steps, "Downloading RAW images")
+
+    raw_export_complete = not raw_export_errors
+    manifest = _build_manifest(
+        historic_names=historic_names,
+        data_payload=data_payload,
+        image_extensions=image_extensions,
+        traceability_reports=traceability_reports,
+        traceability_report_error=traceability_report_error,
+        raw_names=raw_downloaded_names,
+        raw_expected_count=len(raw_entries),
+        raw_export_complete=raw_export_complete,
+        raw_export_errors=raw_export_errors,
+    )
 
     _write_text_file(
         _package_file_path(partial_package_path, "manifest.json"),
@@ -1068,6 +1173,12 @@ def export_display_state(controller, output_dir=None, progress_callback=None, db
         "package_path": str(package_path),
         "package_name": package_name,
         "manifest": manifest,
+        "raw": {
+            "matched": len(raw_entries),
+            "downloaded": len(raw_downloaded_names),
+            "complete": raw_export_complete,
+            "errors": raw_export_errors,
+        },
     }
 
 
@@ -1083,6 +1194,9 @@ def estimate_display_state_export_size(controller, db_client=None):
 
     annotated_names = _list_image_names(file_manager, annotated_dir, image_extensions)
     historic_names = _list_image_names(file_manager, historic_dir, image_extensions)
+    raw_scan = _collect_remote_raw_entries(controller, historic_names)
+    raw_entries = raw_scan["entries"]
+    raw_estimate_errors = list(raw_scan["errors"])
     data_payload = _build_data_payload(db)
     identifier_payload = _build_piece_identifier_payload(db)
     manifest = _build_manifest(
@@ -1090,6 +1204,10 @@ def estimate_display_state_export_size(controller, db_client=None):
         data_payload=data_payload,
         image_extensions=image_extensions,
         annotated_names=annotated_names,
+        raw_names=[entry["name"] for entry in raw_entries],
+        raw_expected_count=len(raw_entries),
+        raw_export_complete=not raw_estimate_errors,
+        raw_export_errors=raw_estimate_errors,
     )
     traceability_report_bytes = _estimate_traceability_report_size(db)
 
@@ -1100,6 +1218,9 @@ def estimate_display_state_export_size(controller, db_client=None):
     ):
         for name in names:
             files_size += int(file_manager.getsize(file_manager.join(directory, name)))
+
+    raw_bytes = sum(entry["size"] for entry in raw_entries)
+    files_size += raw_bytes
 
     metadata_size = sum(
         len(content.encode("utf-8"))
@@ -1119,6 +1240,9 @@ def estimate_display_state_export_size(controller, db_client=None):
         "traceability_report_bytes": traceability_report_bytes,
         "annotated_count": len(annotated_names),
         "historic_count": len(historic_names),
+        "raw_count": len(raw_entries),
+        "raw_bytes": raw_bytes,
+        "raw_estimate_errors": raw_estimate_errors,
         "table_counts": manifest["table_counts"],
     }
 

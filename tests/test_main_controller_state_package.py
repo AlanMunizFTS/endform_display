@@ -83,6 +83,38 @@ class TestMainControllerStatePackage(unittest.TestCase):
             fake_db.close.assert_called_once_with()
 
     @patch("main_controller.Thread", _ImmediateThread)
+    @patch("main_controller.export_display_state")
+    def test_start_export_display_state_async_reports_raw_warning(self, export_mock):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_db = MagicMock()
+            display = self._build_display(db=fake_db)
+            controller = MainController(
+                display=display,
+                config=ControllerConfig(temp_dir=tmp_dir),
+            )
+            controller.stop_historic_download_worker = MagicMock()
+            controller.stop_remote_db_polling = MagicMock()
+            controller.start_historic_download_on_startup = MagicMock()
+            export_mock.return_value = {
+                "ok": True,
+                "package_path": f"{tmp_dir}\\display_state_20260326_120000",
+                "package_name": "display_state_20260326_120000",
+                "raw": {
+                    "matched": 3,
+                    "downloaded": 2,
+                    "complete": False,
+                    "errors": ["one RAW download failed"],
+                },
+            }
+
+            with patch("db.get_db_connection", return_value=fake_db):
+                controller.start_export_display_state_async()
+
+            self.assertTrue(display.sync_message_is_error)
+            self.assertIn("RAW warnings", display.sync_message)
+            self.assertIn("2/3 RAW files", display.sync_message)
+
+    @patch("main_controller.Thread", _ImmediateThread)
     @patch("main_controller.import_display_state")
     def test_start_import_display_state_async_reports_merge_summary(self, import_mock):
         with tempfile.TemporaryDirectory() as tmp_dir:

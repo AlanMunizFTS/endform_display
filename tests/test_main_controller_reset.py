@@ -62,6 +62,7 @@ class TestMainControllerReset(unittest.TestCase):
             sftp_client.listdir.side_effect = [
                 ["remote_hist_a.png"],
                 ["remote_annotated_a.png"],
+                ["remote_raw_a.bin"],
             ]
 
             display = _DisplayStub(db=db, sftp_client=sftp_client)
@@ -95,11 +96,15 @@ class TestMainControllerReset(unittest.TestCase):
             )
             sftp_client.chdir.assert_any_call(controller.config.remote_hist_dir)
             sftp_client.chdir.assert_any_call(controller.config.remote_annotated_dir)
+            sftp_client.chdir.assert_any_call(controller.config.remote_raw_dir)
             sftp_client.remove.assert_any_call(
                 f"{controller.config.remote_hist_dir}/remote_hist_a.png"
             )
             sftp_client.remove.assert_any_call(
                 f"{controller.config.remote_annotated_dir}/remote_annotated_a.png"
+            )
+            sftp_client.remove.assert_any_call(
+                f"{controller.config.remote_raw_dir}/remote_raw_a.bin"
             )
             controller.stop_historic_download_worker.assert_called_once_with()
             controller.start_historic_download_on_startup.assert_called_once_with(
@@ -118,7 +123,7 @@ class TestMainControllerReset(unittest.TestCase):
             sftp_channel = MagicMock()
             sftp_client = MagicMock()
             sftp_client.get_channel.return_value = sftp_channel
-            sftp_client.listdir.side_effect = [[], []]
+            sftp_client.listdir.side_effect = [[], [], []]
 
             display = _DisplayStub(db=db, sftp_client=sftp_client)
             controller = MainController(

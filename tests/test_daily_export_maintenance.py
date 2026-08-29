@@ -102,6 +102,36 @@ class TestDailyExportMaintenance(unittest.TestCase):
             db.close.assert_called_once_with()
 
     @patch("daily_export_maintenance.Thread", _ImmediateThread)
+    @patch("daily_export_maintenance.estimate_display_state_export_size")
+    @patch("daily_export_maintenance.export_display_state")
+    def test_daily_raw_warning_still_runs_reset(self, export_mock, estimate_mock):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            runner, controller, db = self._build_runner(tmp_dir)
+            estimate_mock.return_value = {"ok": True, "required_bytes": 1}
+            export_mock.return_value = {
+                "ok": True,
+                "package_path": str(Path(tmp_dir) / "exports" / "display_state_raw_warning"),
+                "package_name": "display_state_raw_warning",
+                "raw": {
+                    "matched": 4,
+                    "downloaded": 3,
+                    "complete": False,
+                    "errors": ["one RAW download failed"],
+                },
+            }
+
+            with patch("db.get_db_connection", return_value=db), patch(
+                "daily_export_maintenance.shutil.disk_usage",
+                return_value=SimpleNamespace(free=10_000),
+            ):
+                self.assertTrue(runner.tick())
+
+            controller.perform_reset.assert_called_once()
+            self.assertTrue(controller.display.sync_message_is_error)
+            self.assertIn("RAW warnings", controller.display.sync_message)
+            self.assertIn("3/4 RAW files", controller.display.sync_message)
+
+    @patch("daily_export_maintenance.Thread", _ImmediateThread)
     @patch("daily_export_maintenance.export_display_state")
     def test_tick_does_not_repeat_after_success_today(self, export_mock):
         with tempfile.TemporaryDirectory() as tmp_dir:
