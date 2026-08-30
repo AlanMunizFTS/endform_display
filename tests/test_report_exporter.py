@@ -180,7 +180,7 @@ class TestReportExporter(unittest.TestCase):
             historic_index=historic_index,
             defect_class="wrinkle",
             angle="side+diag",
-            confidence_thresholds={"side": 0.90, "diag": 0.4001},
+            confidence_thresholds={"side": 0.90, "diag": 0.406},
         )
 
         entry = result["rows"][0]["positions"][0]
@@ -192,7 +192,7 @@ class TestReportExporter(unittest.TestCase):
         self.assertEqual(entry["inferred_result"], "OK")
         self.assertEqual(
             result["confidence_thresholds"],
-            {"side": 0.90, "diag": 0.4001},
+            {"side": 0.90, "diag": 0.41},
         )
         query = controller.display.db.fetch.call_args.args[0]
         self.assertIn("confidence", query)

@@ -91,8 +91,17 @@ class DisplayWindow:
         self.trash_button_rect = None  # Trash button rect
         self.sync_button_rect = None  # Sync button rect
         self.image_report_button_rect = None  # Historic image report button rect
+        self.confidence_button_rect = None  # Historic confidence filter button rect
         self._image_report_dialog_root = None
         self._image_report_dialog_result = None
+        self._historic_confidence_dialog_root = None
+        self._historic_confidence_options = []
+        self._historic_confidence_angle_var = None
+        self._historic_confidence_class_var = None
+        self._historic_confidence_threshold_var = None
+        self._historic_confidence_rules_var = None
+        self._historic_confidence_summary_var = None
+        self._historic_confidence_summary_key = None
         self._verdict_analysis_dialog_root = None
         self._verdict_analysis_dialog_request = None
         self._verdict_analysis_rows = []
@@ -726,6 +735,348 @@ class DisplayWindow:
         except Exception as exc:
             self._close_historic_image_report_dialog()
             self._set_toast_message(f"Unable to open report dialog: {exc}", is_error=True)
+            return False
+
+    def get_historic_confidence_filter_options(self):
+        return self._require_controller().get_historic_confidence_filter_options()
+
+    def get_historic_confidence_filter_state(self):
+        return self._require_controller().get_historic_confidence_filter_state()
+
+    def get_historic_confidence_filter_summary(self, image_names):
+        return self._require_controller().get_historic_confidence_filter_summary(
+            image_names
+        )
+
+    def set_historic_confidence_threshold(self, class_name, angle, threshold):
+        return self._require_controller().set_historic_confidence_threshold(
+            class_name,
+            angle,
+            threshold,
+        )
+
+    def reset_historic_confidence_filters(self):
+        return self._require_controller().reset_historic_confidence_filters()
+
+    def _close_historic_confidence_dialog(self):
+        root = self._historic_confidence_dialog_root
+        self._historic_confidence_dialog_root = None
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    def _current_historic_batch_names(self):
+        if not self.historic_images:
+            return []
+        try:
+            return list(self.historic_images[self.historic_offset] or [])
+        except (IndexError, TypeError):
+            return []
+
+    def _refresh_historic_confidence_dialog(self, force=False):
+        root = self._historic_confidence_dialog_root
+        if root is None:
+            return
+        try:
+            state = self.get_historic_confidence_filter_state()
+            thresholds = state.get("thresholds") or {}
+            rules_key = tuple(
+                sorted(
+                    (
+                        str(class_name),
+                        str(angle),
+                        float(value),
+                    )
+                    for (class_name, angle), value in thresholds.items()
+                )
+            )
+            batch_names = tuple(self._current_historic_batch_names())
+            summary_key = (batch_names, bool(state.get("active")), rules_key)
+            if not force and summary_key == self._historic_confidence_summary_key:
+                return
+            self._historic_confidence_summary_key = summary_key
+
+            rules_var = self._historic_confidence_rules_var
+            if rules_var is not None:
+                if rules_key:
+                    rules_var.set(
+                        "Modified thresholds:  "
+                        + "    ".join(
+                            f"{class_name.upper()} / {angle.upper()}: {value:.2f}"
+                            for class_name, angle, value in rules_key
+                        )
+                    )
+                else:
+                    rules_var.set("Modified thresholds: none (all detections visible)")
+
+            summary = self.get_historic_confidence_filter_summary(batch_names)
+            summary_var = self._historic_confidence_summary_var
+            if summary_var is not None:
+                summary_var.set(
+                    f"Current batch detections — Visible: {summary.get('visible', 0)}    "
+                    f"Hidden: {summary.get('hidden', 0)}    "
+                    f"Total: {summary.get('total', 0)}"
+                )
+        except Exception as exc:
+            if self._historic_confidence_summary_var is not None:
+                self._historic_confidence_summary_var.set(
+                    f"Unable to refresh detection summary: {exc}"
+                )
+
+    def _pump_historic_confidence_dialog(self):
+        root = self._historic_confidence_dialog_root
+        if root is None:
+            return
+        try:
+            self._refresh_historic_confidence_dialog()
+            root.update_idletasks()
+            root.update()
+        except Exception:
+            self._historic_confidence_dialog_root = None
+
+    def _open_historic_confidence_dialog(self):
+        """Open the session-only confidence filter without blocking Historic."""
+        existing_root = self._historic_confidence_dialog_root
+        if existing_root is not None:
+            try:
+                existing_root.deiconify()
+                existing_root.lift()
+                existing_root.focus_force()
+            except Exception:
+                self._historic_confidence_dialog_root = None
+            else:
+                return True
+
+        try:
+            import tkinter as tk
+            from tkinter import messagebox, ttk
+
+            state = self.get_historic_confidence_filter_state()
+            options = list(self.get_historic_confidence_filter_options() or [])
+            existing_option_keys = {
+                (
+                    str(option.get("class_name") or "").strip().lower(),
+                    str(option.get("angle") or "").strip().lower(),
+                )
+                for option in options
+            }
+            for class_name, angle in (state.get("thresholds") or {}):
+                if (class_name, angle) not in existing_option_keys:
+                    options.append(
+                        {"angle": angle, "class_name": class_name}
+                    )
+            if not options:
+                self._set_toast_message(
+                    "No drawable model detections are available",
+                    is_error=True,
+                )
+                return False
+
+            classes_by_angle = {}
+            for option in options:
+                angle = str(option.get("angle") or "").strip().lower()
+                class_name = str(option.get("class_name") or "").strip().lower()
+                if angle and class_name:
+                    classes_by_angle.setdefault(angle, []).append(class_name)
+            for angle in classes_by_angle:
+                classes_by_angle[angle] = sorted(set(classes_by_angle[angle]))
+
+            configured = list((state.get("thresholds") or {}).keys())
+            if configured and configured[0][1] in classes_by_angle:
+                default_class, default_angle = configured[0]
+            else:
+                angles = list(classes_by_angle)
+                default_angle = "side" if "side" in classes_by_angle else angles[0]
+                default_class = classes_by_angle[default_angle][0]
+
+            root = tk.Tk()
+            self._historic_confidence_dialog_root = root
+            self._historic_confidence_options = options
+            self._historic_confidence_summary_key = None
+            root.title("Historic Confidence Filter")
+            root.geometry("660x360")
+            root.resizable(True, False)
+
+            outer = ttk.Frame(root, padding=12)
+            outer.pack(fill="both", expand=True)
+            ttk.Label(
+                outer,
+                text="Historic Confidence Filter",
+                font=("Segoe UI", 15, "bold"),
+            ).pack(anchor="w")
+            ttk.Label(
+                outer,
+                text=(
+                    "Temporarily show or hide saved detections by defect class and angle. "
+                    "No database values are changed."
+                ),
+                wraplength=620,
+            ).pack(anchor="w", pady=(2, 12))
+
+            controls = ttk.LabelFrame(outer, text="Detection threshold", padding=10)
+            controls.pack(fill="x")
+            angle_var = tk.StringVar(master=root, value=default_angle.upper())
+            class_var = tk.StringVar(master=root, value=default_class)
+            threshold_var = tk.DoubleVar(master=root, value=0.0)
+            self._historic_confidence_angle_var = angle_var
+            self._historic_confidence_class_var = class_var
+            self._historic_confidence_threshold_var = threshold_var
+
+            angle_labels = {angle.upper(): angle for angle in classes_by_angle}
+            angle_combo = ttk.Combobox(
+                controls,
+                textvariable=angle_var,
+                values=list(angle_labels),
+                state="readonly",
+                width=12,
+            )
+            class_combo = ttk.Combobox(
+                controls,
+                textvariable=class_var,
+                values=classes_by_angle[default_angle],
+                state="readonly",
+                width=24,
+            )
+            ttk.Label(controls, text="Angle:").grid(row=0, column=0, sticky="w")
+            angle_combo.grid(row=0, column=1, padx=(6, 18), sticky="w")
+            ttk.Label(controls, text="Defect class:").grid(row=0, column=2, sticky="w")
+            class_combo.grid(row=0, column=3, padx=(6, 0), sticky="ew")
+
+            def selected_pair():
+                return (
+                    str(class_var.get() or "").strip().lower(),
+                    angle_labels.get(angle_var.get(), ""),
+                )
+
+            def load_selected_threshold():
+                class_name, angle = selected_pair()
+                current_state = self.get_historic_confidence_filter_state()
+                value = (current_state.get("thresholds") or {}).get(
+                    (class_name, angle),
+                    0.0,
+                )
+                threshold_var.set(float(value))
+
+            def refresh_classes(_event=None):
+                selected_angle = angle_labels.get(angle_var.get(), "")
+                available_classes = classes_by_angle.get(selected_angle, [])
+                class_combo.configure(values=available_classes)
+                if class_var.get() not in available_classes:
+                    class_var.set(available_classes[0] if available_classes else "")
+                load_selected_threshold()
+
+            def commit_threshold(raw_value=None):
+                class_name, angle = selected_pair()
+                try:
+                    value = threshold_var.get() if raw_value is None else float(raw_value)
+                    state_after = self.set_historic_confidence_threshold(
+                        class_name,
+                        angle,
+                        value,
+                    )
+                    normalized = (state_after.get("thresholds") or {}).get(
+                        (class_name, angle),
+                        0.0,
+                    )
+                    threshold_var.set(float(normalized))
+                    self._historic_confidence_summary_key = None
+                    self._refresh_historic_confidence_dialog(force=True)
+                except Exception as exc:
+                    load_selected_threshold()
+                    messagebox.showerror(
+                        "Historic Confidence Filter",
+                        str(exc),
+                        parent=root,
+                    )
+
+            angle_combo.bind("<<ComboboxSelected>>", refresh_classes)
+            class_combo.bind("<<ComboboxSelected>>", lambda _event: load_selected_threshold())
+
+            ttk.Label(controls, text="Confidence:").grid(
+                row=1,
+                column=0,
+                pady=(14, 0),
+                sticky="w",
+            )
+            ttk.Scale(
+                controls,
+                from_=0.0,
+                to=1.0,
+                variable=threshold_var,
+                command=commit_threshold,
+            ).grid(
+                row=1,
+                column=1,
+                columnspan=2,
+                padx=(6, 12),
+                pady=(14, 0),
+                sticky="ew",
+            )
+            spinbox = ttk.Spinbox(
+                controls,
+                from_=0.0,
+                to=1.0,
+                increment=0.01,
+                textvariable=threshold_var,
+                width=8,
+                format="%.2f",
+                command=commit_threshold,
+            )
+            spinbox.grid(row=1, column=3, pady=(14, 0), sticky="e")
+            spinbox.bind("<Return>", lambda _event: commit_threshold())
+            spinbox.bind("<FocusOut>", lambda _event: commit_threshold())
+            controls.columnconfigure(3, weight=1)
+
+            rules_var = tk.StringVar(master=root)
+            summary_var = tk.StringVar(master=root)
+            self._historic_confidence_rules_var = rules_var
+            self._historic_confidence_summary_var = summary_var
+            ttk.Label(outer, textvariable=rules_var, wraplength=620).pack(
+                anchor="w",
+                pady=(12, 4),
+            )
+            ttk.Label(
+                outer,
+                textvariable=summary_var,
+                font=("Segoe UI", 10, "bold"),
+            ).pack(anchor="w", pady=(0, 10))
+
+            def reset_all():
+                self.reset_historic_confidence_filters()
+                threshold_var.set(0.0)
+                self._historic_confidence_summary_key = None
+                self._refresh_historic_confidence_dialog(force=True)
+
+            buttons = ttk.Frame(outer)
+            buttons.pack(fill="x", side="bottom")
+            ttk.Button(buttons, text="Close", command=self._close_historic_confidence_dialog).pack(
+                side="right"
+            )
+            ttk.Button(buttons, text="Reset all", command=reset_all).pack(
+                side="right",
+                padx=(0, 8),
+            )
+
+            load_selected_threshold()
+            self._refresh_historic_confidence_dialog(force=True)
+            root.protocol("WM_DELETE_WINDOW", self._close_historic_confidence_dialog)
+            root.bind("<Escape>", lambda _event: self._close_historic_confidence_dialog())
+            root.update_idletasks()
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            root.deiconify()
+            root.lift()
+            return True
+        except Exception as exc:
+            self._close_historic_confidence_dialog()
+            self._set_toast_message(
+                f"Unable to open confidence filter: {exc}",
+                is_error=True,
+            )
             return False
 
     def queue_historic_verdict_analysis(self, rows, filters=None):
@@ -3272,6 +3623,12 @@ class DisplayWindow:
                     self._open_historic_image_report_dialog()
                     return
 
+            if self.confidence_button_rect and self.historic_mode and not self.show_no_images_dialog:
+                bx, by, bw, bh = self.confidence_button_rect
+                if bx <= x <= bx + bw and by <= y <= by + bh:
+                    self._open_historic_confidence_dialog()
+                    return
+
             if self.import_button_rect and not self.show_no_images_dialog:
                 bx, by, bw, bh = self.import_button_rect
                 if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -3698,6 +4055,78 @@ class DisplayWindow:
             thickness,
         )
 
+        return canvas
+
+    def draw_confidence_button(self, canvas):
+        """Draw the session-only confidence filter button in Historic."""
+        button_width = 180
+        button_height = 60
+        margin_right = 30
+        margin_bottom = 10
+        spacing = 20
+
+        x_reset = self.width - button_width - margin_right
+        x_sync = x_reset - spacing - button_width
+        x_export = x_sync - spacing - button_width
+        x_import = x_export - spacing - button_width
+        x_report = x_import - spacing - button_width
+        x_confidence = x_report - spacing - button_width
+        y_button = self.height - button_height - margin_bottom
+        self.confidence_button_rect = (
+            x_confidence,
+            y_button,
+            button_width,
+            button_height,
+        )
+
+        is_hovered = self._is_point_in_rect(
+            self.mouse_x,
+            self.mouse_y,
+            self.confidence_button_rect,
+        )
+        is_pressed = is_hovered and self.mouse_button_down
+        scale_factor = 0.95 if is_pressed else (1.08 if is_hovered else 1.0)
+        x_draw, y_draw, w_draw, h_draw = self._scale_rect(
+            self.confidence_button_rect,
+            scale_factor,
+        )
+
+        try:
+            active = bool(self.get_historic_confidence_filter_state().get("active"))
+        except Exception:
+            active = False
+        fill_color = (35, 150, 225) if active else (95, 95, 95)
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            fill_color,
+            -1,
+        )
+        cv2.rectangle(
+            canvas,
+            (x_draw, y_draw),
+            (x_draw + w_draw, y_draw + h_draw),
+            (0, 0, 0),
+            3 if active else 2,
+        )
+
+        label = "CONFIDENCE ON" if active else "CONFIDENCE"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.72 if active else 0.78
+        thickness = 2
+        text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+        text_x = x_draw + (w_draw - text_size[0]) // 2
+        text_y = y_draw + (h_draw + text_size[1]) // 2
+        cv2.putText(
+            canvas,
+            label,
+            (text_x, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+        )
         return canvas
     
     def draw_back_button(self, canvas):
@@ -5497,6 +5926,7 @@ class DisplayWindow:
         # Loop until it's time to update
         while True:
             self._pump_historic_image_report_dialog()
+            self._pump_historic_confidence_dialog()
             if hasattr(cv2, "waitKeyEx"):
                 key_ex = cv2.waitKeyEx(100)
             else:
@@ -5605,6 +6035,7 @@ class DisplayWindow:
         """Close the display window"""
         self._close_historic_image_report_dialog()
         self._close_historic_verdict_analysis_dialog(confirm=False)
+        self._close_historic_confidence_dialog()
 
         def _stop_worker(process_attr, stop_attr):
             stop_event = getattr(self, stop_attr, None)
@@ -6309,6 +6740,7 @@ class DisplayWindow:
             canvas = self.draw_back_button(canvas)
             canvas = self.draw_info_icon(canvas)
             canvas = self.draw_trash_button(canvas)
+            canvas = self.draw_confidence_button(canvas)
             canvas = self.draw_image_report_button(canvas)
             canvas = self.draw_import_button(canvas)
             canvas = self.draw_export_button(canvas)

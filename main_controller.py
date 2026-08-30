@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import time
@@ -655,6 +656,10 @@ class MainController:
         self.historic_render_worker_thread = None
         self.historic_render_cache = OrderedDict()
         self.historic_render_cache_max_items = 32
+        self.historic_confidence_thresholds = {}
+        self.historic_confidence_filter_active = False
+        self.historic_confidence_raw_batch_key = None
+        self.historic_confidence_raw_overlays = {}
         self.daily_export_maintenance = DailyExportMaintenance(self)
 
         if hasattr(self.display, "set_controller"):
@@ -3957,10 +3962,18 @@ class MainController:
             if clear_cache:
                 self.historic_render_cache.clear()
 
-    def _build_historic_render_plan(self, local_path, batch_images, overlays_by_image):
+    def _build_historic_render_plan(
+        self,
+        local_path,
+        batch_images,
+        overlays_by_image,
+        confidence_filter_active=None,
+    ):
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
         annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
+        if confidence_filter_active is None:
+            confidence_filter_active = self.historic_confidence_filter_active
 
         items = {}
         work_items = []
@@ -3973,7 +3986,59 @@ class MainController:
             historic_exists = self.file_manager.exists(historic_file)
             annotated_exists = self.file_manager.exists(annotated_file)
 
-            if has_db_coordinates:
+            if confidence_filter_active:
+                if has_db_coordinates and historic_exists:
+                    cache_key = self._get_historic_render_cache_key(
+                        img_name,
+                        historic_file,
+                        overlays,
+                    )
+                    cached_image = self._get_historic_render_cache(cache_key)
+                    if cached_image is not None:
+                        item = {
+                            "img_name": img_name,
+                            "status": "ready",
+                            "source": "db_coordinates+historic_filtered",
+                            "path": historic_file,
+                            "fallback_source": "historic_filtered",
+                            "fallback_path": historic_file,
+                            "prepared_image": cached_image,
+                        }
+                    else:
+                        item = {
+                            "img_name": img_name,
+                            "status": "loading",
+                            "source": "db_coordinates+historic_filtered",
+                            "path": historic_file,
+                            "fallback_source": "historic_filtered",
+                            "fallback_path": historic_file,
+                        }
+                        work_items.append(
+                            {
+                                "img_name": img_name,
+                                "path": historic_file,
+                                "overlays": overlays,
+                                "cache_key": cache_key,
+                                "tile_size": tile_size,
+                                "fallback_source": "historic_filtered",
+                                "fallback_path": historic_file,
+                            }
+                        )
+                elif historic_exists:
+                    item = {
+                        "img_name": img_name,
+                        "status": "ready",
+                        "source": "historic_filtered",
+                        "path": historic_file,
+                    }
+                else:
+                    item = {
+                        "img_name": img_name,
+                        "status": "missing",
+                        "source": "missing_historic_filtered",
+                        "path": historic_file,
+                    }
+            elif has_db_coordinates:
                 if historic_exists:
                     fallback_source = "annotated_fallback" if annotated_exists else "historic"
                     fallback_path = annotated_file if annotated_exists else historic_file
@@ -4096,7 +4161,10 @@ class MainController:
                     if generation_id != self.historic_render_generation_id:
                         return
                     current = self.historic_render_items.get(img_name)
-                    if not current or current.get("source") != "db_coordinates+historic":
+                    if not current or current.get("source") not in (
+                        "db_coordinates+historic",
+                        "db_coordinates+historic_filtered",
+                    ):
                         continue
                     self.historic_render_items[img_name] = {
                         **current,
@@ -4158,12 +4226,24 @@ class MainController:
                 render_sources = [f"{item['img_name']}={item.get('source')}" for item in items]
                 return items, render_sources
 
-        overlays_by_image = self.get_model_overlays_for_images(batch_images)
-        overlay_signature = self._overlay_signature(overlays_by_image)
+        raw_overlays_by_image = self.get_model_overlays_for_images(batch_images)
+        with self.historic_render_lock:
+            self.historic_confidence_raw_batch_key = tuple(batch_images)
+            self.historic_confidence_raw_overlays = raw_overlays_by_image
+        overlays_by_image, _summary = self.filter_historic_model_overlays(
+            raw_overlays_by_image
+        )
+        overlay_signature = self._overlay_signature(
+            {
+                "confidence_filter_active": self.historic_confidence_filter_active,
+                "overlays": overlays_by_image,
+            }
+        )
         items, work_items, render_sources = self._build_historic_render_plan(
             local_path,
             batch_images,
             overlays_by_image,
+            confidence_filter_active=self.historic_confidence_filter_active,
         )
 
         with self.historic_render_lock:
@@ -5452,6 +5532,177 @@ class MainController:
         d._db_result_cache[img_name] = result_text
         return result_text
 
+    @staticmethod
+    def _historic_confidence_angle(img_name):
+        lower_name = str(img_name or "").strip().lower()
+        for angle in ("side", "diag", "front"):
+            if angle in lower_name:
+                return angle
+        return ""
+
+    @staticmethod
+    def _normalize_historic_confidence_threshold(value):
+        try:
+            threshold = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Confidence threshold must be a number between 0 and 1") from exc
+        if not math.isfinite(threshold) or threshold < 0.0 or threshold > 1.0:
+            raise ValueError("Confidence threshold must be between 0 and 1")
+        return round(threshold, 2)
+
+    def get_historic_confidence_filter_options(self):
+        """Return drawable defect/angle combinations available in model_results."""
+        db = getattr(self.display, "db", None)
+        if not db:
+            return []
+        try:
+            rows = db.fetch(
+                """
+                SELECT DISTINCT angle, class_name
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN LOWER(img_name) LIKE '%side%' THEN 'side'
+                            WHEN LOWER(img_name) LIKE '%diag%' THEN 'diag'
+                            WHEN LOWER(img_name) LIKE '%front%' THEN 'front'
+                        END AS angle,
+                        LOWER(TRIM(class_name)) AS class_name
+                    FROM model_results
+                    WHERE coordinates IS NOT NULL
+                      AND (
+                          geometry_type IS NULL
+                          OR LOWER(TRIM(geometry_type)) <> 'classification'
+                      )
+                ) drawable_filters
+                WHERE angle IS NOT NULL
+                  AND class_name IS NOT NULL
+                  AND class_name <> ''
+                  AND class_name <> 'ok'
+                ORDER BY angle, class_name
+                """
+            )
+        except Exception as exc:
+            self.logger.warn(
+                f"[DB] Error querying historic confidence options: {exc}",
+                allow_repeat=True,
+            )
+            return []
+
+        options = []
+        seen = set()
+        angle_order = {"side": 0, "diag": 1, "front": 2}
+        for row in rows or []:
+            if not hasattr(row, "get"):
+                continue
+            angle = str(row.get("angle") or "").strip().lower()
+            class_name = str(row.get("class_name") or "").strip().lower()
+            key = (class_name, angle)
+            if angle not in angle_order or not class_name or key in seen:
+                continue
+            seen.add(key)
+            options.append({"angle": angle, "class_name": class_name})
+        options.sort(
+            key=lambda item: (
+                angle_order.get(item["angle"], 99),
+                item["class_name"],
+            )
+        )
+        return options
+
+    def get_historic_confidence_filter_state(self):
+        return {
+            "active": bool(self.historic_confidence_filter_active),
+            "thresholds": dict(self.historic_confidence_thresholds),
+        }
+
+    def set_historic_confidence_threshold(self, class_name, angle, threshold):
+        normalized_class = str(class_name or "").strip().lower()
+        normalized_angle = str(angle or "").strip().lower()
+        if not normalized_class:
+            raise ValueError("Defect class is required")
+        if normalized_angle not in ("side", "diag", "front"):
+            raise ValueError("Angle must be SIDE, DIAG, or FRONT")
+
+        normalized_threshold = self._normalize_historic_confidence_threshold(
+            threshold
+        )
+        key = (normalized_class, normalized_angle)
+        previous = self.historic_confidence_thresholds.get(key, 0.0)
+        if normalized_threshold > 0.0:
+            self.historic_confidence_thresholds[key] = normalized_threshold
+        else:
+            self.historic_confidence_thresholds.pop(key, None)
+        self.historic_confidence_filter_active = bool(
+            self.historic_confidence_thresholds
+        )
+        if previous != normalized_threshold:
+            self._clear_historic_render_state(clear_cache=False)
+        return self.get_historic_confidence_filter_state()
+
+    def reset_historic_confidence_filters(self):
+        had_filters = bool(
+            self.historic_confidence_filter_active
+            or self.historic_confidence_thresholds
+        )
+        self.historic_confidence_thresholds.clear()
+        self.historic_confidence_filter_active = False
+        if had_filters:
+            self._clear_historic_render_state(clear_cache=False)
+        return self.get_historic_confidence_filter_state()
+
+    def filter_historic_model_overlays(self, overlays_by_image):
+        """Apply the session-only historic filter without changing raw DB rows."""
+        source = overlays_by_image or {}
+        if not self.historic_confidence_filter_active:
+            visible = sum(len(rows or []) for rows in source.values())
+            return dict(source), {"visible": visible, "hidden": 0, "total": visible}
+
+        filtered = {}
+        visible = 0
+        hidden = 0
+        for img_name, overlays in source.items():
+            angle = self._historic_confidence_angle(img_name)
+            visible_rows = []
+            for overlay in overlays or []:
+                class_name = str(overlay.get("class_name") or "").strip().lower()
+                threshold = self.historic_confidence_thresholds.get(
+                    (class_name, angle),
+                    0.0,
+                )
+                try:
+                    confidence = round(float(overlay.get("confidence")), 2)
+                    valid_confidence = math.isfinite(confidence)
+                except (TypeError, ValueError):
+                    valid_confidence = False
+                    confidence = None
+                if valid_confidence and confidence >= threshold:
+                    visible_rows.append(overlay)
+                    visible += 1
+                else:
+                    hidden += 1
+            if visible_rows:
+                filtered[img_name] = visible_rows
+        return filtered, {
+            "visible": visible,
+            "hidden": hidden,
+            "total": visible + hidden,
+        }
+
+    def get_historic_confidence_filter_summary(self, image_names):
+        batch_key = tuple(image_names or [])
+        with self.historic_render_lock:
+            if batch_key == self.historic_confidence_raw_batch_key:
+                raw_overlays = self.historic_confidence_raw_overlays
+            else:
+                raw_overlays = None
+        if raw_overlays is None:
+            raw_overlays = self.get_model_overlays_for_images(batch_key)
+            with self.historic_render_lock:
+                self.historic_confidence_raw_batch_key = batch_key
+                self.historic_confidence_raw_overlays = raw_overlays
+        _filtered, summary = self.filter_historic_model_overlays(raw_overlays)
+        return summary
+
     def get_model_overlays_for_images(self, image_names):
         d = self.display
         names = [
@@ -5596,6 +5847,14 @@ class MainController:
             self.next_historic_batch()
         elif action == "prev_historic_batch":
             self.prev_historic_batch()
+        elif action == "set_historic_confidence_threshold":
+            self.set_historic_confidence_threshold(
+                payload.get("class_name"),
+                payload.get("angle"),
+                payload.get("threshold"),
+            )
+        elif action == "reset_historic_confidence_filters":
+            self.reset_historic_confidence_filters()
         elif action == "open_piece_date_dialog":
             self._close_piece_number_dialog(clear_input=False)
             d.show_piece_date_dialog = True

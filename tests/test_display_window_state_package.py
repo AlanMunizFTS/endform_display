@@ -49,6 +49,47 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         action_handler.assert_not_called()
 
     @patch("display_window.get_db_connection")
+    def test_confidence_button_click_opens_nonblocking_dialog(self, mock_get_db_connection):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), action_handler=action_handler)
+        display.historic_mode = True
+        display.confidence_button_rect = (200, 200, 180, 60)
+
+        with patch.object(
+            display,
+            "_open_historic_confidence_dialog",
+            return_value=True,
+        ) as open_dialog:
+            display.mouse_callback(
+                cv2.EVENT_LBUTTONDOWN,
+                220,
+                220,
+                cv2.EVENT_FLAG_LBUTTON,
+                None,
+            )
+
+        open_dialog.assert_called_once_with()
+        action_handler.assert_not_called()
+
+    @patch("display_window.get_db_connection")
+    def test_closing_confidence_dialog_keeps_controller_filters(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        controller = MagicMock()
+        root = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock(), controller=controller)
+        display._historic_confidence_dialog_root = root
+
+        display._close_historic_confidence_dialog()
+
+        root.destroy.assert_called_once_with()
+        controller.reset_historic_confidence_filters.assert_not_called()
+        self.assertIsNone(display._historic_confidence_dialog_root)
+
+    @patch("display_window.get_db_connection")
     def test_image_report_dialog_result_dispatches_action(self, mock_get_db_connection):
         mock_get_db_connection.return_value = MagicMock()
         action_handler = MagicMock()
