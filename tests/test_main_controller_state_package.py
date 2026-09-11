@@ -271,6 +271,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
                     class_name="wrinkle",
                     defect_class="wrinkle",
                     angle="diag",
+                    confidence_thresholds={"diag": 0.43},
                 )
 
             export_mock.assert_called_once()
@@ -279,6 +280,10 @@ class TestMainControllerStatePackage(unittest.TestCase):
             self.assertEqual(export_mock.call_args.kwargs["defect_class"], "wrinkle")
             self.assertEqual(export_mock.call_args.kwargs["angle"], "diag")
             self.assertEqual(export_mock.call_args.kwargs["pieces_per_group"], 4)
+            self.assertEqual(
+                export_mock.call_args.kwargs["confidence_thresholds"],
+                {"diag": 0.43},
+            )
             controller.stop_historic_download_worker.assert_called_once_with()
             controller.stop_remote_db_polling.assert_called_once_with()
             controller.start_historic_download_on_startup.assert_called_once_with(
@@ -340,6 +345,7 @@ class TestMainControllerStatePackage(unittest.TestCase):
                 "angle": "side+diag",
                 "required_angles": ["side", "diag"],
                 "confidence_thresholds": {"side": 0.0, "diag": 0.0},
+                "pieces_per_group": 4,
             },
         )
         self.assertFalse(display.sync_in_progress)

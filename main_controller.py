@@ -660,6 +660,9 @@ class MainController:
         self.historic_confidence_filter_active = False
         self.historic_confidence_raw_batch_key = None
         self.historic_confidence_raw_overlays = {}
+        self.historic_confidence_results_batch_key = None
+        self.historic_confidence_raw_results = {}
+        self.historic_confidence_results_checked_at = 0.0
         self.daily_export_maintenance = DailyExportMaintenance(self)
 
         if hasattr(self.display, "set_controller"):
@@ -2102,6 +2105,7 @@ class MainController:
         defect_class="wrinkle",
         angle="side",
         pieces_per_group=4,
+        confidence_thresholds=None,
     ):
         d = self.display
         if getattr(d, "sync_in_progress", False) or getattr(d, "reset_in_progress", False):
@@ -2111,10 +2115,19 @@ class MainController:
         angle = str(angle or "side").strip().lower().replace(" ", "")
         if angle == "diag+side":
             angle = "side+diag"
+        if confidence_thresholds is not None:
+            confidence_thresholds = dict(confidence_thresholds)
         angle_label = " + ".join(part.upper() for part in angle.split("+"))
+        threshold_label = " / ".join(
+            f"{threshold_angle.upper()} {float(threshold_value):.2f}"
+            for threshold_angle, threshold_value in (
+                confidence_thresholds or {}
+            ).items()
+        )
         report_helper_text = (
             f"Building four historic pieces per Excel row. "
             f"Filter: {angle_label} / {defect_class}."
+            + (f" Thresholds: {threshold_label}." if threshold_label else "")
         )
 
         self.dataset_transfer_active = True
@@ -2152,6 +2165,7 @@ class MainController:
                     defect_class=defect_class,
                     angle=angle,
                     pieces_per_group=pieces_per_group,
+                    confidence_thresholds=confidence_thresholds,
                     progress_callback=_report_progress_cb,
                 )
                 report_name = os.path.basename(str(report_path))
@@ -2255,6 +2269,7 @@ class MainController:
                         "confidence_thresholds"
                     )
                     or {},
+                    "pieces_per_group": verdict_data.get("pieces_per_group") or 4,
                 }
                 queue_analysis = getattr(
                     d,
@@ -3968,12 +3983,14 @@ class MainController:
         batch_images,
         overlays_by_image,
         confidence_filter_active=None,
+        projected_results=None,
     ):
         historic_temp_dir = self.file_manager.join(local_path, HISTORIC_SUBDIR_NAME)
         annotated_temp_dir = self.file_manager.join(local_path, ANNOTATED_SUBDIR_NAME)
         tile_size = getattr(self.display, "DEFAULT_TILE_SIZE", 360)
         if confidence_filter_active is None:
             confidence_filter_active = self.historic_confidence_filter_active
+        projected_results = projected_results or {}
 
         items = {}
         work_items = []
@@ -4111,6 +4128,8 @@ class MainController:
                     "path": historic_file,
                 }
 
+            if confidence_filter_active and img_name in projected_results:
+                item["projected_result"] = projected_results[img_name]
             items[img_name] = item
             render_sources.append(f"{img_name}={item['source']}")
 
@@ -4233,10 +4252,19 @@ class MainController:
         overlays_by_image, _summary = self.filter_historic_model_overlays(
             raw_overlays_by_image
         )
+        projected_results = {}
+        if self.historic_confidence_filter_active:
+            confidence_summary = self.get_historic_confidence_filter_summary(
+                batch_images
+            )
+            projected_results = dict(
+                confidence_summary.get("projected_results") or {}
+            )
         overlay_signature = self._overlay_signature(
             {
                 "confidence_filter_active": self.historic_confidence_filter_active,
                 "overlays": overlays_by_image,
+                "projected_results": projected_results,
             }
         )
         items, work_items, render_sources = self._build_historic_render_plan(
@@ -4244,6 +4272,7 @@ class MainController:
             batch_images,
             overlays_by_image,
             confidence_filter_active=self.historic_confidence_filter_active,
+            projected_results=projected_results,
         )
 
         with self.historic_render_lock:
@@ -5551,7 +5580,7 @@ class MainController:
         return round(threshold, 2)
 
     def get_historic_confidence_filter_options(self):
-        """Return drawable defect/angle combinations available in model_results."""
+        """Return thresholdable defect/angle combinations in model_results."""
         db = getattr(self.display, "db", None)
         if not db:
             return []
@@ -5569,11 +5598,8 @@ class MainController:
                         LOWER(TRIM(class_name)) AS class_name
                     FROM model_results
                     WHERE coordinates IS NOT NULL
-                      AND (
-                          geometry_type IS NULL
-                          OR LOWER(TRIM(geometry_type)) <> 'classification'
-                      )
-                ) drawable_filters
+                       OR LOWER(TRIM(COALESCE(geometry_type, ''))) = 'classification'
+                ) thresholdable_filters
                 WHERE angle IS NOT NULL
                   AND class_name IS NOT NULL
                   AND class_name <> ''
@@ -5690,18 +5716,105 @@ class MainController:
 
     def get_historic_confidence_filter_summary(self, image_names):
         batch_key = tuple(image_names or [])
+        now = time.monotonic()
         with self.historic_render_lock:
-            if batch_key == self.historic_confidence_raw_batch_key:
-                raw_overlays = self.historic_confidence_raw_overlays
+            cache_is_current = (
+                batch_key == self.historic_confidence_results_batch_key
+                and now - self.historic_confidence_results_checked_at
+                < self.historic_render_overlay_refresh_sec
+            )
+            if cache_is_current:
+                raw_results = self.historic_confidence_raw_results
             else:
-                raw_overlays = None
-        if raw_overlays is None:
-            raw_overlays = self.get_model_overlays_for_images(batch_key)
-            with self.historic_render_lock:
-                self.historic_confidence_raw_batch_key = batch_key
-                self.historic_confidence_raw_overlays = raw_overlays
-        _filtered, summary = self.filter_historic_model_overlays(raw_overlays)
+                raw_results = None
+        if raw_results is None:
+            raw_results = self.get_model_results_for_images(batch_key)
+            if raw_results is not None:
+                with self.historic_render_lock:
+                    self.historic_confidence_results_batch_key = batch_key
+                    self.historic_confidence_raw_results = raw_results
+                    self.historic_confidence_results_checked_at = now
+        image_name_set = {
+            str(name or "").strip()
+            for name in batch_key
+            if str(name or "").strip()
+        }
+        if raw_results is None:
+            return {
+                "visible": 0,
+                "hidden": 0,
+                "total": 0,
+                "images": len(image_name_set),
+                "projected_nok": 0,
+                "projected_ok": 0,
+                "projected_results": {},
+                "available": False,
+            }
+        filtered, summary = self.filter_historic_model_overlays(raw_results)
+        projected_nok_names = image_name_set.intersection(filtered)
+        projected_results = {
+            image_name: "NOK" if image_name in projected_nok_names else "OK"
+            for image_name in image_name_set
+        }
+        summary.update(
+            {
+                "images": len(image_name_set),
+                "projected_nok": len(projected_nok_names),
+                "projected_ok": len(image_name_set) - len(projected_nok_names),
+                "projected_results": projected_results,
+                "available": True,
+            }
+        )
         return summary
+
+    def get_model_results_for_images(self, image_names):
+        """Return all non-OK model results, including classification rows."""
+        d = self.display
+        names = [
+            str(name or "").strip()
+            for name in (image_names or [])
+            if str(name or "").strip()
+        ]
+        if not names:
+            return {}
+        if not d.db:
+            return None
+
+        try:
+            rows = d.db.fetch(
+                "SELECT img_name, class_name, confidence, model_name, geometry_type, "
+                "coordinates, image_width, image_height "
+                "FROM model_results "
+                "WHERE img_name = ANY(%s) "
+                "AND class_name IS NOT NULL "
+                "AND LOWER(TRIM(class_name)) <> 'ok' "
+                "ORDER BY confidence DESC, created_at DESC, id DESC",
+                (names,),
+            )
+        except Exception as exc:
+            self.logger.warn(
+                f"[DB] Error querying model results: {exc}",
+                allow_repeat=True,
+            )
+            return None
+
+        results_by_name = defaultdict(list)
+        for row in rows or []:
+            img_name = row.get("img_name")
+            if not img_name:
+                continue
+            results_by_name[img_name].append(
+                {
+                    "class_name": row.get("class_name"),
+                    "confidence": row.get("confidence"),
+                    "model_name": row.get("model_name"),
+                    "geometry_type": row.get("geometry_type"),
+                    "coordinates": row.get("coordinates"),
+                    "image_width": row.get("image_width"),
+                    "image_height": row.get("image_height"),
+                }
+            )
+        return dict(results_by_name)
 
     def get_model_overlays_for_images(self, image_names):
         d = self.display
@@ -6017,7 +6130,8 @@ class MainController:
                 class_name=payload.get("defect_class") or "wrinkle",
                 defect_class=payload.get("defect_class") or "wrinkle",
                 angle=payload.get("angle") or "side",
-                pieces_per_group=4,
+                pieces_per_group=payload.get("pieces_per_group") or 4,
+                confidence_thresholds=payload.get("confidence_thresholds"),
             )
         elif action == "open_historic_verdict_analysis":
             self.start_open_historic_verdict_analysis_async(

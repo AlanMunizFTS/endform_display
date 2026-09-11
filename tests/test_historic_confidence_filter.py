@@ -113,10 +113,11 @@ class TestHistoricConfidenceFilter(unittest.TestCase):
         controller.reset_historic_confidence_filters()
         self.assertFalse(controller.get_historic_confidence_filter_state()["active"])
 
-    def test_options_include_only_normalized_drawable_defects(self):
+    def test_options_include_normalized_drawable_and_classify_defects(self):
         db = MagicMock()
         db.fetch.return_value = [
             {"angle": "side", "class_name": "Wrinkle"},
+            {"angle": "side", "class_name": "Nylon_In_Form"},
             {"angle": "diag", "class_name": "dent"},
             {"angle": "side", "class_name": "wrinkle"},
             {"angle": None, "class_name": "ignored"},
@@ -128,6 +129,7 @@ class TestHistoricConfidenceFilter(unittest.TestCase):
         self.assertEqual(
             options,
             [
+                {"angle": "side", "class_name": "nylon_in_form"},
                 {"angle": "side", "class_name": "wrinkle"},
                 {"angle": "diag", "class_name": "dent"},
             ],
@@ -135,6 +137,62 @@ class TestHistoricConfidenceFilter(unittest.TestCase):
         query = db.fetch.call_args.args[0]
         self.assertIn("coordinates IS NOT NULL", query)
         self.assertIn("classification", query)
+
+    def test_classify_threshold_summary_projects_image_ok_and_nok(self):
+        image_names = [
+            "100_Cam1_Side_NOK.png",
+            "101_Cam1_Side_NOK.png",
+            "102_Cam1_Side_OK.png",
+        ]
+        db = MagicMock()
+        db.fetch.return_value = [
+            {
+                "img_name": image_names[0],
+                "class_name": "Nylon_In_Form",
+                "confidence": 0.82,
+                "model_name": "nylon_side_cls.pt",
+                "geometry_type": "classification",
+                "coordinates": None,
+                "image_width": 640,
+                "image_height": 640,
+            },
+            {
+                "img_name": image_names[1],
+                "class_name": "Nylon_In_Form",
+                "confidence": 0.54,
+                "model_name": "nylon_side_cls.pt",
+                "geometry_type": "classification",
+                "coordinates": None,
+                "image_width": 640,
+                "image_height": 640,
+            },
+        ]
+        controller = self._build_controller(db=db)
+        controller.set_historic_confidence_threshold("nylon_in_form", "side", 0.70)
+
+        summary = controller.get_historic_confidence_filter_summary(image_names)
+
+        self.assertEqual(
+            summary,
+            {
+                "visible": 1,
+                "hidden": 1,
+                "total": 2,
+                "images": 3,
+                "projected_nok": 1,
+                "projected_ok": 2,
+                "projected_results": {
+                    image_names[0]: "NOK",
+                    image_names[1]: "OK",
+                    image_names[2]: "OK",
+                },
+                "available": True,
+            },
+        )
+        query = db.fetch.call_args.args[0]
+        self.assertIn("FROM model_results", query)
+        self.assertNotIn("coordinates IS NOT NULL", query)
+        self.assertIn("LOWER(TRIM(class_name)) <> 'ok'", query)
 
     def test_active_filter_uses_original_historic_instead_of_annotated_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -235,6 +293,7 @@ class TestHistoricConfidenceFilter(unittest.TestCase):
 
             self.assertEqual(second[0]["source"], "db_coordinates+historic_filtered")
             self.assertEqual(second[0]["status"], "ready")
+            self.assertEqual(second[0]["projected_result"], "NOK")
             self.assertGreater(int(second[0]["prepared_image"].sum()), 0)
             controller.display._draw_model_overlays.assert_called_once()
 

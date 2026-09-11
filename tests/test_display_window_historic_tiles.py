@@ -105,6 +105,33 @@ class TestDisplayWindowHistoricTiles(unittest.TestCase):
         badge_region = display.image[258:285, 365:395]
         self.assertGreater(int(badge_region[:, :, 2].mean()), 100)
 
+    def test_show_image_grid_uses_projected_confidence_status_badge(self):
+        display = self._build_display()
+        display.historic_mode = True
+        img_name = "118610000000000000001_Cam1_Side1_NOK.png"
+        display.historic_images = [[img_name]]
+        display._draw_filename_status_badge = MagicMock()
+
+        display.show_image_grid(
+            [
+                {
+                    "img_name": img_name,
+                    "status": "ready",
+                    "source": "historic_filtered",
+                    "prepared_image": np.zeros((100, 100, 3), dtype=np.uint8),
+                    "projected_result": "OK",
+                }
+            ],
+            cols=2,
+            rows=1,
+            img_size=100,
+            padding=10,
+        )
+
+        badge_call = display._draw_filename_status_badge.call_args
+        self.assertEqual(badge_call.args[4], "OK")
+        self.assertEqual(badge_call.kwargs["label_prefix"], "FILTER")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

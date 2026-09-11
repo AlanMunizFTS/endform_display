@@ -241,9 +241,48 @@ def _has_confidence_above(values, confidence_threshold):
     return any(value > confidence_threshold for value in _float_values(values))
 
 
-def has_high_confidence_detection(result, confidence_threshold):
+def _classification_prediction(result, model=None):
+    """Return the top-1 classification as ``(name, confidence)``."""
+    probs = getattr(result, "probs", None) if result is not None else None
+    if probs is None:
+        return None
+
+    probabilities = _float_values(getattr(probs, "data", None))
+    class_id = getattr(probs, "top1", None)
+    if class_id is None:
+        if not probabilities:
+            return None
+        class_id = int(np.argmax(probabilities))
+    else:
+        try:
+            class_id = int(class_id)
+        except (TypeError, ValueError):
+            return None
+
+    confidence_values = _float_values(getattr(probs, "top1conf", None))
+    if confidence_values:
+        confidence = confidence_values[0]
+    elif 0 <= class_id < len(probabilities):
+        confidence = probabilities[class_id]
+    else:
+        return None
+
+    names = getattr(result, "names", None) or getattr(model, "names", None) or {}
+    return _class_name(names, class_id), confidence
+
+
+def _is_ok_class(class_name):
+    return str(class_name or "").strip().casefold() == "ok"
+
+
+def has_high_confidence_detection(result, confidence_threshold, model=None):
     if result is None:
         return False
+
+    classification = _classification_prediction(result, model=model)
+    if classification is not None:
+        class_name, _confidence = classification
+        return not _is_ok_class(class_name)
 
     obb = getattr(result, "obb", None)
     if obb is not None and _has_confidence_above(getattr(obb, "conf", None), confidence_threshold):
@@ -307,6 +346,19 @@ def _result_image_size(result):
     return int(shape[1]), int(shape[0])
 
 
+def _classification_result_row(result, model, class_name, confidence):
+    image_width, image_height = _result_image_size(result)
+    return {
+        "class_name": class_name,
+        "confidence": confidence,
+        "model_name": _model_name(model) if model is not None else None,
+        "geometry_type": "classification",
+        "coordinates": None,
+        "image_width": image_width,
+        "image_height": image_height,
+    }
+
+
 def _geometry_rows(result, detection_count, use_obb):
     if use_obb:
         obb = getattr(result, "obb", None)
@@ -342,6 +394,13 @@ def extract_defect_detections(result, confidence_threshold, model=None):
     """Return report-ready metadata for detections above the threshold."""
     if result is None:
         return []
+
+    classification = _classification_prediction(result, model=model)
+    if classification is not None:
+        class_name, confidence = classification
+        if _is_ok_class(class_name):
+            return []
+        return [_classification_result_row(result, model, class_name, confidence)]
 
     obb = getattr(result, "obb", None)
     use_obb = obb is not None and getattr(obb, "conf", None) is not None
@@ -383,7 +442,7 @@ def infer_image(image_path, models_by_position, confidence, device):
     for model in models:
         results = _run_model(model, image_path, confidence, device)
         result = _prediction_result(results)
-        if has_high_confidence_detection(result, confidence):
+        if has_high_confidence_detection(result, confidence, model=model):
             if first_detection_result is None:
                 first_detection_result = result
             detections.extend(

@@ -141,6 +141,31 @@ class TestVerdictAnalysis(unittest.TestCase):
         self.assertEqual(summary["average_false_negative_rate"], 0.15)
         self.assertAlmostEqual(summary["average_false_positive_rate"], 1 / 60)
 
+    def test_overall_accuracy_is_average_of_position_accuracies(self):
+        rows = [
+            self._row("OK", "OK", "NOK", "OK", "NOK"),
+            self._row("NOK", "NOK", "NOK", "OK", "NOK"),
+        ]
+
+        summary = calculate_average_error_rates(rows, positions=4)
+
+        self.assertEqual(summary["per_position"][1]["accuracy"], 1.0)
+        self.assertEqual(summary["per_position"][1]["correct"], 2)
+        self.assertEqual(summary["per_position"][2]["accuracy"], 0.5)
+        self.assertEqual(summary["per_position"][3]["accuracy"], 0.5)
+        self.assertEqual(summary["per_position"][4]["accuracy"], 0.5)
+        self.assertEqual(summary["overall_accuracy"], 0.625)
+
+    def test_overall_accuracy_ignores_positions_without_scored_parts(self):
+        summary = calculate_average_error_rates(
+            [self._row("OK", "OK")],
+            positions=4,
+        )
+
+        self.assertEqual(summary["per_position"][1]["accuracy"], 1.0)
+        self.assertIsNone(summary["per_position"][2]["accuracy"])
+        self.assertEqual(summary["overall_accuracy"], 1.0)
+
     def test_optimizer_finds_best_pair_and_uses_higher_threshold_tiebreak(self):
         rows = [
             {

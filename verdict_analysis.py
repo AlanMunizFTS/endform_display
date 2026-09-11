@@ -161,6 +161,7 @@ def apply_confidence_thresholds(
 
 def _summarize_position_metrics(metrics):
     per_position = {}
+    position_accuracies = []
     total_actual_ok = 0
     total_actual_nok = 0
     total_evaluated = 0
@@ -170,6 +171,12 @@ def _summarize_position_metrics(metrics):
     for position, values in metrics.items():
         actual_ok = values["true_ok"] + values["false_negative"]
         actual_nok = values["true_nok"] + values["false_positive"]
+        correct = values["true_ok"] + values["true_nok"]
+        accuracy = (
+            correct / values["evaluated"] if values["evaluated"] else None
+        )
+        if accuracy is not None:
+            position_accuracies.append(accuracy)
         false_negative_rate = (
             values["false_negative"] / actual_ok if actual_ok else None
         )
@@ -185,6 +192,8 @@ def _summarize_position_metrics(metrics):
             **values,
             "actual_ok": actual_ok,
             "actual_nok": actual_nok,
+            "correct": correct,
+            "accuracy": accuracy,
             "false_negative_rate": false_negative_rate,
             "false_positive_rate": false_positive_rate,
         }
@@ -201,6 +210,11 @@ def _summarize_position_metrics(metrics):
             if total_evaluated
             else None
         ),
+        "overall_accuracy": (
+            sum(position_accuracies) / len(position_accuracies)
+            if position_accuracies
+            else None
+        ),
         "total_actual_ok": total_actual_ok,
         "total_actual_nok": total_actual_nok,
         "total_evaluated": total_evaluated,
@@ -210,7 +224,7 @@ def _summarize_position_metrics(metrics):
 
 
 def calculate_average_error_rates(rows, positions=4):
-    """Calculate global legacy FP/FN rates over all evaluable pieces."""
+    """Calculate error rates plus per-position and mean position accuracy."""
     return _summarize_position_metrics(
         calculate_position_metrics(rows, positions=positions)
     )

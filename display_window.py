@@ -107,6 +107,7 @@ class DisplayWindow:
         self._verdict_analysis_rows = []
         self._verdict_analysis_tree = None
         self._verdict_analysis_metric_vars = {}
+        self._verdict_analysis_overall_accuracy_var = None
         self._verdict_analysis_completion_var = None
         self._verdict_analysis_required_angles = ()
         self._verdict_analysis_confidence_thresholds = {}
@@ -447,7 +448,7 @@ class DisplayWindow:
             return None
 
     def _get_historic_image_report_filter_options(self):
-        """Return drawable defect/angle combinations available in model_results."""
+        """Return reportable defect/angle combinations from model_results."""
         fallback = [{"angle": "side", "class_name": "wrinkle"}]
         if not self.db:
             return fallback
@@ -466,6 +467,7 @@ class DisplayWindow:
                         LOWER(TRIM(class_name)) AS class_name
                     FROM model_results
                     WHERE coordinates IS NOT NULL
+                       OR LOWER(TRIM(COALESCE(geometry_type, ''))) = 'classification'
                 ) available_filters
                 WHERE angle IS NOT NULL
                   AND class_name IS NOT NULL
@@ -814,11 +816,19 @@ class DisplayWindow:
             summary = self.get_historic_confidence_filter_summary(batch_names)
             summary_var = self._historic_confidence_summary_var
             if summary_var is not None:
-                summary_var.set(
-                    f"Current batch detections — Visible: {summary.get('visible', 0)}    "
-                    f"Hidden: {summary.get('hidden', 0)}    "
-                    f"Total: {summary.get('total', 0)}"
-                )
+                if summary.get("available", True):
+                    summary_var.set(
+                        f"Current batch results — Passing: {summary.get('visible', 0)}    "
+                        f"Below threshold: {summary.get('hidden', 0)}    "
+                        f"Total: {summary.get('total', 0)}\n"
+                        f"Projected image result — NOK: {summary.get('projected_nok', 0)}    "
+                        f"OK: {summary.get('projected_ok', 0)}"
+                    )
+                else:
+                    summary_var.set(
+                        "Current batch results — unavailable\n"
+                        "Projected image result — unavailable"
+                    )
         except Exception as exc:
             if self._historic_confidence_summary_var is not None:
                 self._historic_confidence_summary_var.set(
@@ -869,7 +879,7 @@ class DisplayWindow:
                     )
             if not options:
                 self._set_toast_message(
-                    "No drawable model detections are available",
+                    "No model results are available for confidence filtering",
                     is_error=True,
                 )
                 return False
@@ -909,13 +919,14 @@ class DisplayWindow:
             ttk.Label(
                 outer,
                 text=(
-                    "Temporarily show or hide saved detections by defect class and angle. "
+                    "Temporarily apply thresholds by defect class and angle. The preview "
+                    "includes classification results even when there is no box to draw. "
                     "No database values are changed."
                 ),
                 wraplength=620,
             ).pack(anchor="w", pady=(2, 12))
 
-            controls = ttk.LabelFrame(outer, text="Detection threshold", padding=10)
+            controls = ttk.LabelFrame(outer, text="Model-result threshold", padding=10)
             controls.pack(fill="x")
             angle_var = tk.StringVar(master=root, value=default_angle.upper())
             class_var = tk.StringVar(master=root, value=default_class)
@@ -1097,6 +1108,7 @@ class DisplayWindow:
         self._verdict_analysis_rows = []
         self._verdict_analysis_tree = None
         self._verdict_analysis_metric_vars = {}
+        self._verdict_analysis_overall_accuracy_var = None
         self._verdict_analysis_completion_var = None
         self._verdict_analysis_required_angles = ()
         self._verdict_analysis_confidence_thresholds = {}
@@ -1137,6 +1149,74 @@ class DisplayWindow:
         inferred = str(entry.get("inferred_result") or "").strip().upper()
         verdict = inferred if inferred in ("OK", "NOK") else "N/D"
         return f"{verdict}  |  {jsn}"
+
+    def _build_historic_inferred_column_tsv(self, position):
+        """Build one inferred-result column in a format Excel pastes into cells."""
+        position_index = int(position) - 1
+        if position_index < 0 or position_index >= 4:
+            raise ValueError("Verdict position must be between 1 and 4")
+
+        excel_values = []
+        for row in self._verdict_analysis_rows:
+            positions = list(row.get("positions") or [])
+            entry = (
+                positions[position_index]
+                if position_index < len(positions)
+                else None
+            )
+            inferred = (
+                str(entry.get("inferred_result") or "").strip().upper()
+                if isinstance(entry, dict)
+                else ""
+            )
+            excel_values.append(inferred if inferred in ("OK", "NOK") else "N/D")
+        return "\r\n".join(excel_values)
+
+    def _copy_historic_inferred_column(self, position):
+        """Copy one inferred-result position as a vertical Excel-ready column."""
+        if not self._verdict_analysis_rows:
+            self._set_toast_message("No inferred values available to copy", is_error=True)
+            return False
+
+        copied = self._copy_text_to_clipboard(
+            self._build_historic_inferred_column_tsv(position)
+        )
+        if copied:
+            self._set_toast_message(
+                f"Position {position} inferred values copied: paste into Excel",
+                is_error=False,
+            )
+        else:
+            self._set_toast_message(
+                f"Unable to copy position {position} inferred values",
+                is_error=True,
+            )
+        return copied
+
+    def _export_historic_verdict_analysis_report(self, filters=None):
+        """Export the image report using this analysis session's thresholds."""
+        filter_data = dict(filters or {})
+        payload = {
+            "endform_type": str(filter_data.get("endform_type") or "").strip(),
+            "class_name": str(filter_data.get("defect_class") or "wrinkle")
+            .strip()
+            .lower(),
+            "defect_class": str(filter_data.get("defect_class") or "wrinkle")
+            .strip()
+            .lower(),
+            "angle": str(filter_data.get("angle") or "side")
+            .strip()
+            .lower(),
+            "pieces_per_group": max(
+                1,
+                int(filter_data.get("pieces_per_group") or 4),
+            ),
+            "confidence_thresholds": dict(
+                self._verdict_analysis_confidence_thresholds
+            ),
+        }
+        self._emit_action("export_historic_image_report", **payload)
+        return payload
 
     def _set_historic_verdict_confidence_thresholds(
         self,
@@ -1185,7 +1265,6 @@ class DisplayWindow:
         from verdict_analysis import (
             apply_confidence_thresholds,
             calculate_average_error_rates,
-            calculate_position_metrics,
         )
 
         rows = self._verdict_analysis_rows
@@ -1222,9 +1301,17 @@ class DisplayWindow:
                 except Exception:
                     pass
 
-        metrics = calculate_position_metrics(rows, positions=4)
+        analysis_summary = calculate_average_error_rates(rows, positions=4)
+        metrics = analysis_summary["per_position"]
         for position, position_metrics in metrics.items():
-            for metric_key, value in position_metrics.items():
+            for metric_key in (
+                "true_ok",
+                "true_nok",
+                "false_negative",
+                "false_positive",
+                "evaluated",
+            ):
+                value = position_metrics[metric_key]
                 variable = self._verdict_analysis_metric_vars.get(
                     (position, metric_key)
                 )
@@ -1233,22 +1320,49 @@ class DisplayWindow:
                         variable.set(str(value))
                     except Exception:
                         pass
+            accuracy_var = self._verdict_analysis_metric_vars.get(
+                (position, "accuracy")
+            )
+            if accuracy_var is not None:
+                accuracy = position_metrics["accuracy"]
+                accuracy_text = (
+                    f"{accuracy:.2%} "
+                    f"({position_metrics['correct']}/{position_metrics['evaluated']})"
+                    if accuracy is not None
+                    else "N/A"
+                )
+                try:
+                    accuracy_var.set(accuracy_text)
+                except Exception:
+                    pass
+
+        overall_accuracy_var = self._verdict_analysis_overall_accuracy_var
+        if overall_accuracy_var is not None:
+            overall_accuracy = analysis_summary["overall_accuracy"]
+            overall_accuracy_text = (
+                f"Overall Accuracy (average of positions): {overall_accuracy:.2%}"
+                if overall_accuracy is not None
+                else "Overall Accuracy (average of positions): N/A"
+            )
+            try:
+                overall_accuracy_var.set(overall_accuracy_text)
+            except Exception:
+                pass
 
         threshold_summary_var = self._verdict_analysis_threshold_summary_var
         if threshold_summary_var is not None:
-            rate_summary = calculate_average_error_rates(rows, positions=4)
-            false_positive_rate = rate_summary["average_false_positive_rate"]
-            false_negative_rate = rate_summary["average_false_negative_rate"]
-            total_evaluated = rate_summary["total_evaluated"]
+            false_positive_rate = analysis_summary["average_false_positive_rate"]
+            false_negative_rate = analysis_summary["average_false_negative_rate"]
+            total_evaluated = analysis_summary["total_evaluated"]
             fp_text = (
                 f"{false_positive_rate:.2%} "
-                f"({rate_summary['total_false_positive']}/{total_evaluated})"
+                f"({analysis_summary['total_false_positive']}/{total_evaluated})"
                 if false_positive_rate is not None
                 else "N/A"
             )
             fn_text = (
                 f"{false_negative_rate:.2%} "
-                f"({rate_summary['total_false_negative']}/{total_evaluated})"
+                f"({analysis_summary['total_false_negative']}/{total_evaluated})"
                 if false_negative_rate is not None
                 else "N/A"
             )
@@ -1581,6 +1695,7 @@ class DisplayWindow:
                 ("false_negative", "False Negative"),
                 ("false_positive", "False Positive"),
                 ("evaluated", "Evaluated"),
+                ("accuracy", "Accuracy"),
             )
             ttk.Label(metrics_frame, text="Metric", font=("Segoe UI", 9, "bold")).grid(
                 row=0, column=0, padx=8, pady=3, sticky="w"
@@ -1620,6 +1735,21 @@ class DisplayWindow:
                         pady=2,
                         sticky="ew",
                     )
+
+            overall_accuracy_var = tk.StringVar(master=root)
+            self._verdict_analysis_overall_accuracy_var = overall_accuracy_var
+            ttk.Label(
+                metrics_frame,
+                textvariable=overall_accuracy_var,
+                font=("Segoe UI", 9, "bold"),
+            ).grid(
+                row=len(metric_rows) + 1,
+                column=0,
+                columnspan=5,
+                padx=8,
+                pady=(6, 2),
+                sticky="w",
+            )
 
             toolbar = ttk.Frame(outer)
             toolbar.pack(fill="x", pady=(0, 8))
@@ -1769,8 +1899,25 @@ class DisplayWindow:
                 editor.bind("<FocusOut>", lambda _event: finish(True))
                 editor.focus_set()
 
+            copy_columns_box = ttk.Frame(toolbar)
+            copy_columns_box.pack(side="right")
+            for position in range(1, 5):
+                ttk.Button(
+                    copy_columns_box,
+                    text=f"Copy P{position}",
+                    command=lambda position=position: self._copy_historic_inferred_column(
+                        position
+                    ),
+                ).pack(side="left", padx=(0, 4))
+            ttk.Button(
+                toolbar,
+                text="Export Excel",
+                command=lambda: self._export_historic_verdict_analysis_report(
+                    filter_data
+                ),
+            ).pack(side="right", padx=(0, 6))
             ttk.Button(toolbar, text="Paste values", command=paste_values).pack(
-                side="right"
+                side="right", padx=(0, 6)
             )
             ttk.Button(toolbar, text="Clear", command=clear_values).pack(
                 side="right", padx=(0, 6)
@@ -4312,18 +4459,21 @@ class DisplayWindow:
         font_scale = 1.0
         thickness = 2
 
-        # Place TRASH button to the left of IMPORT
+        # Place TRASH button to the left of CONFIDENCE.  Keeping it to the
+        # left of REPORT would overlap it with the confidence button.
         reset_width = 180
         sync_width = 180
         export_width = 180
         import_width = 180
         report_width = 180
+        confidence_width = 180
         x_reset = self.width - reset_width - margin_right
         x_sync = x_reset - spacing - sync_width
         x_export = x_sync - spacing - export_width
         x_import = x_export - spacing - import_width
         x_report = x_import - spacing - report_width
-        x_trash = x_report - spacing - button_width
+        x_confidence = x_report - spacing - confidence_width
+        x_trash = x_confidence - spacing - button_width
         y_trash = self.height - button_height - margin_top
 
         self.trash_button_rect = (x_trash, y_trash, button_width, button_height)
@@ -6415,6 +6565,7 @@ class DisplayWindow:
                 "source": item.get("source"),
                 "prepared_image": item.get("prepared_image"),
                 "error": item.get("error"),
+                "projected_result": item.get("projected_result"),
             }
 
         img_path = item
@@ -6425,6 +6576,7 @@ class DisplayWindow:
             "source": None,
             "prepared_image": None,
             "error": None,
+            "projected_result": None,
         }
 
     def _draw_tile_placeholder(self, canvas, x, y, size, status):
@@ -6483,7 +6635,15 @@ class DisplayWindow:
             return "NOK"
         return None
 
-    def _draw_filename_status_badge(self, canvas, x, y, size, status_text):
+    def _draw_filename_status_badge(
+        self,
+        canvas,
+        x,
+        y,
+        size,
+        status_text,
+        label_prefix="",
+    ):
         status_text = self._extract_status_from_filename(status_text) or status_text
         if status_text not in ("OK", "NOK"):
             return
@@ -6494,7 +6654,10 @@ class DisplayWindow:
         padding_x = 10
         padding_y = 7
         margin = 8
-        text_size = cv2.getTextSize(status_text, font, font_scale, thickness)[0]
+        badge_text = " ".join(
+            part for part in (str(label_prefix or "").strip(), status_text) if part
+        )
+        text_size = cv2.getTextSize(badge_text, font, font_scale, thickness)[0]
         badge_w = text_size[0] + padding_x * 2
         badge_h = text_size[1] + padding_y * 2
         badge_x1 = x + size - badge_w - margin
@@ -6507,7 +6670,7 @@ class DisplayWindow:
         cv2.rectangle(canvas, (badge_x1, badge_y1), (badge_x2, badge_y2), (0, 0, 0), 1)
         cv2.putText(
             canvas,
-            status_text,
+            badge_text,
             (badge_x1 + padding_x, badge_y2 - padding_y),
             font,
             font_scale,
@@ -6596,12 +6759,14 @@ class DisplayWindow:
                 canvas[y_draw:y_draw + size_draw, x_draw:x_draw + size_draw] = img
 
             if self.historic_mode:
+                projected_result = tile_item.get("projected_result")
                 self._draw_filename_status_badge(
                     canvas,
                     x_draw,
                     y_draw,
                     size_draw,
-                    img_filename,
+                    projected_result or img_filename,
+                    label_prefix="FILTER" if projected_result else "",
                 )
 
             # Show camera label above each image (normal + historic)

@@ -64,6 +64,24 @@ class _FakeOBBResult:
         return np.full((8, 8, 3), 255, dtype=np.uint8)
 
 
+class _FakeProbs:
+    def __init__(self, probabilities, top1=None, top1conf=None):
+        self.data = np.asarray(probabilities, dtype=np.float32)
+        self.top1 = int(np.argmax(self.data)) if top1 is None else top1
+        self.top1conf = (
+            self.data[self.top1] if top1conf is None else np.float32(top1conf)
+        )
+
+
+class _FakeClassificationResult:
+    def __init__(self, probabilities, names, orig_shape=(640, 640), **kwargs):
+        self.probs = _FakeProbs(probabilities, **kwargs)
+        self.boxes = None
+        self.obb = None
+        self.names = names
+        self.orig_shape = orig_shape
+
+
 class _RecordingCursor:
     def __init__(self, existing_results=None):
         self.calls = []
@@ -277,6 +295,70 @@ class TestInferToHistoric(unittest.TestCase):
             [detection["model_name"] for detection in inference["detections"]],
             ["wrinkle_side.pt", "scratch_side.pt"],
         )
+
+    def test_classify_non_ok_top1_is_nok_and_saved_as_classification(self):
+        model = _FakeModel(
+            _FakeClassificationResult(
+                [0.97, 0.03],
+                names={0: "Nylon_In_Form", 1: "OK"},
+                orig_shape=(480, 640),
+            )
+        )
+        model._inference_model_name = "nylon_side_cls.pt"
+
+        inference = infer_to_historic.infer_image(
+            image_path="11861_cam_side.png",
+            models_by_position={"side": [model]},
+            confidence=0.33,
+            device="cpu",
+        )
+
+        self.assertEqual(inference["status"], "NOK")
+        self.assertEqual(len(inference["detections"]), 1)
+        self.assertEqual(inference["detections"][0]["class_name"], "Nylon_In_Form")
+        self.assertAlmostEqual(inference["detections"][0]["confidence"], 0.97, places=4)
+        self.assertEqual(inference["detections"][0]["model_name"], "nylon_side_cls.pt")
+        self.assertEqual(inference["detections"][0]["geometry_type"], "classification")
+        self.assertIsNone(inference["detections"][0]["coordinates"])
+        self.assertEqual(inference["detections"][0]["image_width"], 640)
+        self.assertEqual(inference["detections"][0]["image_height"], 480)
+
+    def test_classify_ok_top1_is_ok_case_insensitively(self):
+        model = _FakeModel(
+            _FakeClassificationResult(
+                [0.02, 0.98],
+                names={0: "Nylon_In_Form", 1: "ok"},
+            )
+        )
+
+        inference = infer_to_historic.infer_image(
+            image_path="11861_cam_side.png",
+            models_by_position={"side": [model]},
+            confidence=0.33,
+            device="cpu",
+        )
+
+        self.assertEqual(inference["status"], "OK")
+        self.assertEqual(inference["detections"], [])
+
+    def test_classify_non_ok_ignores_detection_threshold(self):
+        model = _FakeModel(
+            _FakeClassificationResult(
+                [0.6, 0.4],
+                names={0: "DEFECT", 1: "OK"},
+            )
+        )
+
+        inference = infer_to_historic.infer_image(
+            image_path="11861_cam_side.png",
+            models_by_position={"side": [model]},
+            confidence=0.75,
+            device="cpu",
+        )
+
+        self.assertEqual(inference["status"], "NOK")
+        self.assertEqual(len(inference["detections"]), 1)
+        self.assertEqual(inference["detections"][0]["class_name"], "DEFECT")
 
     def test_no_detection_copies_original_to_historic_ok_only(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

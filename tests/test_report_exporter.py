@@ -209,6 +209,55 @@ class TestReportExporter(unittest.TestCase):
             "NOK",
         )
 
+    def test_export_historic_report_applies_and_prints_current_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            historic_dir = Path(tmp_dir) / "historic"
+            report_dir = Path(tmp_dir) / "reports"
+            historic_dir.mkdir()
+            image_name = "jsn-1_Cam1_Side_OK.png"
+            PilImage.new("RGB", (32, 32), (120, 120, 120)).save(
+                historic_dir / image_name
+            )
+
+            controller = MagicMock()
+            controller._load_historic_index.return_value = [[image_name]]
+            controller._get_export_historic_dir.return_value = str(historic_dir)
+            controller.get_model_overlays_for_images.return_value = {
+                image_name: [
+                    {
+                        "class_name": "wrinkle",
+                        "confidence": 0.60,
+                        "geometry_type": "bbox",
+                        "coordinates": [1, 1, 8, 8],
+                    }
+                ]
+            }
+            controller.display.db.fetch.return_value = [
+                {
+                    "img_name": image_name,
+                    "class_name": "wrinkle",
+                    "confidence": 0.60,
+                }
+            ]
+
+            output_path = export_historic_image_table_report(
+                controller,
+                output_dir=report_dir,
+                created_at=datetime.datetime(2026, 5, 14, 9, 30, 0),
+                endform_type="mush",
+                defect_class="wrinkle",
+                angle="side",
+                confidence_thresholds={"side": 0.70},
+            )
+
+            verdict_sheet = load_workbook(output_path)["Piezas con veredicto"]
+            self.assertEqual(verdict_sheet["B4"].value, "OK")
+            self.assertEqual(
+                verdict_sheet["B2"].value,
+                "mush-wrinkle | Confidence thresholds: SIDE: 0.70",
+            )
+            controller.display._draw_model_overlays.assert_not_called()
+
     def test_parse_jsn_datetime_reads_date_and_time_tokens(self):
         parsed = parse_jsn_datetime("218620514260607413863")
 

@@ -552,18 +552,45 @@ def _is_historic_report_angle_image(img_name, angle):
     return any(required_angle in filename for required_angle in required_angles)
 
 
-def _filter_historic_report_overlays(overlays_by_image, defect_class, angle):
+def _filter_historic_report_overlays(
+    overlays_by_image,
+    defect_class,
+    angle,
+    confidence_thresholds=None,
+):
     normalized_class = str(defect_class or "").strip().lower()
+    normalized_angle, required_angles = _normalize_historic_report_angle(angle)
+    from verdict_analysis import normalize_confidence_thresholds
+
+    thresholds = normalize_confidence_thresholds(
+        confidence_thresholds,
+        angles=required_angles,
+    )
     filtered = {}
     for img_name, overlays in (overlays_by_image or {}).items():
-        if not _is_historic_report_angle_image(img_name, angle):
+        if not _is_historic_report_angle_image(img_name, normalized_angle):
             continue
-        matching_overlays = [
-            overlay
-            for overlay in (overlays or [])
-            if str(overlay.get("class_name") or "").strip().lower()
-            == normalized_class
-        ]
+        image_angle = next(
+            (
+                required_angle
+                for required_angle in required_angles
+                if _is_historic_report_angle_image(img_name, required_angle)
+            ),
+            None,
+        )
+        matching_overlays = []
+        for overlay in overlays or []:
+            if (
+                str(overlay.get("class_name") or "").strip().lower()
+                != normalized_class
+            ):
+                continue
+            try:
+                confidence = round(float(overlay.get("confidence") or 0.0), 2)
+            except (TypeError, ValueError):
+                continue
+            if confidence >= thresholds.get(image_angle, 0.0):
+                matching_overlays.append(overlay)
         if matching_overlays:
             filtered[img_name] = matching_overlays
     return filtered
@@ -835,6 +862,7 @@ def export_historic_image_table_report(
     angle=DEFAULT_HISTORIC_REPORT_ANGLE,
     pieces_per_group=4,
     images_per_piece=7,
+    confidence_thresholds=None,
     progress_callback=None,
 ):
     verdict_data = build_historic_verdict_rows(
@@ -843,6 +871,7 @@ def export_historic_image_table_report(
         angle=angle,
         pieces_per_group=pieces_per_group,
         force_rescan=True,
+        confidence_thresholds=confidence_thresholds,
     )
     historic_index = verdict_data["historic_index"]
 
@@ -995,7 +1024,19 @@ def export_historic_image_table_report(
         end_row=2,
         end_column=verdict_total_cols,
     )
-    verdict_image_header = verdict_sheet.cell(row=2, column=2, value=image_header)
+    threshold_text = " / ".join(
+        f"{threshold_angle.upper()}: "
+        f"{verdict_data['confidence_thresholds'][threshold_angle]:.2f}"
+        for threshold_angle in verdict_data["required_angles"]
+    )
+    verdict_header_text = image_header
+    if confidence_thresholds is not None:
+        verdict_header_text += f" | Confidence thresholds: {threshold_text}"
+    verdict_image_header = verdict_sheet.cell(
+        row=2,
+        column=2,
+        value=verdict_header_text,
+    )
     verdict_image_header.fill = header_fill
     verdict_image_header.font = header_font
     verdict_image_header.alignment = center
@@ -1058,6 +1099,7 @@ def export_historic_image_table_report(
         ),
         defect_class,
         angle,
+        verdict_data["confidence_thresholds"],
     )
     verdict_rows = verdict_data["rows"]
 

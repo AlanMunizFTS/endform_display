@@ -174,6 +174,73 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         )
 
     @patch("display_window.get_db_connection")
+    def test_verdict_analysis_copies_one_inferred_position_as_excel_column(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display._verdict_analysis_rows = [
+            {
+                "positions": [
+                    {"inferred_result": "OK"},
+                    {"inferred_result": "nok"},
+                    {"inferred_result": None},
+                ]
+            },
+            {"positions": [{"inferred_result": "NOK"}]},
+        ]
+
+        expected = "NOK\r\nN/D"
+        self.assertEqual(
+            display._build_historic_inferred_column_tsv(2),
+            expected,
+        )
+        with patch.object(display, "_copy_text_to_clipboard", return_value=True) as copy_mock:
+            self.assertTrue(display._copy_historic_inferred_column(2))
+
+        copy_mock.assert_called_once_with(expected)
+
+    @patch("display_window.get_db_connection")
+    def test_verdict_analysis_exports_with_current_thresholds(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        action_handler = MagicMock()
+        display = DisplayWindow(
+            file_manager=MagicMock(),
+            action_handler=action_handler,
+        )
+        display._verdict_analysis_confidence_thresholds = {
+            "side": 0.56,
+            "diag": 0.43,
+        }
+
+        payload = display._export_historic_verdict_analysis_report(
+            {
+                "endform_type": "mush",
+                "defect_class": "edge",
+                "angle": "side+diag",
+                "pieces_per_group": 4,
+            }
+        )
+
+        self.assertEqual(
+            payload["confidence_thresholds"],
+            {"side": 0.56, "diag": 0.43},
+        )
+        action_handler.assert_called_once_with(
+            "export_historic_image_report",
+            endform_type="mush",
+            class_name="edge",
+            defect_class="edge",
+            angle="side+diag",
+            pieces_per_group=4,
+            confidence_thresholds={"side": 0.56, "diag": 0.43},
+        )
+
+    @patch("display_window.get_db_connection")
     def test_closing_verdict_analysis_discards_session_values(
         self,
         mock_get_db_connection,
@@ -194,6 +261,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         self.assertEqual(display._verdict_analysis_rows, [])
         self.assertEqual(display._verdict_analysis_required_angles, ())
         self.assertEqual(display._verdict_analysis_confidence_thresholds, {})
+        self.assertIsNone(display._verdict_analysis_overall_accuracy_var)
         self.assertFalse(display._verdict_analysis_dirty)
 
     @patch("display_window.get_db_connection")
@@ -238,6 +306,46 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         self.assertFalse(display._verdict_analysis_dirty)
 
     @patch("display_window.get_db_connection")
+    def test_verdict_analysis_refreshes_position_and_overall_accuracy(
+        self,
+        mock_get_db_connection,
+    ):
+        mock_get_db_connection.return_value = MagicMock()
+        display = DisplayWindow(file_manager=MagicMock())
+        display._verdict_analysis_rows = [
+            {
+                "actual_result": "OK",
+                "positions": [
+                    {"position": 1, "jsn": "ok-1", "inferred_result": "OK"},
+                    {"position": 2, "jsn": "nok-1", "inferred_result": "NOK"},
+                ],
+            },
+            {
+                "actual_result": "NOK",
+                "positions": [
+                    {"position": 1, "jsn": "nok-2", "inferred_result": "NOK"},
+                    {"position": 2, "jsn": "nok-3", "inferred_result": "NOK"},
+                ],
+            },
+        ]
+        position_1_accuracy = MagicMock()
+        position_2_accuracy = MagicMock()
+        overall_accuracy = MagicMock()
+        display._verdict_analysis_metric_vars = {
+            (1, "accuracy"): position_1_accuracy,
+            (2, "accuracy"): position_2_accuracy,
+        }
+        display._verdict_analysis_overall_accuracy_var = overall_accuracy
+
+        display._refresh_historic_verdict_analysis()
+
+        position_1_accuracy.set.assert_called_once_with("100.00% (2/2)")
+        position_2_accuracy.set.assert_called_once_with("50.00% (1/2)")
+        overall_accuracy.set.assert_called_once_with(
+            "Overall Accuracy (average of positions): 75.00%"
+        )
+
+    @patch("display_window.get_db_connection")
     def test_image_report_dialog_without_result_does_not_emit_action(
         self,
         mock_get_db_connection,
@@ -261,6 +369,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
             {"angle": "side", "class_name": "wrinkle"},
             {"angle": "side", "class_name": "dent"},
             {"angle": "side", "class_name": "dent"},
+            {"angle": "side", "class_name": "Nylon_In_Form"},
         ]
         mock_get_db_connection.return_value = db
         display = DisplayWindow(file_manager=MagicMock())
@@ -271,6 +380,7 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
             options,
             [
                 {"angle": "side", "class_name": "dent"},
+                {"angle": "side", "class_name": "nylon_in_form"},
                 {"angle": "side", "class_name": "wrinkle"},
                 {"angle": "diag", "class_name": "wrinkle"},
                 {"angle": "side+diag", "class_name": "wrinkle"},
@@ -279,6 +389,8 @@ class TestDisplayWindowStatePackage(unittest.TestCase):
         query = db.fetch.call_args[0][0]
         self.assertIn("FROM model_results", query)
         self.assertIn("coordinates IS NOT NULL", query)
+        self.assertIn("geometry_type", query)
+        self.assertIn("classification", query)
 
     @patch("display_window.get_db_connection")
     def test_import_button_click_emits_action_with_selected_path(self, mock_get_db_connection):
