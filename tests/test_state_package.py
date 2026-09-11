@@ -565,10 +565,10 @@ class TestStatePackage(unittest.TestCase):
             self.assertEqual(manifest["raw_export_errors"], [])
             sftp.listdir_attr.assert_called_once_with("/media/ssd/raw")
 
-    def test_export_display_state_keeps_package_when_raw_download_is_partial(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
+    def test_import_display_state_does_not_require_exported_raw_files(self):
+        with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as target_tmp:
             source_db = build_source_db()
-            controller, _annotated_dir, historic_dir = build_controller(tmp_dir, source_db)
+            controller, _annotated_dir, historic_dir = build_controller(source_tmp, source_db)
             (historic_dir / "12_A_side_OK.png").write_bytes(b"historic")
             self._configure_raw_sftp(
                 controller,
@@ -576,7 +576,7 @@ class TestStatePackage(unittest.TestCase):
                 failing_names={"12_bad.raw"},
             )
 
-            result = export_display_state(controller, output_dir=tmp_dir, db_client=source_db)
+            result = export_display_state(controller, output_dir=source_tmp, db_client=source_db)
 
             self.assertTrue(result["ok"])
             self.assertFalse(result["raw"]["complete"])
@@ -591,13 +591,18 @@ class TestStatePackage(unittest.TestCase):
 
             raw_path = Path(result["package_path"]) / "raw" / "12_good.raw"
             raw_path.unlink()
-            target_controller, _a, _h = build_controller(tmp_dir, FakePackageDB())
-            with self.assertRaisesRegex(ValueError, "raw/12_good.raw"):
-                import_display_state(
-                    target_controller,
-                    result["package_path"],
-                    db_client=target_controller.display.db,
-                )
+            target_controller, _a, target_historic = build_controller(
+                target_tmp,
+                FakePackageDB(),
+            )
+            import_result = import_display_state(
+                target_controller,
+                result["package_path"],
+                db_client=target_controller.display.db,
+            )
+
+            self.assertTrue(import_result["ok"])
+            self.assertTrue((target_historic / "12_A_side_OK.png").is_file())
 
     def test_export_display_state_without_sftp_reports_raw_warning(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

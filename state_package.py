@@ -325,14 +325,16 @@ def _package_file_path(package_path, relative_path):
     return os.path.join(package_path, *relative_path.split("/"))
 
 
-def _validate_manifest_image_entries(package_path, manifest):
+def _validate_import_image_entries(package_path, manifest):
+    """Validate only image assets that the import operation consumes.
+
+    RAW files are export-only archival artifacts.  Their metadata stays in the
+    manifest for traceability, but a missing RAW file must not block restoring
+    the historic images and database state.
+    """
     expected_groups = [
         ("historic", manifest.get("historic_images"), manifest.get("historic_count")),
     ]
-    if "raw_images" in manifest or "raw_count" in manifest:
-        expected_groups.append(
-            ("raw", manifest.get("raw_images"), manifest.get("raw_count"))
-        )
     missing = []
     count_mismatches = []
 
@@ -461,7 +463,7 @@ def _load_package(package_path):
     with open(_package_file_path(package_path, "manifest.json"), "r", encoding="utf-8") as handle:
         manifest = json.load(handle)
     _validate_manifest(manifest)
-    _validate_manifest_image_entries(package_path, manifest)
+    _validate_import_image_entries(package_path, manifest)
 
     with open(_package_file_path(package_path, "db/data.json"), "r", encoding="utf-8") as handle:
         data_payload = json.load(handle)
